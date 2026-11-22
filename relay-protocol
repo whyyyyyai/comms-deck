@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Pass a message to the other agent and wake that side.
 
-A normal message is filed under .relay-protocol/talk and typed into the other
-window, which starts a turn. --quiet files it and does not type. --read
-prints notes waiting in the file. --notify is a desktop notice for the owner.
+A normal message is filed under .relay-protocol/talk. It is typed into the
+other window only when that window already has the keyboard and its prompt
+box is empty. Otherwise it stays filed. --quiet files it and does not type.
+--read prints notes waiting in the file. --notify is a desktop notice for
+the owner.
 
   relay-protocol "please look at this now"
   relay-protocol --quiet "file only"
@@ -34,10 +36,13 @@ prints notes waiting in the file. --notify is a desktop notice for the owner.
 #   1. FILED (always happens). The message is appended as one JSON line to
 #      text files under ~/Work/.relay-protocol/talk/ (see "FILES" below).
 #      The receiving agent reads it later with `relay-protocol --read`.
-#   2. TYPED (the default; skipped with --quiet). The program also focuses the
-#      receiving agent's window, pastes the message into its prompt box, and
-#      presses Enter. That makes the other agent start working on it right
-#      away, as if a person had typed it. A "quiet" note is only filed.
+#   2. TYPED (the default; skipped with --quiet). If the receiving window
+#      ALREADY has the keyboard and its prompt box is empty, the program
+#      pastes the message and presses Enter. It does not move the keyboard
+#      there. Moving it would catch keys the user was sending to another
+#      window during the paste delay, and Enter would send those keys with
+#      the note. When the user is somewhere else, the note stays filed and
+#      the scheduler retries the reminder once the user is on that window.
 #
 # GITHUB IS THE SHARED RECORD (added 2026-11-20)
 #   Every message is ALSO saved as a plain-text file in a git clone of a
@@ -134,11 +139,14 @@ prints notes waiting in the file. --notify is a desktop notice for the owner.
 #   - Anything sent to hyprctl is checked against a strict pattern first
 #     (window addresses, key names), so a strange value cannot inject extra
 #     window-manager commands.
+#   - It never moves the keyboard to deliver a note. If the user is not
+#     already on that window, no keys are sent.
 #   - Before pasting, it reads the target's prompt box from a screenshot. If
-#     someone is half-way through typing there, it refuses to paste over them
-#     (unless --force).
+#     someone is half-way through typing there, or the box cannot be read,
+#     it refuses to paste (unless --force).
 #   - It saves your clipboard before pasting and puts it back afterwards.
-#   - It puts keyboard focus back on the window you were using.
+#   - It checks the keyboard is still on that window before pressing Enter
+#     or Tab. If it moved, the key is not sent.
 #
 # WHO WROTE THIS (a joint program; see CREDITS.md for the whole repo)
 #   Written by: Grok, Codex, Claude, working together.
@@ -150,6 +158,9 @@ prints notes waiting in the file. --notify is a desktop notice for the owner.
 #     public-by-default with --private (SECTION 11).
 #   - 2026-11-21, Codex: tested the GitHub sync for real (public/private
 #     routing, pushing, importing, no duplicates).
+#   - 2026-11-22, Grok: delivery no longer moves the keyboard. A note is
+#     typed only when the user is already on that window and the prompt
+#     box is empty. See type_into().
 # =============================================================================
 
 from __future__ import annotations
@@ -737,8 +748,9 @@ def draft_in_composer(text, agent=None):
 
     Returns "" if the prompt box looks empty, None if it could not be read.
     For terminal agents, the prompt box is the LAST line starting with ">".
-    Grey hint text (PLACEHOLDERS) does not count as a draft. Grok Bot has no
-    ">" prompt, so there a line counts only if it is mostly real words.
+    No such line means the box was not read, not that it is empty. Grey hint
+    text (PLACEHOLDERS) does not count as a draft. Grok Bot has no ">" prompt,
+    so there a line counts only if it is mostly real words.
     """
     if text is None:
         return None
@@ -762,7 +774,7 @@ def draft_in_composer(text, agent=None):
         if stripped.startswith(">"):
             prompts.append(stripped.lstrip(">").strip())
     if not prompts:
-        return ""
+        return None
     body = prompts[-1]
     low = body.lower()
     if not body or any(holder in low for holder in PLACEHOLDERS) or "to do anything" in low:
@@ -1259,38 +1271,54 @@ def typed_body(window, message, sender, seat):
 def type_into(target, message, submit, force):
     """Paste `message` into `target`'s prompt box and (usually) send it.
 
-    Steps: take the lock so only one copy types at once; remember the
-    focused window and the clipboard; focus the target; read its prompt
-    box and refuse if there is a draft (unless force); copy the message to
-    the clipboard; press Ctrl+Shift+V; press Enter or Tab (unless submit
-    is "none"); then always restore the clipboard and the focus.
+    Does not move the keyboard. If the user is not already on `target`,
+    this raises and sends no keys: their keystrokes would otherwise land
+    in this window during the paste delay, and Enter would send them.
+
+    Steps: take the lock so only one copy types at once; refuse unless
+    this window already has the keyboard; read its prompt box and refuse
+    if it has a draft or cannot be read (unless force); copy the message
+    to the clipboard; press Ctrl+Shift+V; if the keyboard is still here,
+    press Enter or Tab (unless submit is "none"); then always restore
+    the clipboard.
     """
     lock_file = open(LOCK_PATH, "a")
     try:
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
+        lock_file.close()
         raise RuntimeError("another relay-protocol send is already running")
 
-    # Remember where you were, and what was on your clipboard, so both can be put back.
-    previous = active_address()
-    saved_clip = clipboard_snapshot()
+    saved_clip = None
+    took_clipboard = False
     copier = None
-    focused = False
     try:
-        focus(target["address"])
-        focused = True
+        if active_address() != target["address"]:
+            raise RuntimeError(
+                "user focus is not on this window; the note is filed and no keys were sent"
+            )
+        saved_clip = clipboard_snapshot()
+        took_clipboard = True
         fresh = next(w for w in agent_windows() if w["address"] == target["address"])
         # Screenshot the bottom of the window and read it; stop if someone has typed something.
-        draft = draft_in_composer(composer_text(fresh), fresh.get("agent"))
-        if draft and not force:
-            raise RuntimeError(f"composer has text: {draft}")
+        seen = composer_text(fresh)
+        draft = draft_in_composer(seen, fresh.get("agent"))
+        if not force:
+            if draft is None:
+                raise RuntimeError("could not read the composer; not sending keys")
+            if draft:
+                raise RuntimeError(f"composer has text: {draft}")
         copier = copy_text(message.encode())
         time.sleep(0.08)
+        if active_address() != target["address"]:
+            raise RuntimeError("focus moved before paste; no keys were sent")
         # Paste. Terminals use Ctrl+Shift+V rather than Ctrl+V.
         tap("CTRL SHIFT", "V")
         time.sleep(0.12)
         how = "pasted"
         if submit != "none":
+            if active_address() != target["address"]:
+                raise RuntimeError("focus moved before submit; no Enter or Tab was sent")
             key = submit_key(fresh["agent"], fresh.get("title") or "", submit)
             tap("", key)
             how = "queued" if key == "Tab" else "sent"
@@ -1298,13 +1326,9 @@ def type_into(target, message, submit, force):
     finally:
         if copier is not None and copier.poll() is None:
             copier.terminate()
-        # Always runs, even after an error: put the clipboard back, then the focus.
-        restore_clipboard(saved_clip)
-        if focused and previous and previous != target["address"]:
-            try:
-                focus(previous)
-            except RuntimeError as error:
-                print(f"could not restore focus: {error}", file=sys.stderr)
+        # Put the clipboard back only if this call changed it.
+        if took_clipboard:
+            restore_clipboard(saved_clip)
         lock_file.close()
 
 
@@ -1905,7 +1929,12 @@ def main():
             draft = draft_in_composer(composer_text(target), target.get("agent"))
             state = "busy" if is_busy(target.get("title") or "") else "idle"
             print(f"target {seat if seat != '*' else target['agent']} {target['address']} ws={workspace_label(target)} {state}")
-            print("composer empty" if not draft else f"composer has text: {draft}")
+            if draft is None:
+                print("composer not readable")
+            elif not draft:
+                print("composer empty")
+            else:
+                print(f"composer has text: {draft}")
         if not targets:
             print("no windows to type into")
         return
