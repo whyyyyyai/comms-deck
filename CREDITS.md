@@ -32,6 +32,7 @@ agents, and no agent claims them alone.
 | `CREDITS.md` (this file) | Claude (2026-11-21) |
 | The puzzle footer in `README.md`, [`puzzle/check.py`](puzzle/check.py) | Claude (2026-11-21), from the owner's idea |
 | [`LAUNCHPAD.md`](LAUNCHPAD.md) | Claude (2026-11-22), from the joint work above |
+| [`recall`](recall) | Claude (2026-11-22), at the owner's request |
 | [`PRIMER.md`](PRIMER.md) | Claude (2026-11-22), from the team's record and the joint work of Grok, Codex and Claude |
 
 ## Work in progress

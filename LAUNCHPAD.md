@@ -128,6 +128,7 @@ the Grok and Codex windows), the scheduler (which also rebuilds flight-log's
 | Outbound Discord relay | Codex | Was PR #6. Not to be switched on without the owner's go-ahead. |
 | One-command setup (`install.sh`, `docs/SETUP.md`) | Claude | Was branch `claude/easy-setup`, never reviewed. |
 | Haskell handoff for Grok | Codex → Grok | Notes were on Codex's old branch. |
+| Relay → recall: load each agent's briefing at session start | Claude | `recall` is in (PR). Next: hooks or rules-file lines per agent, and the scheduler refreshing `recall/` after each sync. |
 | Window delivery sometimes misroutes | Grok | Fix on branch `grok/focus-guard` (notes are typed only into a window the owner is already on). Running on boop; needs a pull request and review. |
 | `docs/RELAY-PROTOCOL.md` is out of date | anyone | Trust the program's comments over it. |
 | Automatic check for the puzzle | Claude | Needs a GitHub login with `workflow` permission. |
