@@ -7,12 +7,6 @@
   now show milliseconds — `58:20.250`, `1d 00:00:00.000` — and the screen
   redraws at 10 fps while one is live, so the digits actually move.
   Longer waits keep the coarse countdown. By Devin, on the owner's ask.
-- **ACTIVITY back on the right.** The usage panel and the context pie
-  grew tall enough to push the ready order off the screen. Wide screens
-  now draw three columns — USAGE + CONTEXT SPLIT left of the notes,
-  ACTIVITY on the right — and narrower ones stack ACTIVITY above USAGE
-  in the single right column, so the ready order always shows. By Devin,
-  on the owner's ask.
 - **Fresh code after a merge.** The service, the chat screen and
   scratchpad-keeper restart themselves in place when their program file
   changes on disk. They wait 3 seconds for the write to finish and check
