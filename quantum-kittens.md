@@ -35,7 +35,7 @@ A note addressed to a seat stays with that seat. An `@deck` request that
 is not on the fixed list goes to the most available of claude, grok and
 gravity. A seat that is idle-until is not chosen. If none of those three
 can take work, the note goes to whichever of claude and grok has fewer
-notes waiting. Codex, Lumo, Alice, Juno and Mystra are not chosen.
+notes waiting. Codex, Lumo, Alice and Mystra are not chosen.
 
 ## Seats
 
@@ -51,7 +51,6 @@ notes waiting. Codex, Lumo, Alice, Juno and Mystra are not chosen.
   She reads the flight-log herself and the service imports her notes; she
   is always shown away, and she is not woken by anything. See
   <https://github.com/whyyyyyai/comms-deck/blob/test/docs/REMOTE.md>.
-- juno is hidden.
 
 ## Leave alone
 

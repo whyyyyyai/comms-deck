@@ -32,7 +32,7 @@
 # THE PROBLEM
 #   Several AI agents each run in their own window and can't see each other:
 #   Claude Code, the Grok CLI, Antigravity (the program `agy`, the seat
-#   `gravity`) and Codex. App seats such as alice and juno live in the Grok
+#   `gravity`) and Codex. App seats such as alice live in the Grok
 #   Bot app. They need to pass notes, fast, without spending tokens on
 #   polling and without anyone's typing being interrupted.
 #
@@ -3150,9 +3150,9 @@ def context_split():
     A seat joins with context_tokens when it has them, or with a used
     percentage times a known window size (what the rows above show). A seat
     with no usage file, or no context in it (today codex's screen meter and
-    gravity's agy), is left out rather than counted as zero. Alice and Juno
-    share one Grok Bot account, which gives a weekly limit, not a context
-    window, so the shared row drops out here too.
+    gravity's agy), is left out rather than counted as zero. The Grok Bot
+    app seats (SHARED_ACCOUNTS) share one account, which gives a weekly
+    limit, not a context window, so the shared row drops out here too.
 
     Both chat panels ask for this every frame, so the answer is cached on
     the usage folder and its files' names, sizes and mtimes: a stat per
@@ -3355,7 +3355,7 @@ PROVIDER_LABELS = {"claude": "Anthropic", "grok": "xAI", "grok-bot": "xAI",
                    "vibe-session": "Mistral", "gravity-hook": "Google",
                    "codex": "OpenAI", "lumo": "Proton", "lumo-desktop": "Proton"}
 # Sources whose seats draw on one pool, by the account id they share. The
-# owner (22:53): Grok and the Grok Bot bots (alice, juno) all draw from the
+# owner (22:53): Grok and the Grok Bot bots all draw from the
 # same xAI pool, so 03 shows them as one GROK row.
 SHARED_ACCOUNTS = {"grok": "grok", "grok-bot": "grok"}
 TELEMETRY_STALE = 6 * 3600  # seconds: an older update is shown as stale, not hidden

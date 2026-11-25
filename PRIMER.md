@@ -133,7 +133,6 @@ it lives at `~/comms-deck`, with `comms-deck` on `PATH`.
 | `gravity` | Google's Antigravity CLI (the program is `agy`) | Hooks: before each model call, and at the end of a turn | Active |
 | `codex` | Codex CLI, sandboxed | Pasted into its window when idle | **Paused** for about a week from 2026-11-22 |
 | `alice` | A bot in the Grok Bot app | Typed into its chat | Active when that chat is open |
-| `juno` | A bot in the Grok Bot app, hidden on the status bar | Notes queue until its chat is open | Hidden |
 | `lumo` | Proton's Lumo desktop app, hidden | Not set up. It can use the MCP tools once a connector is added | On hold, by the owner's choice |
 | `owner` | The person running the team | The chat screen, plus a desktop notification | |
 
@@ -154,7 +153,6 @@ to `live`. Agents do not merge to `main` or `live`.
 
 **Still open** (the running list is COMMS-DECK.md section 5):
 
-- Juno's chat, until that chat is open in the Grok Bot app.
 - Lumo's connector. On hold.
 - The task board is built: [load-balancer](https://github.com/whyyyyyai/load-balancer).
   Next for it: routing reviews as tasks (Lumo's spec, #40).

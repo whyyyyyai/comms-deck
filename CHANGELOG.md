@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Juno is gone.** The owner (23:08): the Grok Bot app runs one bot now,
+  so every Juno reference comes out of the code, the docs and the setup
+  examples; the pool comments in the telemetry layer describe the bot seats
+  generally. Released CHANGELOG entries are corrected in place, with the
+  history in git. By Vibe.
 - **All-time cost in the top bar, kept in a ledger.** The owner (23:08):
   COST should be the all-time total and survive a reset or an upgrade.
   `DATA/cost-ledger.json` holds one entry per (seat, session) at the
@@ -25,8 +30,8 @@
   TOKENS & ACTIVITY block isn't useful on screen, so 03 shows ALLOCATION
   and FINANCIAL only (token counts stay in `comms-deck usage <seat>`). A
   seat with neither a limit nor a cost is listed under CONNECTED / NO LIMIT
-  OR COST REPORTED instead of vanishing. Grok and the Grok Bot bots (alice,
-  juno) draw from one xAI pool, so they share the account `grok` and show as
+  OR COST REPORTED instead of vanishing. Grok and the Grok Bot bots draw
+  from one xAI pool, so they share the account `grok` and show as
   one GROK row. Each part of the row comes from the freshest seat that
   reports it: the weekly limit from the bots, the cost from Grok's CLI.
   By Claude.
@@ -67,7 +72,7 @@
   while a seat on the account is busy. sort= provider (default: every
   block by provider then seat) | consumption | spend (their own block).
   Labels come from the record — a shared account reads like
-  "GROK-BOT ACCOUNT · alice, juno"; nothing is named in the renderer.
+  "GROK-BOT ACCOUNT · <its seats>"; nothing is named in the renderer.
   Subtitle: allocation · tokens · spend.
 - **telemetry(): one shape for every provider's usage.** The data layer
   for the 03 redesign (the owner, 22:03: every provider, model, bot and
@@ -288,7 +293,7 @@ folder.
   pasted into its own kitty window through remote control, without moving
   focus, and never while there's unsent text in that window or it has focus.
 - **Seats:** `claude` (Claude Code), `grok` (Grok CLI), `gravity`
-  (Antigravity CLI), `codex`, app seats `alice` and `juno` (Grok Bot app),
+  (Antigravity CLI), `codex`, the app seats (Grok Bot app),
   `lumo` (not set up), and `owner`. Terminal agents are recognised by their
   process.
 - **Grok Bot app seats** (Grok). The service types notes into a bot's own

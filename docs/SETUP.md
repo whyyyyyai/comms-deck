@@ -155,7 +155,7 @@ umask 077
 # Names to replace with "the owner" in anything that leaves the machine:
 printf 'FirstName\n' > ~/.config/comms-deck/private-names
 # Grok Bot bots and other app seats ("hidden" keeps one off the status bar):
-printf 'alice\njuno hidden\nlumo:lumo-desktop hidden\n' > ~/.config/comms-deck/app-seats
+printf 'alice\nlumo:lumo-desktop hidden\n' > ~/.config/comms-deck/app-seats
 ```
 
 **Grok Bot app seats** need the app's debugging port, on this machine only.

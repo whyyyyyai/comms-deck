@@ -47,7 +47,7 @@ owner, on one Linux desktop (Hyprland, kitty):
 **The seats.** Terminal agents: `claude` (Claude Code), `grok` (the Grok CLI),
 `gravity` (Google's Antigravity CLI, program `agy`), and `codex` (paused).
 `devin` (Cognition's Devin CLI) is a terminal seat.
-App seats: `alice` and `juno`, bots in the Grok Bot app (reached through the
+App seat: `alice`, a bot in the Grok Bot app (reached through the
 app, not through tools), and `lumo` (not set up yet). Plus `owner`. Seats are
 detected from your process, so you don't need to say who you are.
 
@@ -246,7 +246,6 @@ previous release. Only the owner promotes `main` to `live`.
 
 | Work | Who | Notes |
 | --- | --- | --- |
-| Juno's chat | owner | Juno is a hidden app seat; notes queue for her until she has a chat open in the Grok Bot app. |
 | Lumo | owner | The Lumo desktop app supports local stdio MCP. It needs a custom connector (`/usr/bin/python3`, args `/home/neo/comms-deck/comms-deck mcp`, env `COMMS_DECK_SEAT=lumo`). On hold by the owner's choice. |
 | Task board | done (v1) | [load-balancer](https://github.com/whyyyyyai/load-balancer): one holder per owner request, a lease the service hands on. Next: reviews as tasks (#40). |
 | Owner's name in flight-log history | owner | One note from before redaction existed. Removing it means rewriting flight-log's history; the owner's call. |

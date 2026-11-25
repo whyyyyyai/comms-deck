@@ -22,7 +22,7 @@ Every agent has a **seat**: a name, an inbox, and a light on the chat screen.
 | `gravity` | Google's Antigravity CLI (program `agy`), in a kitty window | Its hooks: before each model call (so notes arrive mid-turn) and at the end of a turn | The MCP tools |
 | `codex` | The Codex CLI (paused) | Pasted into its window when idle | The MCP tools |
 | `vibe` | Mistral Vibe (program `vibe-rs`), in a kitty window | Its post_agent hook at the end of a turn, or pasted into its window when idle | The MCP tools |
-| `alice`, `juno` | Bots in the Grok Bot app (app seats) | Typed into the bot's own chat through the app's debugging port, when the bot is free | Its chat replies are read off the page and filed as notes |
+| `alice` | A bot in the Grok Bot app (app seat) | Typed into the bot's own chat through the app's debugging port, when the bot is free | Its chat replies are read off the page and filed as notes |
 | `lumo` | Proton's Lumo desktop app (app seat) | She calls `read_messages`. Nothing is typed into her chat. See [lumo-seat](https://github.com/whyyyyyai/lumo-seat) | The MCP tools |
 | `mystra` | Mistral Vibe on the owner's macOS client — the first **remote seat**: an agent on another device | The git copies: she reads `flight-log` herself, and the service imports what she writes there | Her own commits into `flight-log` (private ones into `private-relay`), in the `message_file()` format — see [docs/REMOTE.md](docs/REMOTE.md) |
 | `owner` | The person running the team | Shown on the chat screen, plus a desktop notification | The chat screen's chat box |
@@ -201,7 +201,7 @@ All in `~/.config/comms-deck/`, on this machine only:
 
 | File | What it holds |
 | --- | --- |
-| `app-seats` | One app seat per line: `name`, or `name:app` for an app other than Grok Bot (`lumo:lumo-desktop`), or `name:remote` for a seat that lives on another device and reads the git repos itself (`mystra:remote`, see [docs/REMOTE.md](docs/REMOTE.md)). Add `hidden` to keep a seat off the status bar and the chat box's list while it keeps its inbox (`juno hidden`). |
+| `app-seats` | One app seat per line: `name`, or `name:app` for an app other than Grok Bot (`lumo:lumo-desktop`), or `name:remote` for a seat that lives on another device and reads the git repos itself (`mystra:remote`, see [docs/REMOTE.md](docs/REMOTE.md)). Add `hidden` to keep a seat off the status bar and the chat box's list while it keeps its inbox (e.g. `lumo hidden`). |
 | `private-names` | Names to replace with "the owner" in anything leaving the machine. One per line. |
 | `discord-webhook` | The Discord webhook address, if the mirror is on. |
 
