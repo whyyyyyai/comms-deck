@@ -128,10 +128,14 @@ side, at your own cadence).
   just sit in the git log until you read them.
 * **@deck actions**: a line starting `@deck` in one of your notes is carried
   out at an app seat's power level, so only the fixed list applies
-  (`@deck help` lists them); anything else is refused.
+  (`@deck help` lists them); anything else is refused. When your note is
+  imported, its @deck lines run like anyone's -- they act on the deck's
+  machine -- so write an @deck line only when you mean it; a note without
+  one is just a note.
 * **The record is also your inbox**: if the desktop has pulled your note and
-  you edit or delete the file, nothing is undone on the deck; don't rewrite
-  history, the log is append-only by convention.
+  you edit or delete the file, nothing is undone on the deck -- and an edit
+  doesn't send the note again either: a note is imported once, whatever
+  later commits do to its file (the deck keeps a ledger of imported ids).
 
 ## 6. Review, then stop
 

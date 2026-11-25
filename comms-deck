@@ -2455,7 +2455,9 @@ def import_remote():
     normal path (the inbox, hooks and wakes, append_log, chat screen). The
     last-seen head lives in DATA/remote-heads/, so on a first sight the old
     backlog stays the archive it is, and a note is only ever imported when
-    its own file changed.
+    its own file changed; a ledger of ids in DATA/remote-imported/ keeps a
+    re-touched message file (an edit, a rebase, a force-push on the remote)
+    from being imported a second time.
     """
     remote = [s for s, app in APP_PROCESS.items() if app == "remote"]
     if not remote:
@@ -2465,7 +2467,10 @@ def import_remote():
             continue
         marker = DATA / "remote-heads" / f"{repo.name}.json"
         try:
-            git(repo, "pull", "--rebase", "--autostash", "-q")
+            # 30 s, not git()'s 120 s default: the pull sits inside the
+            # service's sync loop, and on a GitHub-timing-out day it must
+            # not hold the loop for minutes (claude's review of #85).
+            git(repo, "pull", "--rebase", "--autostash", "-q", timeout=30)
             current = git(repo, "rev-parse", "HEAD").strip()
         except (RuntimeError, OSError, subprocess.SubprocessError) as error:
             log(f"couldn't pull {repo.name} for the remote seats (will retry): {error}")
@@ -2490,9 +2495,18 @@ def import_remote():
             record = parse_message_file(path)
             if not record or record["from"] not in remote or record["machine"] == MACHINE:
                 continue  # not a message, not from a remote seat, or the deck's own echo
+            if (DATA / "remote-imported" / f"{record['id']}.json").exists():
+                continue  # the ledger: this id was imported once, whatever the file now looks like
             if any((DATA / "delivered" / seat / f"{record['id']}.json").exists()
                    for seat in SEATS):
                 continue  # it was imported and taken once already (a crash after the inbox write)
+            # the ledger is written before the inbox, log and @deck queue: a
+            # later commit that touches the same message file (edit, rebase,
+            # force-push on the remote side) must not notify, log and wake a
+            # second time (claude's review of #85)
+            write_json(DATA / "remote-imported" / f"{record['id']}.json",
+                       {"id": record["id"], "from": record["from"], "repo": repo.name,
+                        "imported_at": now()})
             if record["to"] == "all":
                 targets = [s for s in SEATS if s not in (record["from"], "owner")]
             else:
@@ -6555,6 +6569,25 @@ def self_test():
     r = run(["fetch-remote"], "claude", extra=remote_env)
     check("a fetch with nothing new imports nothing twice",
           in_texts("grok").count("hello grok, from the Mac") == 1, r.stdout + r.stderr)
+
+    # the ledger: a later commit touching an already-imported message file
+    # (an edit on the remote, a rebase, a force-push) is not a second note
+    note_path = next((p for p in sorted((rlog / "messages").rglob("*mystra-to-grok-*"))
+                      if p.is_file() and "hello grok, from the Mac" in p.read_text()), None)
+    body_file = Path(f"{tmp}/data/log.jsonl")
+    if note_path and note_path.is_file():
+        note_path.write_text(note_path.read_text().replace("hello grok, from the Mac",
+                                                           "hello grok, from the Mac (edited on the Mac)"))
+        subprocess.run(["git", "-C", str(rlog), "add", "-A"], capture_output=True, timeout=30)
+        subprocess.run(["git", "-C", str(rlog), "-c", "user.name=remote", "-c", "user.email=remote@example",
+                        "commit", "-qm", "edit an imported note"], capture_output=True, timeout=30)
+        subprocess.run(["git", "-C", str(rlog), "push", "-q"], capture_output=True, timeout=30)
+        r = run(["fetch-remote"], "claude", extra=remote_env)
+        logs_after = body_file.read_text()
+        check("a re-touched imported note is not imported twice (the ledger)",
+              body_file.read_text().count("hello grok, from the Mac") == 1
+              and "hello grok, from the Mac (edited on the Mac)" not in logs_after
+              and (Path(f"{tmp}/data/remote-imported")).is_dir(), r.stdout + r.stderr)
 
     # sending to a remote seat: the git copy is her mailbox, no inbox on this machine
     r = run(["send", "mystra", "welcome on the roster"], "claude", extra=remote_env)
