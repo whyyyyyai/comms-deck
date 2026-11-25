@@ -2707,11 +2707,32 @@ def countdown(reset, now=None):
     return f"back in {minutes}m {seconds:02d}s"
 
 
+def metric_time(seconds):
+    """A countdown to the millisecond, metric style: '6d 19:12:07.456',
+    '1:12:05.000', '42:05.500'. The owner asked for ms on the ACTIVITY
+    cooldowns (the deck redraws fast while one is live)."""
+    ms = max(0, int(round(seconds * 1000)))
+    days, ms = divmod(ms, 86400000)
+    hours, ms = divmod(ms, 3600000)
+    minutes, ms = divmod(ms, 60000)
+    secs, ms = divmod(ms, 1000)
+    if days:
+        return f"{days}d {hours:02d}:{minutes:02d}:{secs:02d}.{ms:03d}"
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}.{ms:03d}"
+    return f"{minutes}:{secs:02d}.{ms:03d}"
+
+
 def idle_until(reset, now=None):
-    """'idle until Tue 05:08 · 6d 21h 53m': when a spent agent is back, and how long that is."""
+    """'idle until Tue 05:08 · 6d 19:12:07.456': when a spent agent is back,
+    to the millisecond while the row counts down."""
     if reset is None or reset == math.inf:
         return "idle until its limit resets"
-    return f"idle until {when(reset)} · {countdown(reset, now)[len('back in '):]}"
+    left = reset - (time.time() if now is None else now)
+    # Metric time to the ms once the row counts down live (< 1 h, when the
+    # screen redraws fast); the coarse countdown beyond that.
+    tail = metric_time(left) if left < 3600 else countdown(reset, now)[len("back in "):]
+    return f"idle until {when(reset)} · {tail}"
 
 
 # The ACTIVITY list is sorted by how available each agent is, most available
@@ -3092,6 +3113,7 @@ def activity_panel(width):
     """
     lines = ["\033[1mACTIVITY\033[0m", ""]
     activity_panel.ticking = False
+    activity_panel.fast = False  # a live ms countdown redraws at 10 fps, not 1-2 s
     rows = []
     for order, (seat, st, since) in enumerate(current_states()):
         a = availability(seat, st)
@@ -3101,8 +3123,10 @@ def activity_panel(width):
             began = idle_until(reset)
             if reset is not None and reset - time.time() < 3600:
                 activity_panel.ticking = True  # seconds are shown only in the last hour
+                activity_panel.fast = True    # ...and ms while it counts down
         elif seat in APP_SEATS and APP_PROCESS.get(seat, "grok-bot") != "grok-bot" and st != "not set up":
             activity_panel.ticking = True  # it polls rather than being woken, so show when it next looks
+            activity_panel.fast = True    # its check countdown is in metric time
             began = poll_countdown(load_seat(seat))
         else:
             began = when(since) if since else ""  # static: "03:27" today, "Fri 18:00" this week, "Nov 12 18:00" further back
@@ -3310,7 +3334,9 @@ def chat(history=200, hide_private=False):
                     changed = True
                 if not typed and not in_paste and not pending_esc and fresh_code():
                     raise FreshCode  # nothing half typed: reopen on the new code (after the finally)
-                if changed or time.time() - last_draw >= (1 if getattr(activity_panel, "ticking", False) else 2):
+                tick = getattr(activity_panel, "ticking", False)
+                if changed or time.time() - last_draw >= (0.1 if getattr(activity_panel, "fast", False)
+                                                        else 1 if tick else 2):
                     body = rows - (1 if tty else 0)  # the chat box is the last line
                     chat = shown[-body:]
                     chat = [""] * (body - len(chat)) + chat
@@ -3708,7 +3734,7 @@ def poll_left(state, now=None):
     polled = float(state.get("polled_at") or 0)
     if not polled:
         return None
-    return int(polled + float(state.get("poll_gap") or POLL_DEFAULT) - now)
+    return polled + float(state.get("poll_gap") or POLL_DEFAULT) - now
 
 
 def poll_is_late(seat, now=None):
@@ -3720,12 +3746,12 @@ def poll_is_late(seat, now=None):
 
 
 def poll_countdown(state, now=None):
-    """'next check in 0:42', or 'check late 1:05' once the expected time has passed."""
+    """'next check in 0:42.123', or 'check late 1:05.021' once the expected
+    time has passed — metric time to the millisecond, like the spent rows."""
     left = poll_left(state, now)
     if left is None:
         return "hasn't checked yet"
-    clock = lambda n: f"{n // 3600}:{n % 3600 // 60:02d}:{n % 60:02d}" if n >= 3600 else f"{n // 60}:{n % 60:02d}"
-    return f"next check in {clock(left)}" if left >= 0 else f"check late {clock(-left)}"
+    return f"next check in {metric_time(left)}" if left >= 0 else f"check late {metric_time(-left)}"
 
 
 def mcp_call(seat, name, args):
@@ -4691,6 +4717,9 @@ def self_test():
         "assert x.countdown(now + 42*60 + 5, now) == 'back in 42m 05s'",
         "assert x.countdown(float('inf'), now) == 'back: time unknown'",
         "assert x.idle_until(now + 6*86400 + 19*3600 + 12*60 + 7, now).endswith(' · 6d 19h 12m')",
+        "assert x.idle_until(now + 3500.25, now).endswith(' · 58:20.250'), 'sub-hour cooldowns count in metric time'",
+        "assert x.metric_time(6*86400 + 19*3600 + 12*60 + 7.456) == '6d 19:12:07.456'",
+        "assert x.metric_time(3723) == '1:02:03.000' and x.metric_time(42.5) == '0:42.500'",
         "assert x.idle_until(now + 6*86400, now).startswith('idle until ')",
         "assert x.idle_until(float('inf'), now) == 'idle until its limit resets'",
         "assert x.task_summary('reviewing PR #35 for the owner today please', []) == 'reviewing PR #35 for the owner …'",
@@ -4815,9 +4844,9 @@ def self_test():
         "assert '38;5;196' in x.bar(95, 10, step=0), 'a full bar reads red, not amber'",
         "x.DATA = real_data",
         "assert x.poll_countdown({}, now) == \"hasn't checked yet\"",
-        "assert x.poll_countdown({'polled_at': now - 18}, now) == 'next check in 0:42'",
-        "assert x.poll_countdown({'polled_at': now - 125, 'poll_gap': 60}, now) == 'check late 1:05'",
-        "assert x.poll_countdown({'polled_at': now - 5, 'poll_gap': 1800}, now) == 'next check in 29:55'",
+        "assert x.poll_countdown({'polled_at': now - 18}, now) == 'next check in 0:42.000'",
+        "assert x.poll_countdown({'polled_at': now - 125, 'poll_gap': 60}, now) == 'check late 1:05.000'",
+        "assert x.poll_countdown({'polled_at': now - 5, 'poll_gap': 1800}, now) == 'next check in 29:55.000'",
         "x.APP_SEATS = x.APP_SEATS + ('pollseat',); x.APP_PROCESS['pollseat'] = 'some-app'",
         "x.note_mcp_call('pollseat', 'read_messages', now)",
         "x.note_mcp_call('pollseat', 'read_messages', now + 1)",
@@ -4826,7 +4855,7 @@ def self_test():
         "assert x.load_seat('pollseat')['poll_gap'] == 299",
         "x.note_mcp_call('pollseat', 'read_messages', now + 300 + 90000)",
         "assert x.load_seat('pollseat')['poll_gap'] == 86400",
-        "assert x.poll_countdown({'polled_at': now, 'poll_gap': 86400}, now) == 'next check in 24:00:00'",
+        "assert x.poll_countdown({'polled_at': now, 'poll_gap': 86400}, now) == 'next check in 1d 00:00:00.000'",
         "x.update_seat('pollseat', state='idle', polled_at=now - 125, poll_gap=60)",
         "x.write_json(x.DATA / 'inbox' / 'pollseat' / 'n1.json', {'from': 'owner', 'text': 'check in', 'quiet': False})",
         "late = x.availability('pollseat', 'idle', now)",

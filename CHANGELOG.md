@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **ACTIVITY cooldowns in metric time.** The spent "idle until" countdown
+  (under an hour) and the polling seats' "next check"/"check late" timers
+  now show milliseconds — `58:20.250`, `1d 00:00:00.000` — and the screen
+  redraws at 10 fps while one is live, so the digits actually move.
+  Longer waits keep the coarse countdown. By Devin, on the owner's ask.
 - **ACTIVITY back on the right.** The usage panel and the context pie
   grew tall enough to push the ready order off the screen. Wide screens
   now draw three columns — USAGE + CONTEXT SPLIT left of the notes,
