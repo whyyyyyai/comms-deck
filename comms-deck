@@ -3504,7 +3504,34 @@ def busy_seats(snap=None):
     return {seat for seat, d in snap["seats"].items() if d.get("state") == "busy"}
 
 
-def usage_panel(width, sort="provider"):
+# 03's sort. The owner's choice (the chat box's /sort command) lives in a
+# one-line file under DATA so it survives a restart; usage_panel reads it
+# every frame, so a switch moves the panel on the next redraw.
+USAGE_SORTS = ("provider", "consumption", "spend")
+
+
+def usage_sort():
+    """03's sort as the owner last set it with /sort (default: provider)."""
+    try:
+        mode = (DATA / "usage-sort").read_text().strip()
+    except OSError:
+        return "provider"
+    return mode if mode in USAGE_SORTS else "provider"  # a stale file never wins
+
+
+def set_sort(mode):
+    """Set 03's sort (the chat box's /sort command). Returns an error
+    string, or None once the choice is stored; the panel reads it on the
+    next redraw, so nothing has to be told."""
+    mode = (mode or "").strip().lower()
+    if mode not in USAGE_SORTS:
+        return "no sort called " + repr(mode or "(nothing)") + "; try " + " | ".join(USAGE_SORTS)
+    (DATA / "usage-sort").parent.mkdir(parents=True, exist_ok=True)
+    (DATA / "usage-sort").write_text(mode + "\n")
+    return None
+
+
+def usage_panel(width, sort=None):
     """The usage column: three blocks from telemetry_rows(), then the rest.
 
     The owner's multi-provider brief (22:03, via alice): 03 is one
@@ -3517,14 +3544,18 @@ def usage_panel(width, sort="provider"):
     telemetry at all renders CONNECTED / TELEMETRY UNAVAILABLE with its
     last update, never a misleading zero; a field nobody reported reads
     "—", and a stale row says so. `sort` orders the rows: "provider"
-    (default) orders every block by provider then seat; "consumption" and
-    "spend" order their own block only (allocation's percentages and the
-    financial figures, respectively). Allocation rows carry a compact bar,
-    shaded by severity, which shimmers only while a seat on the account
-    is busy (04:02); idle bars are still. Sets usage_panel.running for
-    the redraw clock: true while any bar has something to animate, so the
-    screen can tick fast then.
+    orders every block by provider then seat; "consumption" and "spend"
+    order their own block only (allocation's percentages and the financial
+    figures). A `sort` argument at the call site wins; the default reads
+    the owner's /sort choice (usage_sort(), the chat box). Allocation
+    rows carry a compact bar, shaded by severity, which shimmers only
+    while a seat on the account is busy (04:02); idle bars are still.
+    Sets usage_panel.running for the redraw clock: true while any bar
+    has something to animate, so the screen can tick fast then.
     """
+    sort = sort or usage_sort()
+    if sort not in USAGE_SORTS:
+        sort = "provider"  # an unknown sort at a call site never draws "by <junk>"
     inner = width - 2
     # A compact bar: name + bar + "40% · 5h · resets 22:19" must share the
     # row, so the bar stays small and the words survive even at 50 columns.
@@ -3553,6 +3584,10 @@ def usage_panel(width, sort="provider"):
     total = sum(r["spend"]["session_usd"] for r in telemetry_rows(recs)
                 if r["available"] and isinstance(r["spend"]["session_usd"], (int, float)))
     head = f"{esc}1mUSAGE{esc}0m"
+    if sort != "provider":
+        # The panel says which way it's ordered, so a /sort can't be mistaken
+        # for the deck surprising the owner.
+        head += f" {esc}2m· by {sort}{esc}0m"
     if total > 0:
         money = f"~${total:,.2f}"
         gap = max(1, inner - 5 - len(money))
@@ -4239,6 +4274,20 @@ def chat(history=200, hide_private=False):
         line = line.strip()
         if not line:
             return
+        # /sort switches 03's order without sending anyone a note: bare
+        # /sort reports the current choice, /sort <mode> sets it. Unknown
+        # words are refused loudly rather than half-applied or mailed.
+        if line.startswith("/sort"):
+            arg = line[5:].strip()
+            if not arg:
+                notice, notice_until = "03 sorts by " + usage_sort() + " — /sort " + " | ".join(USAGE_SORTS), time.time() + 6
+                return False  # keep the line, in case the owner was mid-edit
+            error = set_sort(arg)
+            if error:
+                notice, notice_until = error, time.time() + 6
+                return False
+            notice, notice_until = "03 sorts by " + usage_sort(), time.time() + 4
+            return True
         seats, error = route(line)
         if error:
             notice, notice_until = error, time.time() + 6
@@ -6808,6 +6857,14 @@ def self_test():
         "rows2 = x.telemetry_rows([dict(cu, account='shared', updated=1), dict(cu, account='shared', seat='claude', updated=3, allocation=[{'window': 'wk', 'used_pct': 90.0}])])",
         "assert len(rows2) == 1 and rows2[0]['seats'] == ['codex', 'claude'] and rows2[0]['allocation'][0]['used_pct'] == 90.0, 'the fold keeps the freshest figures'",
         "assert x.usage_panel(60, sort='bogus') == x.usage_panel(60), 'an unknown sort falls back to provider'",
+        # /sort: the chat box switches 03's order; the choice survives in DATA
+        "assert x.set_sort('consumption') is None and (pc / 'usage-sort').read_text().strip() == 'consumption', 'the choice persists in DATA'",
+        "x.write_json(pc / 'usage' / 'gravity.json', {'time': 3, 'source': 'test', 'data': {'rate_limits': {'seven_day': {'used_percentage': 77}}}})",
+        "up4_t = ' '.join(x.ANSI.sub('', l) for l in x.usage_panel(60))",
+        "assert up4_t.index('GRAVITY') < up4_t.index('CODEX') and 'by consumption' in up4_t, up4_t  # /sort moves the rows, and the head says which way",
+        "assert bool(x.set_sort('bogus')) and x.usage_sort() == 'consumption', 'an unknown mode is refused, nothing changes'",
+        "assert x.set_sort('provider') is None and x.usage_panel(60) == x.usage_panel(60, sort='provider'), 'back to provider'",
+        "x.write_json(pc / 'usage' / 'gravity.json', {'time': 1, 'source': 'test', 'data': {'context_window': {'used_percentage': 25, 'context_window_size': 131072}}})",
         "assert chr(92) not in ''.join(up2), 'the panel sends real escapes, not a printed backslash-033'",
         # A seat that reports tokens but no window (Devin's CLI) gets no 0% bar.
         "x.write_json(pc / 'usage' / 'devin.json', {'time': 1, 'source': 'test', 'data': {'context_window': {'context_tokens': 122605}}})",

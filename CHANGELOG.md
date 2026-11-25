@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **/sort: the chat box switches 03's order.** `/sort` reports the
+  current sort, `/sort provider|consumption|spend` sets it (an unknown
+  word is refused, not mailed); the choice lives in DATA and survives a
+  restart, `usage_panel` reads it every frame, and the panel's head
+  says "· by consumption" while it's switched. By Vibe.
 - **03 USAGE: three families from one telemetry record.** The renderer
   half of the 03 redesign (Vibe, against claude/telemetry's pinned shape):
   ALLOCATION (severity-shaded, tighter window, resets), TOKENS & ACTIVITY
