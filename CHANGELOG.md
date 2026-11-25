@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Telemetry records can name provider, account and models.** A usage
+  feed may now declare `data.provider`, `data.account`/`account_id` and
+  `data.models`; the seat/source labels stay the fallback, so a remote
+  app seat reads provider `unknown` instead of the transport `remote`,
+  and two accounts on one provider can stay distinct. By Devin, from the
+  03 review.
 - **03: no token block, and Grok is one pool.** The owner (22:53): the
   TOKENS & ACTIVITY block isn't useful on screen, so 03 shows ALLOCATION
   and FINANCIAL only (token counts stay in `comms-deck usage <seat>`). A
