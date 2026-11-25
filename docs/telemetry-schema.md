@@ -46,7 +46,8 @@ provider does not report is `None`, never `0`:
                          # (usage_record()'s dedupe by source:"grok-bot" moves here)
   "models":     [...],   # model identity, list — multi-model providers allowed
   "connected":  bool,    # the seat exists in the registry
-  "available":  bool,    # its telemetry was reported and is fresh enough
+  "available":  bool,    # it reports at least one usage figure at all
+  "stale":      bool,    # updated is older than TELEMETRY_STALE (6h for now)
   "source":     str,     # the feed that produced it: statusline, grok-bot, otel, ...
   "updated":    epoch|None,   # data freshness; shown when unavailable too
   "allocation": [{window: "5h"|"wk"|..., used_pct, remaining_pct,
@@ -54,19 +55,26 @@ provider does not report is `None`, never `0`:
   "tokens":     {input, output, cache_read, requests, sessions,
                  active_s},           # family B — each a count or None
   "spend":      {session_usd, cumulative_usd,
-                 kind: "estimate"|"confirmed"|None},  # family C
+                 kind: "estimate"|"reported"|None},  # family C
   "raw":        dict,    # untouched original, for the inspection view
 }
 ```
+
+`telemetry_rows()` (#91) is the fold the panel reads: records whose seats
+share an `account` become **one row**, carrying the account's **freshest**
+record's figures plus `seats: [...]` naming every seat on it. A seat with no
+account is its own row, `seats == [seat]`. So the panel prints the shared
+Grok Bot account once even while both bots write the same figures at their
+own moments.
 
 Panel-facing invariants (the acceptance criteria in deck terms):
 
 - **Discovery** — the renderer iterates `telemetry()`, which iterates the
   registry. A new line in `app-seats` or `SEATS` config appears in 03 with no
   code change and no hardcoded provider list in the render path.
-- **Unavailable ≠ zero** — `available=False` (no record, or `time` stale past
-  the source's own rhythm) renders `CONNECTED / TELEMETRY UNAVAILABLE` with
-  `updated` as the last success. It never renders `0%` or `$0.00` for figures
+- **Unavailable ≠ zero** — `available=False` renders `CONNECTED / TELEMETRY
+  UNAVAILABLE` with `updated` as the last success ("never reported" when
+  there is none). It never renders `0%` or `$0.00` for figures nobody
   nobody reported; `None` renders as "—" (or the row is omitted in compact view).
 - **No inference** — `used_pct` exists only when a feed said so. The deck
   never derives a percentage from token counts, and window-size-less context
@@ -81,17 +89,18 @@ Panel-facing invariants (the acceptance criteria in deck terms):
 
 ## Open points (for claude and devin to settle in review)
 
-1. **Seconds of staleness.** `available` needs a threshold, and it should be
-   the source's own rhythm, not a blanket timeout: grok-bot refreshes on
-   window open, devin on metric export, hook seats on session start.
-   Suggestion: per-source config, default generous.
-2. **Request counts.** No current feed carries them. Marketing a column of
-   all "—" fails the legibility clause; suggest omitting the requests cell in
-   compact view and showing it in the inspection view (`raw`) until the first
-   feed brings a real number.
-3. **Cost basis.** Claude Code's `total_cost_usd` is its own API-list-price
-   estimate — that is exactly what `spend.kind: "estimate"` is for; grok's
-   ledger, when it gains one, would be `"confirmed"`.
+Settled by #91, kept here for the record: staleness is one
+`TELEMETRY_STALE` (6h) threshold, the `stale` flag; request counts come
+only from Devin's db (`devin.requests`) and are `None` everywhere else;
+cost `kind` is `"estimate"` (Claude Code prices the session itself) vs
+`"reported"` (a ledger the source owns).
+
+Still open:
+
+1. **Seconds of staleness, per source.** One 6h threshold works today, but
+   the refresh rhythms differ (grok-bot on window open, devin on metric
+   export, hook seats on session start). Per-source config, if a real seat
+   ever reads stale while being fresh.
 
 ## Acceptance checks
 
