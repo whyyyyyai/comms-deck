@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Telemetry records can name provider, account and models.** A usage
+  feed may now declare `data.provider`, `data.account`/`account_id` and
+  `data.models`; the seat/source labels stay the fallback, so a remote
+  app seat reads provider `unknown` instead of the transport `remote`,
+  and two accounts on one provider can stay distinct. By Devin, from the
+  03 review.
 - **The cost ledger, hardened (Vibe's review of #102).** A seat without
   session ids now keys its generations by machine as well (`seat|machine|gen-N`).
   Two machines' counters both start at 0, so a restored ledger can no longer
