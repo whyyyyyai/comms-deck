@@ -182,6 +182,62 @@ pub struct WarpCore<'a> {
     /// Memory available as a percentage; the shield readout and its colour.
     pub shield_pct: f64,
     pub contacts: Vec<(String, u64)>,
+    /// The seat picked by a click: its stars stand out, the rest dim.
+    pub selected: Option<String>,
+    /// Zoomed: (seat, label) written round the edge at the seat's bearing.
+    pub ring: Vec<(String, String)>,
+}
+
+/// Where a star at (x, y, z) lands in `area`, if it does.
+pub fn project(area: Rect, x: f64, y: f64, z: f64) -> Option<(u16, u16)> {
+    let (cx, cy) = centre(area);
+    // Cells are about twice as tall as wide: halve y to keep it round.
+    let px = cx as f64 + x / z * area.width as f64 / 2.0 * 0.5;
+    let py = cy as f64 + y / z * area.height as f64 / 2.0 * 0.5;
+    if px < area.x as f64 || py < area.y as f64 {
+        return None;
+    }
+    let (px, py) = (px as u16, py as u16);
+    if px >= area.right() || py >= area.bottom() {
+        return None;
+    }
+    Some((px, py))
+}
+
+/// A contact blip's cell (not yet clipped): its seat's bearing, pushed out
+/// by the notes waiting.
+fn contact_cell(area: Rect, seat: &str, waiting: u64) -> (f64, f64) {
+    let (cx, cy) = centre(area);
+    let angle = bearing(seat);
+    let reach = 0.45 + 0.25 * (waiting.min(30) as f64 / 30.0);
+    (cx as f64 + angle.cos() * area.width as f64 / 2.0 * reach, cy as f64 + angle.sin() * area.height as f64 / 2.0 * reach)
+}
+
+fn contact_label(seat: &str, waiting: u64) -> String {
+    format!("{}{}", seat.chars().next().unwrap_or('?').to_ascii_uppercase(), waiting)
+}
+
+/// The seat under a click at (col, row) in the core's `area`: a contact
+/// blip first (it's text, so the whole label counts), then the nearest
+/// seat star within two cells (rows count double, as they're tall).
+pub fn hit(field: &Starfield, contacts: &[(String, u64)], area: Rect, col: u16, row: u16) -> Option<String> {
+    for (seat, waiting) in contacts {
+        let (px, py) = contact_cell(area, seat, *waiting);
+        let len = contact_label(seat, *waiting).len() as f64;
+        if py as u16 == row && (col as f64) >= px.floor() && (col as f64) < px.floor() + len {
+            return Some(seat.clone());
+        }
+    }
+    let mut best: Option<(f64, &str)> = None;
+    for s in &field.stars {
+        let Some(seat) = s.seat.as_deref() else { continue };
+        let Some((px, py)) = project(area, s.x, s.y, s.z) else { continue };
+        let d = (px as f64 - col as f64).powi(2) + (2.0 * (py as f64 - row as f64)).powi(2);
+        if d <= 4.0 && best.map_or(true, |(b, _)| d < b) {
+            best = Some((d, seat));
+        }
+    }
+    best.map(|(_, s)| s.to_string())
 }
 
 /// The reticle's cell: the area's exact centre (nav-deck's HUD rule).
@@ -208,18 +264,13 @@ impl Widget for WarpCore<'_> {
         let (cx, cy) = centre(area);
         let half_w = area.width as f64 / 2.0;
         let half_h = area.height as f64 / 2.0;
-        let project = |x: f64, y: f64, z: f64| -> Option<(u16, u16)> {
-            // Cells are about twice as tall as wide: halve y to keep it round.
-            let px = cx as f64 + x / z * half_w * 0.5;
-            let py = cy as f64 + y / z * half_h * 0.5;
-            if px < area.x as f64 || py < area.y as f64 {
-                return None;
-            }
-            let (px, py) = (px as u16, py as u16);
-            if px >= area.right() || py >= area.bottom() {
-                return None;
-            }
-            Some((px, py))
+        let project = |x: f64, y: f64, z: f64| project(area, x, y, z);
+        let sel = self.selected.as_deref();
+        // With a seat picked, its stars are bold and every other star dims.
+        let picked = |seat: Option<&str>, style: Style| match sel {
+            Some(p) if seat == Some(p) => style.add_modifier(Modifier::BOLD),
+            Some(_) => style.add_modifier(Modifier::DIM),
+            None => style,
         };
         // Trails are a warp readout: they only exist while the deck is hot.
         if self.warp > 5.0 {
@@ -243,16 +294,14 @@ impl Widget for WarpCore<'_> {
             if s.pace >= 1.5 {
                 style = style.add_modifier(Modifier::BOLD);
             }
-            buf[(px, py)].set_symbol(glyph).set_style(style);
+            let glyph = if sel.is_some() && s.seat.as_deref() == sel && glyph == "·" { "•" } else { glyph };
+            buf[(px, py)].set_symbol(glyph).set_style(picked(s.seat.as_deref(), style));
         }
         // Contacts keep a bearing of their own (stable per seat); more notes
         // waiting pushes the blip out on its reach.
         for (seat, waiting) in &self.contacts {
-            let angle = bearing(seat);
-            let reach = 0.45 + 0.25 * ((*waiting).min(30) as f64 / 30.0);
-            let px = cx as f64 + angle.cos() * half_w * reach;
-            let py = cy as f64 + angle.sin() * half_h * reach;
-            let label = format!("{}{}", seat.chars().next().unwrap_or('?').to_ascii_uppercase(), waiting);
+            let (px, py) = contact_cell(area, seat, *waiting);
+            let label = contact_label(seat, *waiting);
             if px < area.x as f64 || py < area.y as f64 {
                 continue;
             }
@@ -264,7 +313,24 @@ impl Widget for WarpCore<'_> {
             if *waiting >= 10 {
                 style = style.add_modifier(Modifier::BOLD);
             }
+            if sel == Some(seat.as_str()) {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
             buf.set_string(px, py, label, style);
+        }
+        // Zoomed: every seat's name round the edge, on its own bearing, so
+        // the blips and stars can be read without the side panels.
+        for (seat, label) in &self.ring {
+            let angle = bearing(seat);
+            let w = label.chars().count() as f64;
+            let px = (cx as f64 + angle.cos() * (half_w - 1.0) * 0.92 - w / 2.0)
+                .clamp(area.x as f64 + 1.0, (area.right() as f64 - w - 1.0).max(area.x as f64));
+            let py = (cy as f64 + angle.sin() * (half_h - 1.0) * 0.92).clamp(area.y as f64, area.bottom() as f64 - 2.0);
+            let mut style = Style::default().fg(seat_colour(seat));
+            if sel == Some(seat.as_str()) {
+                style = style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
+            }
+            buf.set_string(px as u16, py as u16, label, style);
         }
         // Reticle on the exact centre.
         let ret = Style::default().fg(Color::Indexed(252));
@@ -336,7 +402,7 @@ mod tests {
         let area = Rect::new(0, 0, 41, 21);
         let mut buf = Buffer::empty(area);
         let f = Starfield::new(0, 1);
-        WarpCore { field: &f, warp: 1.0, shield_pct: 100.0, contacts: vec![] }.render(area, &mut buf);
+        WarpCore { field: &f, warp: 1.0, shield_pct: 100.0, contacts: vec![], selected: None, ring: vec![] }.render(area, &mut buf);
         assert_eq!(buf[(20, 10)].symbol(), "╋");
     }
 }

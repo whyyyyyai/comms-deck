@@ -6,6 +6,8 @@ pub mod nav;
 pub mod theme;
 pub mod warp;
 
+use std::cell::Cell;
+
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -38,6 +40,12 @@ pub struct App {
     pub quit: bool,
     /// Nav's one-line prompt: 'w' (wake a seat) or 'g' (go to a workspace).
     pub prompt: Option<char>,
+    /// Nav: the warp core fills the screen (z).
+    pub zoom: bool,
+    /// Nav: the seat picked by clicking a star or contact in the warp core.
+    pub selected: Option<String>,
+    /// Where the warp core was last drawn, for mapping clicks onto it.
+    pub core_area: Cell<Rect>,
 }
 
 impl App {
@@ -57,6 +65,9 @@ impl App {
             stars,
             quit: false,
             prompt: None,
+            zoom: false,
+            selected: None,
+            core_area: Cell::new(Rect::default()),
         }
     }
 
@@ -71,6 +82,39 @@ impl App {
         let busy = self.snap.seats.iter().filter(|s| s.state == "busy").count();
         let waiting = self.snap.seats.iter().map(|s| s.waiting).sum();
         crate::navdata::warp_factor(busy, waiting, &self.snap.nav.hours, self.snap.nav.load)
+    }
+
+    /// The warp core's contact blips: seats that are busy or have notes
+    /// waiting, never a spent one.
+    pub fn contacts(&self) -> Vec<(String, u64)> {
+        self.snap
+            .seats
+            .iter()
+            .filter(|s| (s.waiting > 0 || s.shown == "busy") && s.shown != "spent")
+            .map(|s| (s.name.clone(), s.waiting))
+            .collect()
+    }
+
+    /// One line on the picked seat: state, notes waiting, its fullest meter.
+    pub fn selected_line(&self) -> Option<String> {
+        let name = self.selected.as_deref()?;
+        let seat = self.snap.seats.iter().find(|s| s.name == name)?;
+        let mut line = format!("{} · {}", display_name(name), seat.shown);
+        if seat.waiting > 0 {
+            line.push_str(&format!(" · ✉{}", seat.waiting));
+        }
+        if let Some(u) = self.snap.usage.get(name) {
+            if let Some(c) = u.context_pct {
+                line.push_str(&format!(" · ctx {c:.0}%"));
+            }
+            if let Some(w) = u.week_pct {
+                line.push_str(&format!(" · week {w:.0}%"));
+            }
+        }
+        if !seat.doing.is_empty() {
+            line.push_str(&format!(" · {}", seat.doing));
+        }
+        Some(line)
     }
 
     pub fn seat_names(&self) -> Vec<String> {
@@ -90,6 +134,8 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_strip(f, top, app);
     match app.view {
         View::Comms => comms::draw(f, body, app),
+        // Zoom is checked first, so it works in every nav layout.
+        View::Nav if app.zoom => nav::draw_zoomed(f, body, app),
         View::Nav => nav::draw(f, body, app),
     }
     draw_keys(f, bottom, app);
@@ -131,6 +177,17 @@ fn draw_keys(f: &mut Frame, area: Rect, app: &App) {
             return;
         }
     }
+    let picked = app.view == View::Nav && app.flash.is_none();
+    if let (true, Some(line)) = (picked, app.selected_line()) {
+        let name = app.selected.clone().unwrap_or_default();
+        let hint = " · click again: window · w wake · Esc";
+        let line = Line::from(vec![
+            Span::styled(format!(" ◉ {line}"), Style::default().fg(theme::seat_colour(&name))),
+            Span::styled(hint, dim()),
+        ]);
+        f.render_widget(Paragraph::new(line), area);
+        return;
+    }
     let text = match &app.flash {
         Some((msg, ok)) => Line::from(Span::styled(
             format!(" {msg}"),
@@ -142,7 +199,8 @@ fn draw_keys(f: &mut Frame, area: Rect, app: &App) {
                 View::Nav => match app.prompt {
                     Some('w') => " wake which seat? (the deck's rules apply) · Enter · Esc",
                     Some(_) => " go to which workspace? (comms, nav, mail, 3..0, or a name) · Enter · Esc",
-                    None => " w <seat> wake · g <ws> goto · c / ` / Tab comms · m mail deck · Ctrl+C quit",
+                    None if app.selected.is_some() => " click it again: its window · w wake it · Esc let go · z zoom",
+                    None => " click a star: whose · z zoom · w <seat> wake · g <ws> goto · c / ` / Tab comms · m mail · Ctrl+C quit",
                 },
             },
             dim(),

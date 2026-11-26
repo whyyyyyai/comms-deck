@@ -111,6 +111,72 @@ pub fn goto(label: &str) -> Result<String, String> {
     Ok(format!("going to {label}"))
 }
 
+/// The program or window class that holds a seat, as scratchpad-layout
+/// finds it: terminal agents by their process, app seats by class.
+fn seat_holder(seat: &str) -> Option<(&'static str, bool)> {
+    Some(match seat {
+        "claude" => ("claude", true),
+        "grok" => ("grok", true),
+        "gravity" => ("agy", true),
+        "devin" => ("devin", true),
+        "vibe" => ("vibe-rs", true),
+        "codex" => ("codex", true),
+        "lumo" => ("lumo-desktop", false),
+        "alice" => ("grok-bot", false),
+        _ => return None,
+    })
+}
+
+/// {pid: (parent, comm)} for every process.
+fn proc_tree() -> std::collections::HashMap<u32, (u32, String)> {
+    let mut tree = std::collections::HashMap::new();
+    let Ok(dir) = std::fs::read_dir("/proc") else { return tree };
+    for d in dir.flatten() {
+        let Ok(pid) = d.file_name().to_string_lossy().parse::<u32>() else { continue };
+        let (Ok(stat), Ok(comm)) = (std::fs::read_to_string(d.path().join("stat")), std::fs::read_to_string(d.path().join("comm"))) else { continue };
+        let Some(after) = stat.rsplit_once(')') else { continue };
+        let Some(ppid) = after.1.split_whitespace().nth(1).and_then(|p| p.parse().ok()) else { continue };
+        tree.insert(pid, (ppid, comm.trim().to_string()));
+    }
+    tree
+}
+
+/// Show a seat's own window (it may be on the scratchpad): Hyprland focus
+/// only, nothing is typed and nobody is woken.
+pub fn focus_seat(seat: &str) -> Result<String, String> {
+    let (holder, by_process) = seat_holder(seat).ok_or_else(|| format!("{seat} has no window here"))?;
+    let out = Command::new("hyprctl").args(["clients", "-j"]).output().map_err(|e| format!("couldn't run hyprctl: {e}"))?;
+    let clients: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).map_err(|_| "hyprctl clients unreadable".to_string())?;
+    let class = |c: &serde_json::Value| c["class"].as_str().unwrap_or("").to_string();
+    let address = if by_process {
+        let kitties: std::collections::HashMap<u32, String> = clients
+            .iter()
+            .filter(|c| class(c) == "kitty")
+            .filter_map(|c| Some((c["pid"].as_u64()? as u32, c["address"].as_str()?.to_string())))
+            .collect();
+        let tree = proc_tree();
+        tree.iter().filter(|(_, (_, name))| name == holder).find_map(|(&pid, _)| {
+            let mut p = pid;
+            while p > 1 {
+                if let Some(a) = kitties.get(&p) {
+                    return Some(a.clone());
+                }
+                p = tree.get(&p).map_or(0, |t| t.0);
+            }
+            None
+        })
+    } else {
+        clients.iter().find(|c| class(c) == holder).and_then(|c| c["address"].as_str().map(String::from))
+    };
+    let address = address.ok_or_else(|| format!("{seat}'s window isn't open"))?;
+    if !address.chars().all(|c| c.is_ascii_hexdigit() || c == 'x') {
+        return Err("odd window address".into());
+    }
+    let expr = format!("hl.dsp.focus({{ window = \"address:{address}\" }})");
+    Command::new("hyprctl").args(["dispatch", &expr]).output().map_err(|e| format!("couldn't run hyprctl: {e}"))?;
+    Ok(format!("showing {seat}'s window"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::route;
