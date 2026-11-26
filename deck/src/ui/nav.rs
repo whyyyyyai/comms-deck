@@ -89,6 +89,10 @@ fn stack(area: Rect, heights: &[u16]) -> Vec<Rect> {
 }
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
+    if app.zoom {
+        draw_core(f, area, app);
+        return;
+    }
     let (lw, cw, rw) = nav_widths(area.width);
     let [left, centre, right] =
         Layout::horizontal([Constraint::Length(lw), Constraint::Length(cw), Constraint::Length(rw)]).areas(area);
@@ -165,20 +169,35 @@ fn draw_crew_map(f: &mut Frame, area: Rect, app: &App) {
 
 fn draw_core(f: &mut Frame, area: Rect, app: &App) {
     let warp = app.warp();
-    let block = panel("04 WARP CORE · the pilot's seat").title_bottom(
+    let title = if app.zoom { "04 WARP CORE · zoomed (z back)" } else { "04 WARP CORE · the pilot's seat" };
+    let block = panel(title).title_bottom(
         Line::from(Span::styled(format!(" WARP {warp:.1} "), Style::default().fg(Color::Indexed(117)))).right_aligned(),
     );
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let contacts = app
-        .snap
-        .seats
-        .iter()
-        .filter(|s| (s.waiting > 0 || s.shown == "busy") && s.shown != "spent")
-        .map(|s| (s.name.clone(), s.waiting))
-        .collect();
+    app.core_area.set(inner);
+    let ring = if app.zoom {
+        app.snap
+            .seats
+            .iter()
+            .filter(|s| !s.hidden)
+            .map(|s| {
+                let mail = if s.waiting > 0 { format!(" ✉{}", s.waiting) } else { String::new() };
+                (s.name.clone(), format!("{} {}{}", display_name(&s.name), s.shown, mail))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     f.render_widget(
-        WarpCore { field: &app.stars, warp, shield_pct: app.snap.memory.available_pct(), contacts },
+        WarpCore {
+            field: &app.stars,
+            warp,
+            shield_pct: app.snap.memory.available_pct(),
+            contacts: app.contacts(),
+            selected: app.selected.clone(),
+            ring,
+        },
         inner,
     );
 }

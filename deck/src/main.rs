@@ -20,7 +20,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
+use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::{CrosstermBackend, TestBackend};
@@ -134,6 +134,7 @@ fn run(view: View) -> io::Result<()> {
             match event::read()? {
                 Event::Key(k) => on_key(&mut app, k, &tx),
                 Event::Mouse(m) => match m.kind {
+                    MouseEventKind::Down(MouseButton::Left) if app.view == View::Nav => on_core_click(&mut app, m.column, m.row),
                     MouseEventKind::ScrollUp => app.scroll += 3,
                     MouseEventKind::ScrollDown => app.scroll = app.scroll.saturating_sub(3),
                     _ => {}
@@ -193,6 +194,26 @@ fn on_key(app: &mut App, k: KeyEvent, tx: &mpsc::Sender<Msg>) {
     }
 }
 
+/// A click in the warp core picks the seat under it; a second click on the
+/// same seat shows its window. A click on empty space lets go.
+fn on_core_click(app: &mut App, col: u16, row: u16) {
+    let area = app.core_area.get();
+    if !area.contains(ratatui::layout::Position { x: col, y: row }) {
+        return;
+    }
+    let hit = ui::warp::hit(&app.stars, &app.contacts(), area, col, row);
+    match hit {
+        Some(seat) if app.selected.as_deref() == Some(seat.as_str()) => {
+            app.flash = Some(send::focus_seat(&seat).map_or_else(|e| (e, false), |m| (m, true)));
+        }
+        Some(seat) => {
+            app.selected = Some(seat);
+            app.flash = None;
+        }
+        None => app.selected = None,
+    }
+}
+
 /// Nav's keys: the same ones nav-deck has. Nothing here sends a note.
 fn on_nav_key(app: &mut App, k: KeyEvent) {
     if let Some(p) = app.prompt {
@@ -220,6 +241,15 @@ fn on_nav_key(app: &mut App, k: KeyEvent) {
     }
     match k.code {
         KeyCode::Char('`') | KeyCode::Char('c') => app.view = View::Comms,
+        KeyCode::Char('z') => app.zoom = !app.zoom,
+        KeyCode::Esc => {
+            app.selected = None;
+            app.flash = None;
+        }
+        KeyCode::Char('w') if app.selected.is_some() => {
+            let seat = app.selected.clone().unwrap_or_default();
+            app.flash = Some(send::wake(&seat).map_or_else(|e| (e, false), |m| (m, true)));
+        }
         KeyCode::Char('w') | KeyCode::Char('g') => {
             if let KeyCode::Char(c) = k.code {
                 app.prompt = Some(c);
@@ -350,6 +380,29 @@ fn self_test() -> bool {
     app.stars.step(0.5, 1.0);
     let small = render_text(&app, 80, 24);
     check("a small window still draws both strips", small.contains("DECK") && small.lines().count() == 24, &small);
+    // Clicks: the G3 contact picks grok, the info line says so, Esc lets go.
+    let _ = render_text(&app, 160, 48);
+    let core = app.core_area.get();
+    let cell = (core.y..core.bottom())
+        .flat_map(|y| (core.x..core.right()).map(move |x| (x, y)))
+        .find(|&(x, y)| ui::warp::hit(&app.stars, &app.contacts(), core, x, y).as_deref() == Some("grok"));
+    check("a grok star or contact can be clicked", cell.is_some(), "no grok cell in the core");
+    if let Some((x, y)) = cell {
+        on_core_click(&mut app, x, y);
+    }
+    let picked = render_text(&app, 160, 48);
+    check("a click picks the seat and the key line describes it",
+        app.selected.as_deref() == Some("grok") && picked.contains("◉ grok · ready · ✉3"), &picked);
+    app.zoom = true;
+    let zoomed = render_text(&app, 160, 48);
+    check("z zooms the warp core over the whole screen, seats round its edge",
+        zoomed.contains("zoomed") && !zoomed.contains("03 USAGE") && zoomed.contains("claude busy") && zoomed.contains("grok ready ✉3"), &zoomed);
+    let none = (core.y..core.bottom()).flat_map(|y| (core.x..core.right()).map(move |x| (x, y)))
+        .find(|&(x, y)| ui::warp::hit(&app.stars, &app.contacts(), app.core_area.get(), x, y).is_none());
+    if let Some((x, y)) = none {
+        on_core_click(&mut app, x, y);
+    }
+    check("a click on empty space lets the seat go", app.selected.is_none(), "still selected");
     let routed = send::route("@grok -claude hi", &["grok".into(), "claude".into()]);
     check("chat box routing matches comms-deck route()", routed.as_deref() == Ok("grok -claude"), &format!("{routed:?}"));
     println!("{}", if ok { "all passed" } else { "some failed" });
