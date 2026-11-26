@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""twitch-chat — tail a Twitch channel's chat into a jsonl the deck reads.
+
+    twitch-chat            run until stopped (reconnects on its own)
+    twitch-chat status     is the reader running?
+    twitch-chat stop       ask it to stop
+
+The navigation-deck's chat panel tails
+~/.local/share/comms-deck/twitch-chat.jsonl — one JSON object per line:
+{"time": <epoch>, "user": <name>, "text": <message>, "badges": "..."}.
+
+Credentials: ~/.config/comms-deck/twitch-chat.secret (chmod 600), the
+OAuth token on line 1 — needs the chat:read scope. The channel name comes
+from ~/.config/comms-deck/twitch.json {"channel": "..."} or
+~/.config/comms-deck/twitch-chat.json {"channel": "...", "nick": "..."}.
+Never the stream key: chat:read is a different token.
+
+Written by: Devin
+"""
+import json
+import os
+import re
+import signal
+import socket
+import ssl
+import sys
+import time
+from pathlib import Path
+
+HOME = Path.home()
+CONF = HOME / ".config" / "comms-deck"
+SECRET = CONF / "twitch-chat.secret"
+OUT = HOME / ".local" / "share" / "comms-deck" / "twitch-chat.jsonl"
+STATE = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "comms-deck" / "twitch-chat.pid"
+HOST, PORT = "irc.chat.twitch.tv", 6697
+MAX_BYTES = 8 << 20        # rotate the jsonl past 8 MiB, keeping the newest half
+
+PRIVMSG = re.compile(r"^@(?P<tags>[^ ]*) :(?P<user>[^! ]+)!.*? :(?P<text>.*)$")
+
+
+def setting(key, default=""):
+    """One key from twitch.json then twitch-chat.json, first hit wins."""
+    for name in ("twitch-chat.json", "twitch.json"):
+        try:
+            v = json.loads((CONF / name).read_text()).get(key)
+        except (OSError, ValueError):
+            continue
+        if v:
+            return str(v)
+    return default
+
+
+def load_token():
+    try:
+        if SECRET.stat().st_mode & 0o077:
+            print(f"twitch-chat: {SECRET} must be chmod 600", file=sys.stderr)
+            return ""
+        return SECRET.read_text().splitlines()[0].strip()
+    except (OSError, IndexError):
+        return ""
+
+
+def rotate():
+    try:
+        if OUT.stat().st_size > MAX_BYTES:
+            data = OUT.read_bytes()[-MAX_BYTES // 2:]
+            nl = data.find(b"\n")
+            OUT.write_bytes(data[nl + 1:] if 0 <= nl < len(data) - 1 else data)
+    except OSError:
+        pass
+
+
+def record(user, text, tags):
+    badges = ""
+    m = re.search(r"(?:^|;)badges=([^;]*)", tags or "")
+    if m:
+        badges = m.group(1)
+    try:
+        OUT.parent.mkdir(parents=True, exist_ok=True)
+        with open(OUT, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"time": time.time(), "user": user,
+                                "text": text, "badges": badges},
+                               ensure_ascii=False) + "\n")
+        rotate()
+    except OSError:
+        pass
+
+
+STATUS = OUT.with_suffix(".status.json")
+
+
+def set_status(state, detail=""):
+    """What the panel's stream row reads: live / connecting / auth-failed."""
+    try:
+        OUT.parent.mkdir(parents=True, exist_ok=True)
+        STATUS.write_text(json.dumps({"state": state, "detail": detail,
+                                      "time": time.time()}) + "\n")
+    except OSError:
+        pass
+
+
+AUTH_FAIL = re.compile(r"authentication failed|Improperly formatted auth", re.I)
+
+
+def pump(sock_file, channel):
+    """Read IRC lines until the socket drops. 'auth' on a bad token."""
+    for raw in sock_file:
+        line = raw.decode(errors="replace").rstrip("\r\n")
+        if not line:
+            continue
+        if line.startswith("PING"):
+            sock_file.write(b"PONG :tmi.twitch.tv\r\n")
+            sock_file.flush()
+            set_status("live", f"#{channel}")   # Twitch pings once registered
+            continue
+        if AUTH_FAIL.search(line):
+            return "auth"
+        m = PRIVMSG.match(line)
+        if m and channel and channel.lower() in line.lower():
+            record(m.group("user"), m.group("text"), m.group("tags"))
+    return "eof"
+
+
+def run():
+    ctx = ssl.create_default_context()
+    backoff = 5
+    while True:
+        # creds reload every attempt: fixing the secret revives a dead reader
+        token, channel = load_token(), setting("channel").lstrip("#")
+        nick = setting("nick", "commsdeck")
+        if not token or not channel:
+            set_status("config", "need twitch-chat.secret + channel")
+            print("twitch-chat: need twitch-chat.secret (oauth token) and "
+                  "channel in twitch.json/twitch-chat.json", file=sys.stderr)
+            return 1
+        set_status("connecting", f"#{channel}")
+        try:
+            raw = socket.create_connection((HOST, PORT), timeout=15)
+            f = ctx.wrap_socket(raw, server_hostname=HOST).makefile("rwb")
+            f.write(f"PASS oauth:{token}\r\nNICK {nick}\r\nJOIN #{channel}\r\n"
+                    .encode())
+            f.flush()
+            why = pump(f, channel)
+            if why == "auth":
+                # loud on purpose: a panel that shows nothing is worse than one
+                # that says why. Still retries — a fixed token just works.
+                set_status("auth-failed", "bad oauth token (chat:read scope?)")
+                print("twitch-chat: login authentication failed — check the "
+                      "oauth token in twitch-chat.secret", file=sys.stderr)
+            else:
+                set_status("connecting", "connection dropped, retrying")
+        except (OSError, ssl.SSLError) as e:
+            set_status("connecting", f"{type(e).__name__}: retrying")
+        time.sleep(backoff)
+        backoff = min(300, backoff * 2)
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "run"
+    if cmd == "status":
+        try:
+            pid = int(STATE.read_text().strip())
+            os.kill(pid, 0)
+            print(f"running (pid {pid})")
+        except (OSError, ValueError):
+            print("idle")
+        return 0
+    if cmd == "stop":
+        try:
+            pid = int(STATE.read_text().strip())
+            os.kill(pid, signal.SIGTERM)
+            print("stopping")
+        except (OSError, ValueError):
+            print("not running")
+        return 0
+    if cmd not in ("run", "start"):
+        print("usage: twitch-chat [run|status|stop]", file=sys.stderr)
+        return 2
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    STATE.write_text(str(os.getpid()))
+    try:
+        return run()
+    finally:
+        STATE.unlink(missing_ok=True)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
