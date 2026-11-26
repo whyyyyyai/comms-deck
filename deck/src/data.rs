@@ -35,6 +35,13 @@ pub fn now() -> f64 {
         .unwrap_or(0.0)
 }
 
+/// Does a note announce a merge? "merged #144", not "not merged #144 yet"
+/// or "will merge #144": the word "merged" with its #number, un-negated.
+fn announces_merge(text: &str) -> bool {
+    let low = text.to_lowercase();
+    low.contains("merged #") && !low.contains("not merged") && !low.contains("n't merged")
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Seat {
     pub name: String,
@@ -129,12 +136,13 @@ impl Snapshot {
     }
 
     /// The epoch of the newest jump-worthy note (one to `all`, or one
-    /// announcing a merge), or None. Only notes newer than `fresh` seconds
-    /// count, so a restart doesn't replay an old broadcast as a jump.
+    /// announcing a merge — "merged #n", but not "not merged #n"), or None.
+    /// Only notes newer than `fresh` seconds count, so a restart doesn't
+    /// replay an old broadcast as a jump.
     pub fn newest_jump_note(&self, fresh: f64) -> Option<f64> {
         self.notes
             .iter()
-            .filter(|n| n.to == "all" || n.text.to_lowercase().contains("merged #"))
+            .filter(|n| n.to == "all" || announces_merge(&n.text))
             .filter_map(|n| {
                 let t = crate::navdata::event_time(Some(&Value::String(n.time.clone())));
                 (t > 0.0 && self.time - t <= fresh).then_some(t)
