@@ -107,6 +107,10 @@ pub struct Snapshot {
     pub workspaces: BTreeMap<String, Vec<String>>,
     /// Shown when a source could not be read, so a blank panel says why.
     pub problems: Vec<String>,
+    /// What only the nav view reads (navdata.rs).
+    pub nav: crate::navdata::NavData,
+    /// The status call's own time, for NAV-TIME.
+    pub status_time: f64,
 }
 
 impl Snapshot {
@@ -127,7 +131,10 @@ pub fn load() -> Snapshot {
     let dir = data_dir();
     let mut snap = Snapshot { time: now(), ..Default::default() };
     match status_json() {
-        Ok(v) => snap.seats = parse_status(&v),
+        Ok(v) => {
+            snap.status_time = v.get("time").and_then(Value::as_f64).unwrap_or(0.0);
+            snap.seats = parse_status(&v);
+        }
         Err(e) => snap.problems.push(format!("status: {e}")),
     }
     snap.notes = tail_jsonl(&dir.join("log.jsonl"), 256 * 1024).iter().filter_map(parse_note).collect();
@@ -141,6 +148,8 @@ pub fn load() -> Snapshot {
     snap.usage = load_usage(&dir.join("usage"));
     snap.memory = read_meminfo(Path::new("/proc/meminfo"));
     snap.workspaces = hypr_workspaces();
+    let waiting = snap.seats.iter().map(|s| s.waiting).sum();
+    snap.nav = crate::navdata::load(waiting, 0.0, snap.status_time);
     snap
 }
 

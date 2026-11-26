@@ -1,6 +1,8 @@
 //! The screen: one app, two views (comms and nav), switched with a key.
 
 pub mod comms;
+pub mod crew;
+pub mod crew;
 pub mod nav;
 pub mod theme;
 pub mod warp;
@@ -35,6 +37,8 @@ pub struct App {
     pub history_at: Option<usize>,
     pub stars: Starfield,
     pub quit: bool,
+    /// Nav's one-line prompt: 'w' (wake a seat) or 'g' (go to a workspace).
+    pub prompt: Option<char>,
 }
 
 impl App {
@@ -52,6 +56,7 @@ impl App {
             history_at: None,
             stars,
             quit: false,
+            prompt: None,
         }
     }
 
@@ -60,10 +65,11 @@ impl App {
         self.snap = snap;
     }
 
-    /// Warp factor: notes and busy seats this hour, 1.0 when quiet.
+    /// Warp factor from the deck's traffic: nav-deck's warp_factor.
     pub fn warp(&self) -> f64 {
-        let busy = self.snap.seats.iter().filter(|s| s.shown == "busy").count() as f64;
-        1.0 + (self.snap.notes_last_hour() as f64 / 20.0).min(4.0) + busy * 0.5
+        let busy = self.snap.seats.iter().filter(|s| s.state == "busy").count();
+        let waiting = self.snap.seats.iter().map(|s| s.waiting).sum();
+        crate::navdata::warp_factor(busy, waiting, &self.snap.nav.hours, self.snap.nav.load)
     }
 
     pub fn seat_names(&self) -> Vec<String> {
@@ -113,6 +119,17 @@ fn draw_strip(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_keys(f: &mut Frame, area: Rect, app: &App) {
+    if app.view == View::Nav {
+        if let Some(p) = app.prompt {
+            let label = if p == 'w' { "wake" } else { "goto" };
+            let line = Line::from(vec![
+                Span::styled(format!(" {label} › "), Style::default().fg(Color::Indexed(117))),
+                Span::raw(app.input.clone()),
+            ]);
+            f.render_widget(Paragraph::new(line), area);
+            return;
+        }
+    }
     let text = match &app.flash {
         Some((msg, ok)) => Line::from(Span::styled(
             format!(" {msg}"),
@@ -121,7 +138,11 @@ fn draw_keys(f: &mut Frame, area: Rect, app: &App) {
         None => Line::from(Span::styled(
             match app.view {
                 View::Comms => " Enter send · @seat to address · PgUp/PgDn scroll · Tab nav · Ctrl+C quit",
-                View::Nav => " Tab comms · ` comms · Ctrl+C quit · nav sends nothing",
+                View::Nav => match app.prompt {
+                    Some('w') => " wake which seat? (the deck's rules apply) · Enter · Esc",
+                    Some(_) => " go to which workspace? (comms, nav, mail, 3..0, or a name) · Enter · Esc",
+                    None => " w <seat> wake · g <ws> goto · c / ` / Tab comms · m mail deck · Ctrl+C quit",
+                },
             },
             dim(),
         )),

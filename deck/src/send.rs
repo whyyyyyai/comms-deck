@@ -83,6 +83,34 @@ pub fn send(to: &str, text: &str) -> Result<String, String> {
     }
 }
 
+/// One wake attempt for a seat: `comms-deck wake`, so its rules decide
+/// (never a spent seat, never over a draft).
+pub fn wake(seat: &str) -> Result<String, String> {
+    if !seat.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err(format!("no seat called {seat}"));
+    }
+    let out = Command::new(program())
+        .args(["wake", seat])
+        .output()
+        .map_err(|e| format!("couldn't run {}: {e}", program()))?;
+    let say = String::from_utf8_lossy(if out.stdout.is_empty() { &out.stderr } else { &out.stdout }).trim().to_string();
+    if out.status.success() {
+        Ok(if say.is_empty() { format!("woke {seat}") } else { say })
+    } else {
+        Err(if say.is_empty() { format!("{seat} not woken") } else { say })
+    }
+}
+
+/// Focus a workspace by deck label or number (nav-deck's dispatch_workspace).
+pub fn goto(label: &str) -> Result<String, String> {
+    let expr = format!("hl.dsp.focus({{ workspace = {} }})", crate::navdata::goto_target(label));
+    Command::new("hyprctl")
+        .args(["dispatch", &expr])
+        .output()
+        .map_err(|e| format!("couldn't run hyprctl: {e}"))?;
+    Ok(format!("going to {label}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::route;

@@ -137,8 +137,12 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     f.set_cursor_position(Position::new(x.min(inner.right().saturating_sub(1)), inner.y));
 }
 
-fn draw_crew(f: &mut Frame, area: Rect, app: &App) {
-    let block = panel("01 CREW · 02 ACTIVITY");
+pub fn draw_crew(f: &mut Frame, area: Rect, app: &App) {
+    draw_crew_titled(f, area, app, "01 CREW · 02 ACTIVITY");
+}
+
+pub fn draw_crew_titled(f: &mut Frame, area: Rect, app: &App, title: &str) {
+    let block = panel(title);
     let inner = block.inner(area);
     f.render_widget(block, area);
     let mut lines = Vec::new();
@@ -167,7 +171,7 @@ fn draw_crew(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn draw_usage(f: &mut Frame, area: Rect, app: &App) {
+pub fn draw_usage(f: &mut Frame, area: Rect, app: &App) {
     let block = panel("03 USAGE");
     let inner = block.inner(area);
     f.render_widget(block, area);

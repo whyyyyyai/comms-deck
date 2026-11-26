@@ -10,6 +10,7 @@
 //! Written by: Claude (2026-11-26), at Y's ask.
 
 mod data;
+mod navdata;
 mod scrub;
 mod send;
 mod ui;
@@ -102,7 +103,13 @@ fn run(view: View) -> io::Result<()> {
 
     let mut app = App::new(view, data::Snapshot { time: data::now(), ..Default::default() });
     let mut last = Instant::now();
+    let mut memory_at = 0.0;
     while !app.quit {
+        let t = data::now();
+        if t - memory_at >= 5.0 && app.snap.memory.available_kb > 0 {
+            memory_at = t;
+            navdata::record_memory(app.snap.memory.available_kb * 1024, t);
+        }
         while let Ok(msg) = rx.try_recv() {
             match msg {
                 Msg::Snap(s) => app.refresh(s),
@@ -152,10 +159,7 @@ fn on_key(app: &mut App, k: KeyEvent, tx: &mpsc::Sender<Msg>) {
         KeyCode::Tab => app.view = if app.view == View::Comms { View::Nav } else { View::Comms },
         KeyCode::F(1) => app.view = View::Comms,
         KeyCode::F(2) => app.view = View::Nav,
-        _ if app.view == View::Nav => match k.code {
-            KeyCode::Char('`') | KeyCode::Char('c') => app.view = View::Comms,
-            _ => {}
-        },
+        _ if app.view == View::Nav => on_nav_key(app, k),
         KeyCode::Enter => submit(app, tx),
         KeyCode::Char(c) => {
             let at = byte_at(&app.input, app.cursor);
@@ -184,6 +188,47 @@ fn on_key(app: &mut App, k: KeyEvent, tx: &mpsc::Sender<Msg>) {
             app.input.clear();
             app.cursor = 0;
             app.scroll = 0;
+        }
+        _ => {}
+    }
+}
+
+/// Nav's keys: the same ones nav-deck has. Nothing here sends a note.
+fn on_nav_key(app: &mut App, k: KeyEvent) {
+    if let Some(p) = app.prompt {
+        match k.code {
+            KeyCode::Esc => {
+                app.prompt = None;
+                app.input.clear();
+            }
+            KeyCode::Enter => {
+                let arg = app.input.trim().to_lowercase();
+                app.prompt = None;
+                app.input.clear();
+                if arg.is_empty() {
+                    return;
+                }
+                app.flash = Some(if p == 'w' { send::wake(&arg) } else { send::goto(&arg) }.map_or_else(|e| (e, false), |m| (m, true)));
+            }
+            KeyCode::Backspace => {
+                app.input.pop();
+            }
+            KeyCode::Char(c) => app.input.push(c),
+            _ => {}
+        }
+        return;
+    }
+    match k.code {
+        KeyCode::Char('`') | KeyCode::Char('c') => app.view = View::Comms,
+        KeyCode::Char('w') | KeyCode::Char('g') => {
+            if let KeyCode::Char(c) = k.code {
+                app.prompt = Some(c);
+                app.input.clear();
+                app.flash = None;
+            }
+        }
+        KeyCode::Char('m') | KeyCode::Char('2') => {
+            app.flash = send::goto("mail").err().map(|e| (e, false));
         }
         _ => {}
     }
@@ -289,7 +334,13 @@ fn self_test() -> bool {
 
     let mut app = App::new(View::Nav, snap);
     let nav = render_text(&app, 160, 48);
-    check("nav view has the warp core and the split", nav.contains("04 WARP CORE") && nav.contains("06 CONTEXT SPLIT"), &nav);
+    for panel in ["01 CREW", "02 ACTIVITY", "03 USAGE", "04 WARP CORE", "05 EVENT TAIL", "06 WORKSPACES",
+                  "07 VITALS", "08 NAV-TIME", "09 DECK PULSE", "10 COCKPIT-CHAT"] {
+        check(&format!("nav view at 160x48 shows {panel}"), nav.contains(panel), &nav);
+    }
+    let big = render_text(&app, 209, 50);
+    check("nav at Y's 209x50 shows every panel title",
+        ["03 USAGE", "06 WORKSPACES", "07 VITALS", "10 COCKPIT", "08 NAV-TIME", "09 DECK PULSE"].iter().all(|p| big.contains(p)), &big);
     let total = app.stars.stars.len();
     let claude = app.stars.count_for("claude");
     check("stars are dealt by the context split (claude 300k : grok 100k = 3:1)",
