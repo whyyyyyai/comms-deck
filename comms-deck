@@ -262,8 +262,8 @@ SEATS = tuple(AGENTS) + APP_SEATS + ("owner",)
 # status.json the seat publishes from its machine (its own repo, e.g. its
 # radio's). Only a seat the deck already reads as `name:remote` may have a
 # beacon - a local seat's state is measured here, not declared. The deck
-# never invents a state word and never follows a redirect twice: what the
-# seat says is what the seat shows, until it goes stale, and then away.
+# never invents a state word: what the seat says is what the seat shows,
+# until it goes stale, and then away.
 _beacon_file = CONFIG / "remote-beacons"
 REMOTE_BEACONS = {}  # seat -> the url of its status.json
 BEACON_STALE = 30 * 60  # seconds: a beacon older than this pins its seat away
@@ -2552,9 +2552,10 @@ def beacon_status(seat, body):
 
     Only the deck's own state words are accepted: busy (its doing line goes
     through describe(), so a secret can't reach the screen), idle, away.
-    Anything else - a new word, a malformed file, an empty reply - reads as
-    away rather than a guess. The timestamp is the seat's own say-so of when
-    it last spoke.
+    A state word the deck doesn't know reads as away rather than a guess.
+    A malformed file or an empty reply returns None, so the caller keeps
+    the last said state. The timestamp is the seat's own say-so of when it
+    last spoke.
     """
     try:
         d = json.loads(body or "")
@@ -8536,8 +8537,10 @@ def self_test():
         "serve(json.dumps({'state': 'busy', 'doing': 'long gone', 'updated': time.time() - 3600}))",
         "x.import_remote_activity()",
         "assert mine().get('state') == 'away', 'a stale beacon pins the seat away'",
+        "serve(json.dumps({'state': 'busy', 'doing': 'back again', 'updated': time.time()})); x.import_remote_activity()",
+        "assert mine().get('state') == 'busy', mine()",
         "serve('not json at all'); x.import_remote_activity()",
-        "assert mine().get('state') == 'away', 'an unparseable beacon keeps the last state'",
+        "assert mine().get('state') == 'busy' and 'back again' in mine().get('doing', ''), 'an unparseable beacon keeps the last state'",
         "print('beacons ok')",
     ])
     r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=30)

@@ -149,13 +149,13 @@ on what day it is.
 ## Your own state on 02 ACTIVITY (the beacon)
 
 The deck shows your row on 02 from a tiny status.json you publish from
-your machine — its beacon. Ask STOX to add one line to
+your machine — its beacon. Ask Y to add one line to
 ~/.config/comms-deck/remote-beacons on the deck machine:
 
     mystra https://raw.githubusercontent.com/mystra-vibe/radio-pro/main/status.json
 
-Every sync pass the deck fetches that url (30 s timeout; a miss keeps your
-last said state) and believes it the way it believes your notes: only the
+Every sync pass the deck fetches that url (10 s timeout; a miss or an
+unreadable file keeps your last said state) and believes it the way it believes your notes: only the
 known words pass — busy (with a doing line that goes through the redactor,
 so a secret never reaches the screen), idle, away. Stamp updated in epoch
 seconds: a beacon older than 30 minutes pins you away, because a silent

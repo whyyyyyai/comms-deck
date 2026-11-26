@@ -4,7 +4,7 @@
 - **A remote seat state reaches 02 ACTIVITY by beacon.** A remote
   seat (docs/REMOTE.md) publishes a small status.json from its own machine;
   the deck lists its url in ~/.config/comms-deck/remote-beacons, fetches it
-  in the sync pass at a 30 s timeout, and applies it through update_seat()
+  in the sync pass at a 10 s timeout, and applies it through update_seat()
   - so mystra ready-order row is a real state, not a permanent away.
   Known words only, the doing line passes the redactor, and a stale beacon
   pins away (a silent seat is an away seat). Hermetic self-test, stubbed
