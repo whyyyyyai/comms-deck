@@ -59,9 +59,9 @@ GAP_OUT, GAP_IN = 22, 0        # outer margin kept; cells meet
 WORKSPACE = "special:magic"
 # Desktops are decks, named by the prefix before -deck (STOX, 2026-11-26).
 # Each is a numbered workspace carrying a name (default_name in hyprland.lua),
-# so the bar sorts them by number and shows the name: comms, navigation,
+# so the bar sorts them by number and shows the name: comms, nav,
 # mail, then 3 to 0 for the keys they sit on. Name -> workspace number:
-DESKS = {"comms": 1, "navigation": 2, "mail": 3,
+DESKS = {"comms": 1, "nav": 2, "mail": 3,
          **{str(k % 10): k + 1 for k in range(3, 11)}}   # "3" is 4 ... "0" is 11
 CHAT_WORKSPACE = "comms"       # comms-deck's own desktop, Super+`
 MINIMISED = "special:minimised"  # Grok Bot while Grok is offline; nothing toggles it

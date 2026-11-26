@@ -1,22 +1,23 @@
 #!/bin/sh
-# Open the navigation-deck in its own kitty window: fullscreen on the
-# navigation deck (workspace named "navigation", Command+1).
+# Open the nav-deck in its own kitty window: fullscreen on the nav deck
+# (workspace 2; the desk's default_name becomes "nav" once claude flips it,
+# Command+1 either way).
 # One copy per view. It reads the deck's public surfaces only; see the
-# navigation-deck docstring for what the screen shows.
-#   navigation-deck-chat        fullscreen on the navigation deck
-#   navigation-deck-chat half   tiled on the navigation deck, half the screen
+# nav-deck docstring for what the screen shows.
+#   nav-deck-chat        fullscreen on the nav deck
+#   nav-deck-chat half   tiled on the nav deck, half the screen
 # Written by: vibe (2026-11-26)
 view=${1:-full}
 case "$view" in
-    full)  class=navigation-deck;      font=13; pad=14 ;;
-    half)  class=navigation-deck-half; font=12; pad=10 ;;
-    *) echo "usage: navigation-deck-chat [full|half]" >&2; exit 2 ;;
+    full)  class=nav-deck;      font=13; pad=14 ;;
+    half)  class=nav-deck-half; font=12; pad=10 ;;
+    *) echo "usage: nav-deck-chat [full|half]" >&2; exit 2 ;;
 esac
 hyprctl clients -j | grep -q "\"class\": \"$class\"" && exit 0
 cd "$HOME" || exit 1
-kitty --class "$class" --title "navigation-deck ($view)" \
+kitty --class "$class" --title "nav-deck ($view)" \
     -o font_size=$font -o window_padding_width=$pad -o confirm_os_window_close=0 \
-    "$HOME/.local/bin/navigation-deck" &
+    "$HOME/.local/bin/nav-deck" &
 for _ in $(seq 1 40); do
     addr=$(hyprctl clients -j | python3 -c "import json,sys; print(next((c['address'] for c in json.load(sys.stdin) if c['class'] == '$class'), ''))" 2>/dev/null)
     [ -n "$addr" ] && break

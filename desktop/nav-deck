@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""navigation-deck: the flight instrument for the command deck. No AI.
+"""nav-deck: the flight instrument for the command deck. No AI.
 
 comms-deck carries the conversation; this screen carries the map. It reads
 the deck's own public surfaces — `comms-deck status --json`, the note log
@@ -30,10 +30,10 @@ It was born the same morning as this line in the kernel's OOM dump:
 so VITALS watches memory above everything else and keeps a short history
 in ~/.local/share/comms-deck/navigation/ (one small file per day).
 
-    navigation-deck              live view (redraws about once a second)
-    navigation-deck --once       one frame to stdout and exit
-    navigation-deck --once --plain   no colours (for pipes and tests)
-    navigation-deck --self-test  render a fake home tree; assert; touch nothing real
+    nav-deck              live view (redraws about once a second)
+    nav-deck --once       one frame to stdout and exit
+    nav-deck --once --plain   no colours (for pipes and tests)
+    nav-deck --self-test  render a fake home tree; assert; touch nothing real
 
 On a wide screen the deck is drawn in the comms-deck look (claude's
 framework, imported from the installed script, not copied): numbered
@@ -75,7 +75,7 @@ OWNER_NAME = os.environ.get("NAVDECK_OWNER", "STOX")
 REFRESH_S = 1.0
 # Desktops are decks: numbered workspaces with names (STOX, 2026-11-26).
 # goto takes the label on the bar; "3" is the desktop on Super+3 (workspace 4).
-DESKS = {"comms": 1, "navigation": 2, "mail": 3,
+DESKS = {"comms": 1, "nav": 2, "mail": 3,
          **{str(k % 10): k + 1 for k in range(3, 11)}}
 
 
@@ -465,7 +465,7 @@ def meters_panel(width, limits=None):
     return rows
 
 
-def workspaces_panel(clients, workspaces, width, own_class="navigation-deck"):
+def workspaces_panel(clients, workspaces, width, own_class="nav-deck"):
     rows = [panel_title("workspaces", "(hyprctl clients)", width)]
     try:
         named = sorted(workspaces, key=lambda w: w.get("id", 999))
@@ -1317,7 +1317,7 @@ def run_forever():
                 elif ch == "2":
                     dispatch_workspace("mail")
                 elif ch == "1":
-                    dispatch_workspace("navigation")
+                    dispatch_workspace("nav")
             time.sleep(0.1)
     finally:
         if saved is not None:
@@ -1353,9 +1353,9 @@ def self_test():
     clients = [
         {"class": "comms-deck-chat", "fullscreen": True, "workspace": {"id": 1, "name": "comms"}},
         {"class": "kitty", "fullscreen": False, "workspace": {"id": 2147483645, "name": "special:magic"}},
-        {"class": "navigation-deck", "fullscreen": False, "workspace": {"id": 2, "name": "navigation"}},
+        {"class": "nav-deck", "fullscreen": False, "workspace": {"id": 2, "name": "nav"}},
     ]
-    workspaces = [{"id": 1, "name": "comms"}, {"id": 2, "name": "navigation"},
+    workspaces = [{"id": 1, "name": "comms"}, {"id": 2, "name": "nav"},
                   {"id": 2147483645, "name": "special:magic"}]
     info = {"MemTotal": 8 * 1024**3, "MemAvailable": 3 * 1024**3,
             "SwapTotal": 0, "SwapFree": 0}
@@ -1391,7 +1391,7 @@ def self_test():
     assert visible_len(fit(long_line, 40)) == 40
 
     # the flight keys: deck labels fly by number (claude's DESKS, #123)
-    assert goto_target("comms") == "1" and goto_target("navigation") == "2"
+    assert goto_target("comms") == "1" and goto_target("nav") == "2"
     assert goto_target("mail") == "3" and goto_target("3") == "4" and goto_target("0") == "11"
     assert goto_target("somename") == '"name:somename"'
 
@@ -1590,7 +1590,7 @@ def self_test():
     assert parse_event_time(1700000000.0) == 1700000000.0
     assert parse_event_time("garbage") == 0.0 and parse_event_time(None) == 0.0
 
-    print("navigation-deck self-test: ok")
+    print("nav-deck self-test: ok")
 
 
 def main(argv):

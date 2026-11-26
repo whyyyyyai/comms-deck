@@ -5,7 +5,7 @@
     twitch-chat status     is the reader running?
     twitch-chat stop       ask it to stop
 
-The navigation-deck's chat panel tails
+The nav-deck's chat panel tails
 ~/.local/share/comms-deck/twitch-chat.jsonl — one JSON object per line:
 {"time": <epoch>, "user": <name>, "text": <message>, "badges": "..."}.
 

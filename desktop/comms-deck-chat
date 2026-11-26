@@ -13,6 +13,14 @@ case "$view" in
     small) class=comms-deck-chat-small; font=9;  pad=8  ;;
     *) echo "usage: comms-deck-chat [full|half|small]" >&2; exit 2 ;;
 esac
+# One launcher per view at a time. At login the scratchpad keeper and the
+# quantum-kittens launcher both start the full view in the same second; the
+# window check below can't see a window that hasn't appeared yet, so both
+# opened one and the keeper flipped fullscreen between them every second
+# (2026-11-26). The lock is held until this view's kitty closes.
+lock="${XDG_RUNTIME_DIR:-/tmp}/comms-deck-chat-$view.lock"
+exec 9>"$lock"
+flock -n 9 || exit 0
 hyprctl clients -j | grep -q "\"class\": \"$class\"" && exit 0
 cd "$HOME" || exit 1
 kitty --class "$class" --title "comms-deck chat ($view)" \

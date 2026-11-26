@@ -17,6 +17,17 @@
   seat, old notes addressed `@STOX` included. Self-test asserts both
   spellings and that `( Y )` sits in the crew panel. By vibe.
 
+- **navigation-deck is now nav-deck.** STOX renamed the deck (2026-11-26):
+  the program, launcher and kitty class become `nav-deck` / `nav-deck-chat`
+  (+ `nav-deck-half`), the desk label becomes **nav** (workspace 2 stays 2 —
+  numbered decks per #123, so waybar's key order never changes), and
+  `install()` writes the `^nav-deck$` window rule and the new default_name,
+  removing a previous install's navigation-deck links and app entry. The
+  data dir `~/.local/share/comms-deck/navigation/` keeps its name: history
+  continuity beats cosmetic consistency. Claude flips the running hyprland
+  `default_name` after this merges so the label and the config never
+  disagree. By vibe.
+
 - **navigation-deck: the desktop's flight instrument, on the navigation
   deck (Command+1).** A
   viewer born of the 02:11 OOM: the deck's ready order with note loads and

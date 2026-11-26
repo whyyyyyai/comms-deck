@@ -7033,8 +7033,12 @@ def install(yes):
         menu entries, and (for a Lua Hyprland config) the rules that put the
         chat screen fullscreen on the comms desktop and the mail screen on mail."""
         for name in ("comms-deck-chat", "comms-deck-mail", "scratchpad-layout",
-                     "navigation-deck", "navigation-deck-chat"):
+                     "nav-deck", "nav-deck-chat"):
             link(name, here / "desktop" / name)
+        # the 2026-11-26 rename: retire the navigation-deck links a previous
+        # install left behind (a stale link to a renamed file is a broken one)
+        for legacy in ("navigation-deck", "navigation-deck-chat"):
+            (bin_dir / legacy).unlink(missing_ok=True)
         apps = HOME / ".local/share/applications"
         apps.mkdir(parents=True, exist_ok=True)
         (apps / "comms-deck-chat.desktop").write_text(
@@ -7047,11 +7051,12 @@ def install(yes):
             "Comment=The owner's mailbox over Proton Mail Bridge\n"
             f"Exec={bin_dir / 'comms-deck-mail'}\nIcon=utilities-terminal\nTerminal=false\n"
             "Categories=Network;Office;\n")
-        (apps / "navigation-deck.desktop").write_text(
-            "[Desktop Entry]\nType=Application\nName=navigation-deck\n"
+        (apps / "nav-deck.desktop").write_text(
+            "[Desktop Entry]\nType=Application\nName=nav-deck\n"
             "Comment=Live dashboard of the seats, usage, workspaces and machine vitals\n"
-            f"Exec={bin_dir / 'navigation-deck-chat'}\nIcon=utilities-terminal\nTerminal=false\n"
+            f"Exec={bin_dir / 'nav-deck-chat'}\nIcon=utilities-terminal\nTerminal=false\n"
             "Categories=Utility;\n")
+        (apps / "navigation-deck.desktop").unlink(missing_ok=True)
         lua = HOME / ".config/hypr/hyprland.lua"
         if lua.exists():
             lua_now = lua.read_text()
@@ -7066,22 +7071,22 @@ def install(yes):
                             'hl.window_rule({\n    name       = "comms-deck-mail",\n'
                             '    match      = { class = "^comms-deck-mail$" },\n'
                             '    workspace  = "3 silent",\n    fullscreen = true,\n})\n')
-            if "navigation-deck" not in lua_now:
-                lua_new += ('\n-- navigation-deck: the seats, usage and workspaces dashboard, fullscreen on the navigation deck.\n'
-                            'hl.window_rule({\n    name       = "navigation-deck",\n'
-                            '    match      = { class = "^navigation-deck$" },\n'
+            if "nav-deck" not in lua_now and "navigation-deck" not in lua_now:
+                lua_new += ('\n-- nav-deck: the seats, usage and workspaces dashboard, fullscreen on the nav deck.\n'
+                            'hl.window_rule({\n    name       = "nav-deck",\n'
+                            '    match      = { class = "^nav-deck$" },\n'
                             '    workspace  = "2 silent",\n    fullscreen = true,\n})\n')
             if "default_name" not in lua_now:  # desktops are decks: numbered, with names
                 lua_new += ('\n-- Desktops are decks: numbered workspaces with names, so the bar sorts\n'
                             '-- them by number and shows the name (STOX, 2026-11-26).\n'
-                            'for i, name in ipairs({ "comms", "navigation", "mail", "3", "4", "5",\n'
+                            'for i, name in ipairs({ "comms", "nav", "mail", "3", "4", "5",\n'
                             '                        "6", "7", "8", "9", "0" }) do\n'
                             '    hl.workspace_rule({ workspace = tostring(i), default_name = name })\nend\n')
             if lua_new != lua_now:
                 lua.write_text(lua_new)
                 subprocess.run(["hyprctl", "reload"], capture_output=True)
-    step("link the chat, mail and navigation-deck launchers, add app menu entries, "
-         "and the Hyprland rules for the comms, mail and navigation decks (Lua config)", desktop)
+    step("link the chat, mail and nav-deck launchers, add app menu entries, "
+         "and the Hyprland rules for the comms, mail and nav decks (Lua config)", desktop)
 
     def antigravity():
         if not (HOME / ".local/bin/agy").exists() and not shutil.which("agy"):
