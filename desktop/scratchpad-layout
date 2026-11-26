@@ -16,7 +16,7 @@ special:minimised. When Grok is back, Grok Bot returns and Firefox goes to
 workspace 3, tiled. (The owner, 2026-11-26.)
 
 The watcher also keeps the full chat view (class comms-deck-chat)
-fullscreen on its own desktop, "deck" (Super+`): Hyprland takes a window out of fullscreen when
+fullscreen on its own desktop, "0deck" (Super+`, shown as 0): Hyprland takes a window out of fullscreen when
 another opens on its workspace, and this puts it back.
 
 Finds each window by what runs in it (the kitty holding `grok`, `claude`,
@@ -57,7 +57,7 @@ from pathlib import Path
 
 GAP_OUT, GAP_IN = 22, 0        # outer margin kept; cells meet
 WORKSPACE = "special:magic"
-CHAT_WORKSPACE = "deck"  # the full chat's own desktop, on Super+` (STOX, 2026-11-26)
+CHAT_WORKSPACE = "0deck"  # the full chat's own desktop, Super+`; waybar shows it as 0, first (STOX, 2026-11-26)
 MINIMISED = "special:minimised"  # Grok Bot while Grok is offline; nothing toggles it
 FIREFOX_HOME = "3"             # where Firefox goes when Grok comes back
 
