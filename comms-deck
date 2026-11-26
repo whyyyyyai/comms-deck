@@ -2052,9 +2052,9 @@ def watch():
 
 SEAT_COLOURS = {"claude": 208, "grok": 45, "codex": 78, "owner": 220, "push-courier": 245}
 # One symbol per state, so busy and idle differ at a glance (not by colour alone).
-STATE_MARKS = {"busy": "●", "idle": "○", "away": "·"}
+STATE_MARKS = {"busy": "●", "idle": "○", "away": "·", "spent": "●"}
 STATE_COLOURS = {"busy": 208, "idle": 78, "away": 240, "connected": 78, "not connected": 214,
-                 "chat not open": 214, "no chat yet": 240, "not set up": 240}
+                 "chat not open": 214, "no chat yet": 240, "not set up": 240, "spent": 196}
 
 
 def colour(seat):
