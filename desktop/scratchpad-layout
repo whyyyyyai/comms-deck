@@ -16,7 +16,7 @@ special:minimised. When Grok is back, Grok Bot returns and Firefox goes to
 workspace 3, tiled. (The owner, 2026-11-26.)
 
 The watcher also keeps the full chat view (class comms-deck-chat)
-fullscreen on workspace 1: Hyprland takes a window out of fullscreen when
+fullscreen on its own desktop, "deck" (Super+`): Hyprland takes a window out of fullscreen when
 another opens on its workspace, and this puts it back.
 
 Finds each window by what runs in it (the kitty holding `grok`, `claude`,
@@ -29,9 +29,9 @@ left alone, so running it again changes nothing.
     scratchpad-layout --watch   keep it arranged: at login, and whenever a
                                 window opens, closes, changes workspace or
                                 floating. Also opens the chat views (full on
-                                workspace 1) if it isn't open. The half and
+                                the deck desktop) if it isn't open. The half and
                                 small views are no longer opened here: the
-                                full view covers workspace 1 (the owner,
+                                full view had workspace 1 then (the owner,
                                 2026-11-25), and the scratchpad has no room. Run by scratchpad-keeper.service.
     scratchpad-layout --self-test
                                 check the cell maths; does not move windows.
@@ -57,6 +57,7 @@ from pathlib import Path
 
 GAP_OUT, GAP_IN = 22, 0        # outer margin kept; cells meet
 WORKSPACE = "special:magic"
+CHAT_WORKSPACE = "deck"  # the full chat's own desktop, on Super+` (STOX, 2026-11-26)
 MINIMISED = "special:minimised"  # Grok Bot while Grok is offline; nothing toggles it
 FIREFOX_HOME = "3"             # where Firefox goes when Grok comes back
 
@@ -176,7 +177,7 @@ def put_away(clients, tree):
 
 
 def keep_chat_fullscreen(clients):
-    """The full chat view stays fullscreen on workspace 1 (the owner, 2026-11-26).
+    """The full chat view stays fullscreen on its own desktop, CHAT_WORKSPACE (Super+`).
 
     Hyprland drops a fullscreen window out of fullscreen when another window
     opens on its workspace; this puts it back. action "set" does nothing to a
@@ -187,8 +188,8 @@ def keep_chat_fullscreen(clients):
         if c["class"] != "comms-deck-chat":
             continue
         addr = f'window = "address:{c["address"]}"'
-        if c["workspace"]["name"] != "1":
-            dispatch(f"hl.dsp.window.move({{ {addr}, workspace = 1, follow = false }})")
+        if c["workspace"]["name"] != CHAT_WORKSPACE:
+            dispatch(f'hl.dsp.window.move({{ {addr}, workspace = "name:{CHAT_WORKSPACE}", follow = false }})')
             changed += 1
         if c["fullscreen"] != 2:
             dispatch(f'hl.dsp.window.fullscreen({{ {addr}, action = "set" }})')
@@ -278,7 +279,7 @@ def event_socket():
 def open_chat_views():
     """Start the full chat view if it isn't open. The launcher itself skips it if it is."""
     launcher = Path(__file__).resolve().parent / "comms-deck-chat"
-    for view in ("full",):  # fullscreen on workspace 1 (the owner, 22:49); "half" sat on 1 too, under it
+    for view in ("full",):  # fullscreen on the deck desktop (Super+`); "half" stays on workspace 1
         subprocess.Popen([str(launcher), view], start_new_session=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
