@@ -486,6 +486,9 @@ fn self_test() -> bool {
     let mut merge = data::Snapshot { time: data::now(), ..Default::default() };
     merge.notes = vec![all_note(&stamp, "claude", "merged #144, thanks for the review")];
     check("a merge note is a jump trigger too", merge.newest_jump_note(120.0).is_some(), "no trigger");
+    let mut no_merge = data::Snapshot { time: data::now(), ..Default::default() };
+    no_merge.notes = vec![all_note(&stamp, "claude", "not merged #144 yet, waiting on Y")];
+    check("\"not merged #n\" is not a jump trigger", no_merge.newest_jump_note(120.0).is_none(), "fired anyway");
     let mut japp = App::new(View::Nav, data::Snapshot { time: data::now(), ..Default::default() });
     let base = japp.warp();
     japp.refresh(data::Snapshot { jump_trigger: Some(data::now()), ..Default::default() });
