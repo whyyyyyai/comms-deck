@@ -178,7 +178,7 @@ fn draw_core(f: &mut Frame, area: Rect, app: &App) {
         .map(|s| (s.name.clone(), s.waiting))
         .collect();
     f.render_widget(
-        WarpCore { field: &app.stars, warp, shield_low: app.snap.memory.available_pct() < 15.0, contacts },
+        WarpCore { field: &app.stars, warp, shield_pct: app.snap.memory.available_pct(), contacts },
         inner,
     );
 }

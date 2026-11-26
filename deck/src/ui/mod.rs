@@ -44,6 +44,7 @@ impl App {
     pub fn new(view: View, snap: Snapshot) -> Self {
         let mut stars = Starfield::new(260, 0x5eed);
         stars.set_split(&snap.context_split(), true);
+        stars.set_pace(&snap.seat_pace());
         App {
             view,
             snap,
@@ -61,6 +62,7 @@ impl App {
 
     pub fn refresh(&mut self, snap: Snapshot) {
         self.stars.set_split(&snap.context_split(), false);
+        self.stars.set_pace(&snap.seat_pace());
         self.snap = snap;
     }
 
