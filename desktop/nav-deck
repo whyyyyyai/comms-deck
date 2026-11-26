@@ -11,10 +11,11 @@ one full-screen picture:
   METERS       each seat's plan usage (5-hour, weekly, monthly, context)
   WARP CORE    the cockpit in the middle: a first-person starfield whose
                speed is the deck's own traffic (notes this hour, busy
-               seats, load), and the reticle — the sight at the vanishing
-               point — sits on the screen's centre, with seats with
-               waiting notes plotted as contacts (their first letter, at
-               a bearing of their own); WARP/SHLD readouts
+               seats, load), with each star burning in its seat's colour,
+               doled out by the context split, and the reticle — the sight
+               at the vanishing point — sits on the screen's centre, with
+               seats with waiting notes plotted as contacts (their first
+               letter, at a bearing of their own); WARP/SHLD readouts
   WORKSPACES   which windows sit on which workspace, including special:magic
   VITALS       memory left, a sparkline of the recent past, the swap warning
   DECK PULSE   notes per hour today and who carried them
@@ -54,7 +55,8 @@ On a narrow screen (under the look's 150 columns) the deck keeps the old
 plain panels, so nothing is lost on a small window.
 
 Written by: vibe (2026-11-26), inspired by comms-deck by claude.
-NAV-TIME panel by devin (2026-11-26).
+NAV-TIME panel by devin (2026-11-26). Warp-core seat colours by devin
+(2026-11-26).
 """
 import json
 import math
@@ -914,8 +916,10 @@ def dispatch_workspace(arg):
 # ------------------------------------------------------- the warp core ----
 # The cockpit: a first-person view of the deck. Stars stream past a
 # reticle at the vanishing point, and their speed is the deck's own traffic —
-# notes this hour, busy seats, load average. Seats with waiting notes plot as
-# contacts around the reticle, at a bearing of their own.
+# notes this hour, busy seats, load average. Each star burns in its seat's
+# colour, doled out by the context split (the owner's ask, 2026-11-26).
+# Seats with waiting notes plot as contacts around the reticle, at a
+# bearing of their own.
 
 STAR_SEED, STAR_COUNT = 7, 90
 STAR_GLYPHS = ("·", "*", "•")          # far, mid, near
@@ -933,12 +937,51 @@ def warp_factor(status, hours, load=0.0):
     return max(1.0, min(9.9, f))
 
 
-def star_field(width, height, warp, cx=None, cy=None):
-    """The star layer as strings: stars stream from the vanishing point.
+def star_seats(split, count=STAR_COUNT):
+    """Seat names, one per star slot, shared out by the context split.
+
+    The same largest-remainder deal as comms-deck's context pie: every
+    reporting seat gets at least one star and the rest split by tokens, so
+    a seat holding a quarter of the context pool burns a quarter of the
+    sky. [] when nobody reports a figure — the field stays plain grey.
+    """
+    if not split or count <= 0:
+        return []
+    order = sorted(split, key=lambda s: -s[1])
+    total = sum(used for _, used in order)
+    if total <= 0:
+        return []
+    if len(order) >= count:  # more reporters than stars: take turns
+        return [order[i % len(order)][0] for i in range(count)]
+    raw = [(seat, count * used / total) for seat, used in order]
+    counts = {seat: max(1, int(share)) for seat, share in raw}
+    spare = count - sum(counts.values())
+    for seat, share in sorted(raw, key=lambda r: (-(r[1] - int(r[1])), r[0])):
+        if spare <= 0:
+            break
+        counts[seat] += 1
+        spare -= 1
+    while spare < 0:  # the one-star minimum overshot: take from the biggest
+        big = max(counts, key=counts.get)
+        if counts[big] <= 1:
+            break
+        counts[big] -= 1
+        spare += 1
+    owners = [seat for seat, _ in order for _ in range(counts[seat])]
+    if len(owners) < count:
+        owners = (owners * (count // len(owners) + 1))[:count]
+    return owners[:count]
+
+
+def star_field(width, height, warp, cx=None, cy=None, cols=None):
+    """The star layer as (char, colour) cells: stars stream from the
+    vanishing point.
 
     cx/cy: where the vanishing point (the reticle) sits in the field; the
     sight steers the whole stream, so the caller aims it at the centre of
-    the screen.
+    the screen. cols: optional 256-colour code per star slot (star_seats'
+    palette) — each seat's stars burn in its own colour; without it the
+    field is the plain grey it always was.
     """
     rng, state = HUD_STATE["rng"], HUD_STATE
     now = time.time()
@@ -958,37 +1001,47 @@ def star_field(width, height, warp, cx=None, cy=None):
     cx, cy = int((width - 1) / 2 + 0.5), int(cy + 0.5) if isinstance(cy, float) else int(cy)
     grid = {}
     rx, ry = max(2, width // 2 - 2), max(1, height // 2 - 1)
-    for ang, dist, depth in stars:
-        def put(d, ch):
+    for i, (ang, dist, depth) in enumerate(stars):
+        seat_col = cols[i] if cols and i < len(cols) else 0
+
+        def put(d, ch, col):
             x, y = int(round(cx + math.cos(ang) * d * rx)), int(round(cy + math.sin(ang) * d * ry))
             if 0 <= x < width and 0 <= y < height and (x, y) not in grid:
-                grid[(x, y)] = ch
+                grid[(x, y)] = (ch, col)
         trail = warp > 5.0 and dist > 0.5
-        put(dist, STAR_GLYPHS[0 if dist < 0.3 else (1 if dist < 0.7 else 2)])
+        glyph = STAR_GLYPHS[0 if dist < 0.3 else (1 if dist < 0.7 else 2)]
+        put(dist, glyph, seat_col or (250 if glyph == "·" else 252))
         if trail:
-            put(dist * 0.9, "·")
-            put(dist * 1.08, "·")
+            put(dist * 0.9, "·", seat_col or 250)
+            put(dist * 1.08, "·", seat_col or 250)
     # the reticle: a bull's own sight at the vanishing point
     for ox, ch in ((-2, "─"), (-1, "╼"), (1, "╾"), (2, "─")):
-        grid[(cx + ox, cy)] = grid.get((cx + ox, cy), ch)
+        grid[(cx + ox, cy)] = grid.get((cx + ox, cy), (ch, 252))
     for oy, ch in ((-1, "┊"), (1, "┊")):
-        grid[(cx, cy + oy)] = ch
-    grid[(cx, cy)] = "⊕"
+        grid[(cx, cy + oy)] = (ch, 250)
+    grid[(cx, cy)] = ("⊕", 78)
     return grid
 
 
-def warp_canvas(fit_w, field_w, field_h, status, hours, info, load, cy):
+def warp_canvas(fit_w, field_w, field_h, status, hours, info, load, cy, split=None):
     """The moving cockpit as strings: field rows (the starfield, the sight
     already plotted at row `cy`, contacts on the ring) plus the two readout
-    rows. Shared by the 04 frame (the look) and the narrow hud_panel."""
+    rows. Shared by the 04 frame (the look) and the narrow hud_panel.
+    `split` is comms-deck's context_split(); None asks for it (cached)."""
     rows = []
     warp = warp_factor(status, hours, load)
     seats = status.get("seats") or {}
     total, avail = info.get("MemTotal", 0), info.get("MemAvailable", 0)
     shield = avail / total if total else 1.0
     mem_gib = avail / 1024**3
-    grid = star_field(field_w, field_h, warp, cy=cy)
-    # contacts: a seat with something on its plate is a blip on the ring
+    if split is None:
+        split = CD.context_split() if CD else []
+    palette = {seat: (CD.colour(seat) if CD else 245) for seat, _ in split}
+    owners = star_seats(split)
+    cols = [palette.get(seat, 245) for seat in owners] or None
+    grid = star_field(field_w, field_h, warp, cy=cy, cols=cols)
+    # contacts: a seat with something on its plate is a blip on the ring,
+    # in that seat's colour like everywhere else on the deck
     live = [(n, d) for n, d in sorted(seats.items(), key=lambda kv: kv[1].get("rank", [9, 99]))
             if d.get("state") == "busy" or d.get("waiting", 0)]
     cx = (field_w - 1) / 2
@@ -998,18 +1051,13 @@ def warp_canvas(fit_w, field_w, field_h, status, hours, info, load, cy):
         x = int(round(cx + math.cos(ang) * ring_x))
         y = int(round(cy + math.sin(ang) * ring_y * 1.4))
         if 0 <= x < field_w and 0 <= y < field_h:
-            grid[(x, y)] = name[0].upper()
+            grid[(x, y)] = (name[0].upper(), CD.colour(name) if CD else 226)
     for y in range(field_h):
         line = ""
         col_now = None
         for x in range(field_w):
-            ch = grid.get((x, y))
-            if ch is None:
-                ch, col = " ", 0
-            elif ch in STAR_GLYPHS + ("·", "╼", "╾", "─", "┊", "⊕"):
-                col = 78 if ch == "⊕" else (250 if ch in ("·", "┊") else 252)
-            else:  # a contact's initial
-                col = 226
+            cell = grid.get((x, y))
+            ch, col = cell if cell is not None else (" ", 0)
             if col != col_now:
                 line += f"\033[0m\033[38;5;{col}m" if col else "\033[0m"
                 col_now = col
@@ -1111,7 +1159,7 @@ def cockpit_frame(width, height, status, clients, workspaces, hours, busy,
         cy = max(0, height // 2 - 6)         # ⊕ on the screen's centre line (header 3 + frame 3)
         return frame("04", "WARP CORE", "the pilot's seat", f"WARP {warp:3.1f}",
                      81, w, h,
-                     warp_canvas(w - 4, w - 4, field_h, status, hours, info, load, cy))
+                     warp_canvas(w - 4, w - 4, field_h, status, hours, info, load, cy, split))
 
     def tail_maker(w, h):
         return frame("05", "EVENT TAIL", "the cockpit's log", f"{esc}38;5;42m● LIVE{esc}0m",
@@ -1412,6 +1460,19 @@ def self_test():
     for _ in range(200):  # stars respawn forever and never leave the field
         HUD_STATE["last"] = None
         star_field(40, 14, 9.9)
+
+    # the warp core's stars burn in seat colours, doled out by the context
+    # split: every reporting seat gets stars, shares follow the tokens
+    owners = star_seats([("devin", 300.0), ("claude", 100.0)])
+    assert len(owners) == STAR_COUNT, len(owners)
+    assert owners.count("devin") > owners.count("claude") > 0, owners[:20]
+    assert star_seats([]) == [] and star_seats([("solo", 1.0)]).count("solo") == STAR_COUNT
+    HUD_STATE["stars"], HUD_STATE["last"] = [], None
+    coloured = star_field(40, 14, 5.0, cols=[208] * STAR_COUNT)
+    assert any(col == 208 for _, col in coloured.values()), coloured
+    plain = star_field(40, 14, 5.0)
+    assert not any(col == 208 for _, col in plain.values())
+    HUD_STATE["stars"], HUD_STATE["last"] = [], None
 
     # the cockpit dress draws with comms-deck's own look functions (claude's):
     # the import is load-bearing, so render each shared builder once here —
