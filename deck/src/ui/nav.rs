@@ -36,7 +36,9 @@ pub fn nav_widths(cols: u16) -> (u16, u16, u16) {
 pub fn draw_half(f: &mut Frame, area: Rect, app: &App) {
     let [left, right] = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(area);
 
-    // left: 04 WARP CORE over 05 EVENT TAIL over 01 CREW
+    // left: 04 WARP CORE over 05 EVENT TAIL over 01 CREW. Below 18 rows
+    // there's no room for the tail, so it is dropped and the core and crew
+    // share the column.
     let core_h = (area.height * 3 / 5).max(6.min(area.height));
     let tail_h = if area.height >= 18 { (area.height / 8).clamp(5, 9) } else { 0 };
     let [core, tail, crew] = Layout::vertical([

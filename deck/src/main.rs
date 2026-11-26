@@ -365,7 +365,10 @@ fn self_test() -> bool {
         check(&format!("half nav at 110x30 shows {panel}"), half.contains(panel), &half);
     }
     check("half nav is two columns (the core shares the left with the crew)",
-        half.contains("04 WARP CORE") && half.find("04 WARP CORE").zip(half.find("01 CREW")).is_some_and(|(c, k)| (k / 110) > (c / 110)), &half);
+        half.contains("04 WARP CORE") && half.find("04 WARP CORE").zip(half.find("01 CREW")).is_some_and(|(c, k)| {
+            let (line_c, line_k) = (half[..c].lines().count(), half[..k].lines().count());
+            line_k > line_c
+        }), &half);
     let routed = send::route("@grok -claude hi", &["grok".into(), "claude".into()]);
     check("chat box routing matches comms-deck route()", routed.as_deref() == Ok("grok -claude"), &format!("{routed:?}"));
 
