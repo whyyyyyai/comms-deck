@@ -88,11 +88,12 @@ fn stack(area: Rect, heights: &[u16]) -> Vec<Rect> {
         .collect()
 }
 
+/// Zoomed (z): the warp core alone, over the whole body, in any layout.
+pub fn draw_zoomed(f: &mut Frame, area: Rect, app: &App) {
+    draw_core(f, area, app);
+}
+
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
-    if app.zoom {
-        draw_core(f, area, app);
-        return;
-    }
     let (lw, cw, rw) = nav_widths(area.width);
     let [left, centre, right] =
         Layout::horizontal([Constraint::Length(lw), Constraint::Length(cw), Constraint::Length(rw)]).areas(area);

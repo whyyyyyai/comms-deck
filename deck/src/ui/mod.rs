@@ -134,6 +134,8 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_strip(f, top, app);
     match app.view {
         View::Comms => comms::draw(f, body, app),
+        // Zoom is checked first, so it works in every nav layout.
+        View::Nav if app.zoom => nav::draw_zoomed(f, body, app),
         View::Nav => nav::draw(f, body, app),
     }
     draw_keys(f, bottom, app);
