@@ -151,13 +151,13 @@ pub fn draw_crew_titled(f: &mut Frame, area: Rect, app: &App, title: &str) {
         let mut spans = vec![
             Span::styled(format!("{mark} "), Style::default().fg(colour)),
             Span::styled(format!("{:<8}", display_name(&s.name)), Style::default().fg(seat_colour(&s.name))),
-            Span::styled(format!("{:<7}", s.shown), Style::default().fg(colour)),
+            Span::styled(format!("{:<7} ", s.shown), Style::default().fg(colour)),
         ];
         let when = match s.spent_until {
             Some(t) if s.shown == "spent" => format!("back in {}", span_of(t - app.snap.time)),
             _ => span_of(s.since_s),
         };
-        spans.push(Span::styled(format!("{when:<10}"), dim()));
+        spans.push(Span::styled(format!("{when:<10} "), dim()));
         if s.waiting > 0 {
             spans.push(Span::styled(format!("✉{}", s.waiting), Style::default().fg(Color::Indexed(214))));
         }

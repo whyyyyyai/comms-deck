@@ -111,14 +111,14 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let ws_lines = workspace_lines(app, inner_w).len() as u16;
     let vit_lines = vitals_lines(app, inner_w).len() as u16;
     let nt_lines = nav_time_lines(app, inner_w).len() as u16;
-    let pulse_lines = pulse_lines(app, inner_w).len() as u16;
+    let pulse_n = pulse_lines(app, inner_w).len() as u16;
     let needs = [
         Some(usage_lines + 2),
         Some(ws_lines + 2),
         Some(vit_lines + 2),
         None,
         Some(nt_lines + 2),
-        Some(pulse_lines + 2),
+        Some(pulse_n + 2),
     ];
     let heights = share_rows(&needs, right.height, 3);
     let r = stack(right, &heights);
