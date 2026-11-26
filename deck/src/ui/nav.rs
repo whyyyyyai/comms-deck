@@ -29,6 +29,61 @@ pub fn nav_widths(cols: u16) -> (u16, u16, u16) {
     (side, cols.saturating_sub(2 * side), side)
 }
 
+/// The half view: the nav deck in two columns, for the tiled half-window
+/// (`nav-deck-chat half`). Same ten panels, same keys — only the places
+/// change. The eye keeps its order: the warp core top-left, the crew under
+/// it, the readings down the right column in the full view's order.
+pub fn draw_half(f: &mut Frame, area: Rect, app: &App) {
+    let [left, right] = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(area);
+
+    // left: 04 WARP CORE over 05 EVENT TAIL over 01 CREW. Below 18 rows
+    // there's no room for the tail, so it is dropped and the core and crew
+    // share the column.
+    let core_h = (area.height * 3 / 5).max(6.min(area.height));
+    let tail_h = if area.height >= 18 { (area.height / 8).clamp(5, 9) } else { 0 };
+    let [core, tail, crew] = Layout::vertical([
+        Constraint::Length(core_h),
+        Constraint::Length(tail_h),
+        Constraint::Min(3),
+    ])
+    .areas(left);
+    draw_core(f, core, app);
+    if tail_h > 0 {
+        draw_tail(f, tail, app);
+    }
+    draw_crew_map(f, crew, app);
+
+    // right: 02 ACTIVITY on top, then the six readings sharing what's left
+    let act_h = (area.height * 3 / 10).max(8.min(area.height));
+    let [activity, rest] = Layout::vertical([Constraint::Length(act_h), Constraint::Min(0)]).areas(right);
+    draw_crew_titled(f, activity, app, "02 ACTIVITY · ready order");
+
+    let inner_w = right.width.saturating_sub(2) as usize;
+    let usage_lines = usage_line_count(app);
+    let ws_lines = workspace_lines(app, inner_w).len() as u16;
+    let vit_lines = vitals_lines(app, inner_w).len() as u16;
+    let nt_lines = nav_time_lines(app, inner_w).len() as u16;
+    let pulse_n = pulse_lines(app, inner_w).len() as u16;
+    let needs = [
+        Some(usage_lines + 2),
+        Some(ws_lines + 2),
+        Some(vit_lines + 2),
+        None,
+        Some(nt_lines + 2),
+        Some(pulse_n + 2),
+    ];
+    let heights = share_rows(&needs, rest.height, 3);
+    let r = stack(rest, &heights);
+    if r[0].height >= 3 {
+        draw_usage(f, r[0], app);
+    }
+    lines_panel(f, r[1], "06 WORKSPACES · hyprctl clients", workspace_lines(app, inner_w));
+    lines_panel(f, r[2], "07 VITALS", vitals_lines(app, inner_w));
+    draw_chat(f, r[3], app);
+    lines_panel(f, r[4], "08 NAV-TIME · are the two decks in step", nav_time_lines(app, inner_w));
+    lines_panel(f, r[5], "09 DECK PULSE · how hard the notes flew", pulse_lines(app, inner_w));
+}
+
 /// Rows for stacked panels (nav-deck's share_rows): a floor for every panel
 /// first, then one row at a time round the panels that still want more
 /// (water-filling), so short panels end up whole and long ones trim to one

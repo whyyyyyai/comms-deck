@@ -4,6 +4,7 @@
 //!
 //!   deck                  live, full screen (Tab switches views)
 //!   deck --view nav       start on the nav view
+//!   deck --view nav --half   the nav view in two columns (the half window)
 //!   deck --once [--view nav] [--size WxH]   one frame as text, then exit
 //!   deck --self-test      render fake data, check the contracts, touch nothing real
 //!
@@ -26,7 +27,7 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScree
 use ratatui::backend::{CrosstermBackend, TestBackend};
 use ratatui::Terminal;
 
-use ui::{App, View};
+use ui::{App, View, JUMP_SECS};
 
 enum Msg {
     Snap(data::Snapshot),
@@ -41,8 +42,10 @@ fn main() {
         Some("nav") => View::Nav,
         _ => View::Comms,
     };
+    // --half: the nav view in two columns, for the tiled half-window
+    let half = flag("--half");
     if flag("--help") || flag("-h") {
-        println!("deck [--view comms|nav] [--once [--size WxH]] [--self-test]");
+        println!("deck [--view comms|nav] [--half] [--once [--size WxH]] [--self-test]");
         return;
     }
     if flag("--self-test") {
@@ -53,10 +56,12 @@ fn main() {
             .and_then(|s| s.split_once('x').map(|(a, b)| (a.parse().ok(), b.parse().ok())))
             .and_then(|(a, b)| Some((a?, b?)))
             .unwrap_or((160, 48));
-        print!("{}", render_text(&App::new(view, data::load()), w, h));
+        let mut app = App::new(view, data::load());
+        app.half = half;
+        print!("{}", render_text(&app, w, h));
         return;
     }
-    if let Err(e) = run(view) {
+    if let Err(e) = run(view, half) {
         eprintln!("deck: {e}");
         std::process::exit(1);
     }
@@ -77,7 +82,7 @@ fn render_text(app: &App, w: u16, h: u16) -> String {
     out
 }
 
-fn run(view: View) -> io::Result<()> {
+fn run(view: View, half: bool) -> io::Result<()> {
     let (tx, rx) = mpsc::channel::<Msg>();
     // Data comes in on its own thread, so typing never waits on a file or
     // on `comms-deck status`.
@@ -102,6 +107,7 @@ fn run(view: View) -> io::Result<()> {
     }));
 
     let mut app = App::new(view, data::Snapshot { time: data::now(), ..Default::default() });
+    app.half = half;
     let mut last = Instant::now();
     let mut memory_at = 0.0;
     while !app.quit {
@@ -123,6 +129,7 @@ fn run(view: View) -> io::Result<()> {
         }
         let dt = last.elapsed().as_secs_f64();
         last = Instant::now();
+        app.tick(dt);
         if app.view == View::Nav {
             let w = app.warp();
             app.stars.step(dt, 0.12 * w);
@@ -350,8 +357,53 @@ fn self_test() -> bool {
     app.stars.step(0.5, 1.0);
     let small = render_text(&app, 80, 24);
     check("a small window still draws both strips", small.contains("DECK") && small.lines().count() == 24, &small);
+    // The half view: same ten panels in two columns, at a half-window's size.
+    app.half = true;
+    let half = render_text(&app, 110, 30);
+    for panel in ["01 CREW", "02 ACTIVITY", "03 USAGE", "04 WARP CORE", "05 EVENT TAIL", "06 WORKSPACES",
+                  "07 VITALS", "08 NAV-TIME", "09 DECK PULSE", "10 COCKPIT-CHAT"] {
+        check(&format!("half nav at 110x30 shows {panel}"), half.contains(panel), &half);
+    }
+    check("half nav is two columns (the core shares the left with the crew)",
+        half.contains("04 WARP CORE") && half.find("04 WARP CORE").zip(half.find("01 CREW")).is_some_and(|(c, k)| {
+            let (line_c, line_k) = (half[..c].lines().count(), half[..k].lines().count());
+            line_k > line_c
+        }), &half);
     let routed = send::route("@grok -claude hi", &["grok".into(), "claude".into()]);
     check("chat box routing matches comms-deck route()", routed.as_deref() == Ok("grok -claude"), &format!("{routed:?}"));
+
+    // The warp jump: a fresh note to all (or a merge note) bursts the speed,
+    // once, then fades. An old broadcast fires nothing.
+    let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let all_note = |time: &str, to: &str, text: &str| data::Note {
+        from: "owner".into(),
+        to: to.into(),
+        time: time.into(),
+        text: text.into(),
+        quiet: false,
+    };
+    let mut fresh = data::Snapshot { time: data::now(), ..Default::default() };
+    fresh.notes = vec![all_note(&stamp, "all", "bring everyone back online")];
+    check("a fresh note to all is a jump trigger", fresh.newest_jump_note(120.0).is_some(), "no trigger");
+    let mut old = data::Snapshot { time: data::now() + 3600.0, ..Default::default() };
+    old.notes = vec![all_note(&stamp, "all", "bring everyone back online")];
+    check("an hour-old broadcast is not a jump trigger", old.newest_jump_note(120.0).is_none(), "fired anyway");
+    let mut merge = data::Snapshot { time: data::now(), ..Default::default() };
+    merge.notes = vec![all_note(&stamp, "claude", "merged #144, thanks for the review")];
+    check("a merge note is a jump trigger too", merge.newest_jump_note(120.0).is_some(), "no trigger");
+    let mut no_merge = data::Snapshot { time: data::now(), ..Default::default() };
+    no_merge.notes = vec![all_note(&stamp, "claude", "not merged #144 yet, waiting on Y")];
+    check("\"not merged #n\" is not a jump trigger", no_merge.newest_jump_note(120.0).is_none(), "fired anyway");
+    let mut japp = App::new(View::Nav, data::Snapshot { time: data::now(), ..Default::default() });
+    let base = japp.warp();
+    japp.refresh(data::Snapshot { jump_trigger: Some(data::now()), ..Default::default() });
+    check("the warp jump bursts above the traffic's warp", japp.jump_left > 0.0 && japp.warp() > base, &format!("{} vs {base}", japp.warp()));
+    japp.tick(JUMP_SECS);
+    check("the burst fades when its timer runs out", japp.jump_left == 0.0 && japp.warp() == base, &format!("{}", japp.warp()));
+    japp.refresh(data::Snapshot { jump_trigger: Some(data::now()), ..Default::default() });
+    let fired = japp.jump_left;
+    japp.refresh(data::Snapshot { jump_trigger: Some(japp.seen_trigger), ..Default::default() });
+    check("the same broadcast doesn't fire twice", japp.jump_left == fired, &format!("{} then {}", fired, japp.jump_left));
     println!("{}", if ok { "all passed" } else { "some failed" });
     ok
 }
