@@ -108,11 +108,15 @@ def set_status(state, detail=""):
         pass
 
 
-AUTH_FAIL = re.compile(r"authentication failed|Improperly formatted auth", re.I)
+# Only the server's own NOTICE carries auth failures — a viewer typing
+# "authentication failed" in chat must not disconnect the reader.
+AUTH_FAIL = re.compile(r"^:tmi\.twitch\.tv NOTICE .*"
+                       r"(Login authentication failed|Improperly formatted auth)", re.I)
 
 
-def pump(sock_file, channel):
-    """Read IRC lines until the socket drops. 'auth' on a bad token."""
+def pump(sock_file, channel, box):
+    """Read IRC lines until the socket drops. 'auth' on a bad token.
+    box['live'] flips on the first PING so the caller can reset backoff."""
     for raw in sock_file:
         line = raw.decode(errors="replace").rstrip("\r\n")
         if not line:
@@ -120,7 +124,9 @@ def pump(sock_file, channel):
         if line.startswith("PING"):
             sock_file.write(b"PONG :tmi.twitch.tv\r\n")
             sock_file.flush()
-            set_status("live", f"#{channel}")   # Twitch pings once registered
+            if not box["live"]:
+                box["live"] = True
+                set_status("live", f"#{channel}")   # Twitch pings once registered
             continue
         if AUTH_FAIL.search(line):
             return "auth"
@@ -143,13 +149,18 @@ def run():
                   "channel in twitch.json/twitch-chat.json", file=sys.stderr)
             return 1
         set_status("connecting", f"#{channel}")
+        box = {"live": False}
         try:
             raw = socket.create_connection((HOST, PORT), timeout=15)
-            f = ctx.wrap_socket(raw, server_hostname=HOST).makefile("rwb")
+            s = ctx.wrap_socket(raw, server_hostname=HOST)
+            s.settimeout(None)   # the 15 s connect timeout must not drop a quiet channel
+            f = s.makefile("rwb")
             f.write(f"PASS oauth:{token}\r\nNICK {nick}\r\nJOIN #{channel}\r\n"
                     .encode())
             f.flush()
-            why = pump(f, channel)
+            why = pump(f, channel, box)
+            if box["live"]:
+                backoff = 5      # a proven connection earns a fresh backoff
             if why == "auth":
                 # loud on purpose: a panel that shows nothing is worse than one
                 # that says why. Still retries — a fixed token just works.
