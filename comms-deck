@@ -264,16 +264,38 @@ SEATS = tuple(AGENTS) + APP_SEATS + ("owner",)
 # beacon - a local seat's state is measured here, not declared. The deck
 # never invents a state word: what the seat says is what the seat shows,
 # until it goes stale, and then away.
-_beacon_file = CONFIG / "remote-beacons"
-REMOTE_BEACONS = {}  # seat -> the url of its status.json
+BEACON_FILE = CONFIG / "remote-beacons"
 BEACON_STALE = 30 * 60  # seconds: a beacon older than this pins its seat away
-for _bline in (_beacon_file.read_text().splitlines() if _beacon_file.exists() else []):
-    _bline = _bline.split("#")[0].strip()
-    if _bline:
-        _bse, _, _burl = _bline.partition(" ")
-        _bse, _burl = _bse.strip(), _burl.strip()
-        if _bse and _burl and APP_PROCESS.get(_bse) == "remote":
-            REMOTE_BEACONS[_bse] = _burl
+
+
+def beacons_signature(path=None):
+    """What says the beacon list changed: the file's mtime and size, or None."""
+    try:
+        st = (path or BEACON_FILE).stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def load_beacons(path=None):
+    """{seat: url} from the beacon list; only `name:remote` seats count."""
+    out = {}
+    try:
+        lines = (path or BEACON_FILE).read_text().splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        line = line.split("#")[0].strip()
+        if line:
+            seat, _, url = line.partition(" ")
+            seat, url = seat.strip(), url.strip()
+            if seat and url and APP_PROCESS.get(seat) == "remote":
+                out[seat] = url
+    return out
+
+
+REMOTE_BEACONS = load_beacons()  # seat -> the url of its status.json
+_beacons_seen = beacons_signature()  # re-read when this changes (Vibe, #140)
 
 # The owner's chosen name (2026-11-26: "You may all call me, STOX"; renamed
 # to Y at the owner's request the same day). The seat
@@ -2584,8 +2606,17 @@ def import_remote_activity():
     whose own `updated` is older than BEACON_STALE pins the seat away: a
     silent seat is an away seat. A beacon that can't be fetched or parsed
     right now leaves the last said state standing - the miss may be no more
-    than this pass's network hiccup - and the retry is the next pass.
+    than this pass's network hiccup - and the retry is the next pass. But a
+    miss can't keep a seat busy forever: once the last beacon that did
+    arrive is older than BEACON_STALE, the seat goes away too (Vibe, #140).
+    A new line in the beacon list is picked up on the next pass, with no
+    restart.
     """
+    global REMOTE_BEACONS, _beacons_seen
+    sig = beacons_signature()
+    if sig != _beacons_seen:
+        REMOTE_BEACONS, _beacons_seen = load_beacons(), sig
+        log(f"beacon list re-read: {', '.join(REMOTE_BEACONS) or 'none'}")
     for seat, url in REMOTE_BEACONS.items():
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "comms-deck"})
@@ -2593,15 +2624,26 @@ def import_remote_activity():
                 body = resp.read(65536).decode("utf-8", "replace")
         except (urllib.error.URLError, OSError, ValueError) as error:
             log(f"beacon for {seat} unreadable just now (will retry): {error}")
+            beacon_gone_quiet(seat)
             continue
         parsed = beacon_status(seat, body)
         if not parsed:
             log(f"beacon for {seat} is not a status.json (will retry next pass)")
+            beacon_gone_quiet(seat)
             continue
         state, doing, updated = parsed
         if updated is None or time.time() - updated > BEACON_STALE:
             state, doing = "away", ""
-        update_seat(seat, state=state, doing=doing)
+        update_seat(seat, state=state, doing=doing, beacon_updated=updated or 0)
+
+
+def beacon_gone_quiet(seat):
+    """A beacon miss: keep the last said state, unless the last beacon that
+    did arrive is stale by now; then the seat is away."""
+    last = load_seat(seat).get("beacon_updated")
+    if isinstance(last, (int, float)) and not isinstance(last, bool) and last \
+            and time.time() - last > BEACON_STALE and load_seat(seat).get("state") != "away":
+        update_seat(seat, state="away", doing="")
 
 
 # -----------------------------------------------------------------------------
@@ -8541,10 +8583,19 @@ def self_test():
         "assert mine().get('state') == 'busy', mine()",
         "serve('not json at all'); x.import_remote_activity()",
         "assert mine().get('state') == 'busy' and 'back again' in mine().get('doing', ''), 'an unparseable beacon keeps the last state'",
+        "x.update_seat('mystra', beacon_updated=time.time() - 3600)",
+        "def down(req, timeout=10): raise OSError('machine is off')",
+        "x.urllib.request.urlopen = down; x.import_remote_activity()",
+        "assert mine().get('state') == 'away', 'a beacon that stays down goes stale too'",
+        "x.APP_PROCESS['mystra'] = 'remote'; x.BEACON_FILE.parent.mkdir(parents=True, exist_ok=True)",
+        "x.BEACON_FILE.write_text('mystra stub://new  # added while running\\n')",
+        "serve(json.dumps({'state': 'idle', 'updated': time.time()})); x.import_remote_activity()",
+        "assert x.REMOTE_BEACONS == {'mystra': 'stub://new'}, x.REMOTE_BEACONS",
+        "assert mine().get('state') == 'idle', 'a new beacon line works without a restart'",
         "print('beacons ok')",
     ])
     r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=30)
-    check("remote-seat beacons: fresh busy, no churn, control characters dropped, stale away, junk ignored",
+    check("remote-seat beacons: fresh busy, no churn, control characters dropped, stale away (even when down), junk ignored, list re-read live",
           r.returncode == 0 and "beacons ok" in r.stdout, r.stdout + r.stderr)
     # cite-check: rule 4's gate beside review-check (docs/CITATION.md,
     # Mystra's Wave-1 piece 3). Two independent gates; never one verdict.
