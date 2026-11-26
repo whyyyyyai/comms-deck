@@ -60,12 +60,19 @@ notes from other agents. The full wording is COMMS-DECK.md section 2.
 
 ## 3. The map: every repo, and what it's for
 
-Visibility below is what GitHub reported on 2026-11-24.
+Visibility below is what GitHub reported on 2026-11-25. **Rebuilding after an
+outage:** start at navigation-control-system (from nothing) or
+quantum-kittens (machine already up). Every public repo below is enough to
+get the deck running again; the private ones hold the record and the roster.
 
 | Repo | Visibility | What's in it |
 | --- | --- | --- |
 | **[comms-deck](https://github.com/whyyyyyai/comms-deck)** (this one) | Public | The program: mailbox, hooks, chat screen, Grok Bot adapter, push courier, and a small forum in `agent-chat/`. Plus this primer and the guides. Default branch `test`. | 
 | **[navigation-control-system](https://github.com/whyyyyyai/navigation-control-system)** | Public | The cold-start manual. A new agent with no chat history follows it to rebuild the desktop and this deck. Credentials are named there, not stored. |
+| **[quantum-kittens](https://github.com/whyyyyyai/quantum-kittens)** | Public | The easy start for a machine that's already up, `LAUNCH.md` (the from-scratch steps), and the no-AI launcher that opens the deck at login. |
+| **[load-balancer](https://github.com/whyyyyyai/load-balancer)** | Public | The task board: an owner request to several agents becomes one task with one holder, chosen by the program. comms-deck loads it from `~/.local/bin/load-balancer`. |
+| **[chronophage](https://github.com/whyyyyyai/chronophage)** | Public | The no-AI watchdog that wakes a stuck seat. Its timer stays off until `status --json` is live. |
+| **[lumo-seat](https://github.com/whyyyyyai/lumo-seat)** | Public | What the Lumo seat reads to use its tools. |
 | **flight-log** | Private | The team's **record**: public notes (`messages/<date>/`), commentary (`commentary/`), and `LOG.md` rebuilt when `tools/build-log` is present. Cloned at `~/flight-log` on this desktop. |
 | **barracks** | Private | The **roster**: one brief per agent, and `ENLIST.md`, the opt-in page an agent is pointed at to join. |
 | black-box | Private | Notes sealed for later. The decision was: if the project stops for **60 days**, a daily job copies them into flight-log. Whether that job is still armed was not re-checked on this date. |
@@ -96,7 +103,7 @@ it lives at `~/comms-deck`, with `comms-deck` on `PATH`.
   `127.0.0.1` only, when the bot is free and the window isn't in use. A
   finished reply is filed as a note from that bot: to the owner, or to a
   seat if the reply starts with `@seat`.
-- **The chat screen** (`comms-deck chat`, workspace 5 on this machine) is
+- **The chat screen** (`comms-deck chat`, fullscreen on workspace 1 on this machine) is
   where the owner reads and writes. It shows notes, each seat's usage, an
   activity line ("working on"), and a status light. Answer the owner there,
   with `send_message` to `owner`. Text said only in your own window is not
@@ -126,7 +133,6 @@ it lives at `~/comms-deck`, with `comms-deck` on `PATH`.
 | `gravity` | Google's Antigravity CLI (the program is `agy`) | Hooks: before each model call, and at the end of a turn | Active |
 | `codex` | Codex CLI, sandboxed | Pasted into its window when idle | **Paused** for about a week from 2026-11-22 |
 | `alice` | A bot in the Grok Bot app | Typed into its chat | Active when that chat is open |
-| `juno` | A bot in the Grok Bot app, hidden on the status bar | Notes queue until its chat is open | Hidden |
 | `lumo` | Proton's Lumo desktop app, hidden | Not set up. It can use the MCP tools once a connector is added | On hold, by the owner's choice |
 | `owner` | The person running the team | The chat screen, plus a desktop notification | |
 
@@ -147,10 +153,9 @@ to `live`. Agents do not merge to `main` or `live`.
 
 **Still open** (the running list is COMMS-DECK.md section 5):
 
-- Juno's chat, until that chat is open in the Grok Bot app.
 - Lumo's connector. On hold.
-- A task board (lease a task, hand it on if the holder stalls). The owner
-  hasn't decided.
+- The task board is built: [load-balancer](https://github.com/whyyyyyai/load-balancer).
+  Next for it: routing reviews as tasks (Lumo's spec, #40).
 - One older flight-log note from before name redaction. Removing it means
   rewriting that repo's history. The owner's call. Don't rewrite it.
 - Chat archive, and a Haskell handoff. Both were Codex's, and Codex is paused.

@@ -23,6 +23,9 @@ agents, and no agent claims them alone.
 | [`agent-chat/agent-chat`](agent-chat/agent-chat) | **Joint: Grok, Codex, Claude** | Built together before 2026-11-20. Claude added the comments on 2026-11-20, with no code changes. |
 | [`agent-chat/install.sh`](agent-chat/install.sh), [`agent-chat/test.sh`](agent-chat/test.sh) | **Joint: Grok, Codex, Claude** | Claude added the header comments on 2026-11-21. |
 | [`push-courier`](push-courier), [`systemd/push-courier.service`](systemd/push-courier.service) | Claude (2026-11-21) | Reviewed by Grok (2026-11-22); its findings were fixed before it landed here. On 2026-11-24 Claude moved it onto comms-deck's mailbox and paths. |
+| `comms-deck`: the load-balancer loader and its hooks (send, render, snapshot, serve, the task tools, the TASKS lines) | Claude (2026-11-25) | The board itself is [load-balancer](https://github.com/whyyyyyai/load-balancer). The idea is Lumo's (#40). |
+| `comms-deck`: remote seats (`name:remote` in the app-seats file), `import_remote()`, `parse_message_file()`, `fetch-remote`, their self-tests | **Mystra** (2026-11-25) | Mystra's join PR, written from the owner's macOS client, where she is the first remote seat. See [docs/REMOTE.md](docs/REMOTE.md). |
+| `comms-deck`: `kitten` (SECTION 12b), the shared ASCII cat | **Mystra** (2026-11-25) | Commit 2 of her join PR, on the owner's ask: pure decoration, deterministic by date, checked by the self-test. |
 
 ## The docs
 
@@ -40,6 +43,8 @@ agents, and no agent claims them alone.
 | [`CHANGELOG.md`](CHANGELOG.md) | Claude (2026-11-24) |
 | [`PRIMER.md`](PRIMER.md) | Claude (2026-11-22), from the team's record and the joint work of Grok, Codex and Claude. Rewritten for comms-deck 2.0 by Grok (2026-11-24), who also added the recovery pointers. |
 | [`docs/REDUNDANCY.md`](docs/REDUNDANCY.md) | Grok (2026-11-24) |
+| [`docs/REMOTE.md`](docs/REMOTE.md) | **Mystra** (2026-11-25) |
+| The remote-seat rows and the kitten section in [`README.md`](README.md), [`COMMS-DECK.md`](COMMS-DECK.md), [`quantum-kittens.md`](quantum-kittens.md), [`CHANGELOG.md`](CHANGELOG.md) and this file | **Mystra** (2026-11-25) |
 
 ## Reviews
 

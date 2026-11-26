@@ -2,6 +2,194 @@
 
 ## Unreleased
 
+- **Telemetry records can name provider, account and models.** A usage
+  feed may now declare `data.provider`, `data.account`/`account_id` and
+  `data.models`; the seat/source labels stay the fallback, so a remote
+  app seat reads provider `unknown` instead of the transport `remote`,
+  and two accounts on one provider can stay distinct. Account pooling is
+  provider-scoped, so the same account id under two providers never folds
+  into one row. By Devin, from the 03 review.
+- **The cost ledger, hardened (Vibe's review of #102).** A seat without
+  session ids now keys its generations by machine as well (`seat|machine|gen-N`).
+  Two machines' counters both start at 0, so a restored ledger can no longer
+  merge different sessions. A drop in cost opens a new session only when the
+  next reading is low too. One flaky low figure is held and then dropped
+  when the cost comes straight back, so the climb back isn't counted twice.
+  The docs say a pool's all-time figure is the sum of its seats', and that
+  only a machine wiped within the ten-minute push window loses anything.
+  By Claude.
+- **One Grok bot.** The owner (23:08): the Grok Bot app runs one bot now,
+  so the second bot seat is gone from the code, the docs and the setup
+  examples; the pool comments in the telemetry layer describe the bot seats
+  generally. Released CHANGELOG entries are corrected in place, with the
+  history in git. By Vibe.
+- **All-time cost in the top bar, kept in a ledger.** The owner (23:08):
+  COST should be the all-time total and survive a reset or an upgrade.
+  `DATA/cost-ledger.json` holds one entry per (seat, session) at the
+  highest cost that session reported. It's keyed by the feed's session_id,
+  or by a generation that moves on when a seat's cost drops. Two Claude
+  sessions writing in turn therefore never undercount, and entries only
+  go up. The status line folds a cost in as it arrives, and the service
+  sweeps every seat each 30 s. It's mirrored to the private relay repo
+  (`ledger/costs.json`) and merged both ways, so a fresh clone restores
+  it. The top bar reads "$N · est. since <date>", and `usage <seat>`
+  shows each seat's all-time figure as `cumulative`. Design reviewed with
+  Vibe. By Claude.
+- **Vibe's usage bar in 03.** The owner (23:01): Vibe's app shows a usage
+  bar (52%), so 03 should too. Vibe fetches the figure from Mistral and
+  only draws it, so `vibe_screen_gauge()` reads the % off the footer of
+  Vibe's kitty window (the last three lines only, like the usage-limit
+  check does for Codex). It's stored as `rate_limits.monthly` with no
+  reset time, and 03 draws it as an `mo` bar under VIBE. An unreadable
+  screen keeps the last reading. By Claude.
+- **03: no token block, and Grok is one pool.** The owner (22:53): the
+  TOKENS & ACTIVITY block isn't useful on screen, so 03 shows ALLOCATION
+  and FINANCIAL only (token counts stay in `comms-deck usage <seat>`). A
+  seat with neither a limit nor a cost is listed under CONNECTED / NO LIMIT
+  OR COST REPORTED instead of vanishing. Grok and the Grok Bot bots draw
+  from one xAI pool, so they share the account `grok` and show as
+  one GROK row. Each part of the row comes from the freshest seat that
+  reports it: the weekly limit from the bots, the cost from Grok's CLI.
+  By Claude.
+- **The chat screen lives on workspace 1, fullscreen.** The owner
+  (22:49): it should always appear fullscreen on desktop 1. The Hyprland
+  rule that `comms-deck install` writes, the launcher and the docs now say
+  workspace 1. `scratchpad-layout --watch` opens only the full view at
+  login; the half view also sat on workspace 1 and would be hidden under
+  it. `comms-deck-chat half` still opens it by hand. By Claude.
+- **/sort: the chat box switches 03's order.** `/sort` reports the
+  current sort, `/sort provider|consumption|spend` sets it (an unknown
+  word is refused, not mailed); the choice lives in DATA and survives a
+  restart, `usage_panel` reads it every frame, and the panel's head
+  says "· by consumption" while it's switched. By Vibe. Rebased onto #93, with four review fixes by Claude: the total
+  stays on the row with the tag, the deck look shows "sorted by X" in
+  03's frame, and /sort matches exactly.
+- **`comms-deck usage <seat>`: one provider's telemetry in full.** The
+  inspection half of the 03 brief. `usage all` lists every record
+  (provider, account, available or not, last update, stale); `usage
+  <seat|account|provider>` prints the record's models, every allocation
+  window, tokens and activity, spend and its kind, and the raw fields as
+  the source wrote them (paths and session ids left out). Anything not
+  reported says "not reported", never 0. Plain `comms-deck usage` is the
+  old log report, unchanged. By Claude.
+- **03 ALLOCATION shows every window.** Each row's name sits on its own
+  line with one bar per window it reports (5-hour and weekly alike), so a
+  long account label no longer pushes the figures off the edge. The
+  header total says "est." when any figure in it is an estimate. By
+  Claude, after reviewing #92.
+- **03 USAGE: three families from one telemetry record.** The renderer
+  half of the 03 redesign (Vibe, against claude/telemetry's pinned shape):
+  ALLOCATION (severity-shaded, tighter window, resets), TOKENS & ACTIVITY
+  (in/out/cache/requests/sessions/active, "—" for a field nobody reports)
+  and FINANCIAL (session_usd, est. where the source prices it itself),
+  then CONNECTED / TELEMETRY UNAVAILABLE with the last update for a seat
+  that reports nothing — shown, never a misleading zero (the brief's
+  rule 5). Allocation rows carry a compact severity bar that shimmers
+  while a seat on the account is busy. sort= provider (default: every
+  block by provider then seat) | consumption | spend (their own block).
+  Labels come from the record — a shared account reads like
+  "GROK-BOT ACCOUNT · <its seats>"; nothing is named in the renderer.
+  Subtitle: allocation · tokens · spend.
+- **telemetry(): one shape for every provider's usage.** The data layer
+  for the 03 redesign (the owner, 22:03: every provider, model, bot and
+  account, never an invented figure). One record per registered seat plus
+  any usage file whose seat isn't registered: provider, account, models,
+  availability, freshness, allocation windows, tokens/requests/sessions and
+  spend. A figure the provider doesn't report is None, never 0.
+  `telemetry_rows()` folds seats that share an account (the Grok Bot) into
+  one row with the freshest figures. By Claude.
+- **03 USAGE is usage only.** The owner (21:35): 06 CONTEXT SPLIT already
+  covers context, so the usage column drops each seat's Context bar and
+  the CONTEXT list. It shows each seat's 5-hour and weekly limits,
+  session tokens and cost, and PLAN USAGE. A seat with nothing but context
+  to report no longer gets an empty section. By Claude.
+- **The deck look.** On a screen 150 columns or wider the chat is now a
+  dashboard (the owner, after Argona's video): a strip of big numbers
+  along the top (seats, working, notes today, waiting, context, cost,
+  version), numbered panels in frames with corner brackets and an accent
+  each (01 CREW, 02 ACTIVITY, 03 USAGE, 04 LIVE NOTES, 05 TASKS,
+  06 CONTEXT SPLIT, 07 ALERTS), and a ticker of the latest notes along the
+  bottom. Every panel keeps its old content; 01 CREW is new: a braille
+  graph, each seat a cluster sized by its context, notes as links with a
+  dot running along the newest. The ticker shows private notes as
+  "(private)" and redacts names (vibe's #87 review). Narrower screens, or
+  COMMS_DECK_OLD_LOOK=1, keep the old layout. By Claude.
+- **The context split computes once per frame.** Both chat panels asked
+  `context_split()` every redraw; the answer is now cached on the usage
+  files' names, sizes and mtimes, so a frame costs a stat per file instead
+  of re-reading them all — and any usage write still refreshes it at
+  once. By Devin.
+- **`comms-deck kitten [--all|<seat>]`** prints one small ASCII cat - the
+  same shared kitten for the day, picked by sha256 of the date (no AI, no
+  randomness): a seat's own kitten by name, the team's in rows that must fit
+  80 columns, and the self-test checks both. By Mystra, on the owner's ask.
+- **Remote seats: an agent on another device can join the deck.** A seat
+  announced as `name:remote` in the app-seats file lives on another machine
+  and has no process here: its mailbox is the git copies. Notes to it are
+  not put in a desktop inbox (nothing here would take them out); its row
+  reads its seat file, `away` by default. The service pulls both note repos
+  in its sync pass and, through the new `fetch-remote` command and the
+  `import_remote()` pass, files every changed message file whose `Machine:`
+  is another machine and whose `From:` is a remote seat into the recipient's
+  inbox, so a remote agent's notes arrive through hooks and wakes like
+  anyone's, and the loop guard still applies to it. The first-sight rule:
+  on a repo's first import only the pull head is recorded, so years of
+  backlog stay the archive they are. By Mystra (2026-11-25).
+- **Mystra joins as the first remote seat**, with `docs/REMOTE.md`: how an
+  agent on another device gets its own account, opens the join PR, and
+  reads and writes the flight-log format by hand. The seats tables in
+  README, COMMS-DECK and quantum-kittens name her. The desktop-side steps
+  (the `app-seats` line and the collaborator invites) stay the owner's.
+  `sync_records()` is untouched; the note file format is unchanged. By
+  Mystra (2026-11-25).
+- **The dot box polished.** The CONTEXT SPLIT box's glow wave now runs
+  straight through the row break instead of tilting and resetting (the
+  phase is the dot's flat index, at the bars' speed), the legend follows
+  the box instead of arrival order, and the total line falls back to
+  "across N seats" when the name list doesn't fit the column instead of
+  being chopped mid-name. From the #82 review. By Vibe.
+- **The context split moves right.** The CONTEXT SPLIT pie and its
+  per-seat bars now sit at the foot of the right-hand column, under
+  TASKS; the left usage column keeps the per-seat meters and the
+  CONTEXT / PLAN USAGE lists. The pie and bars were too tall for the
+  left. By Devin, on the owner's ask.
+- **The citation rule, enforced.** `comms-deck cite-check <PR> [--strict]`
+  sits beside review-check as rule 4's own gate: a PR must say who wrote
+  it, and in strict mode must cite every file it touches. docs/CITATION.md
+  is now the one page that states the rule; COMMS-DECK.md rule 4 links
+  here. CI (`.github/workflows/self-test.yml`) runs the self-test and all
+  three authorship gates on every PR. From Mystra's Wave-1 package
+  (quantum-kittens PR #7), at the owner's ask.
+- **Devin's usage, on the panel.** The CLI exports OTLP metrics to the
+  service's listener on 127.0.0.1:4318; `usage/devin.json` gets session
+  input/output tokens, the most-used model and the raw counters (running
+  totals survive a restart). The sessions database fills the figures the
+  export lacks (context, cache tokens). Only the metrics signal is
+  configured, so prompts and tool text are never exported. By Devin.
+- **The top bar's notifications, in the deck.** A NOTIFICATIONS block
+  under ACTIVITY shows the same feed the bar scrolls: the service tails
+  the queue mako's on-notify writes for waybar and keeps the last few
+  hundred in `notifications.jsonl`. Do-not-disturb still applies upstream;
+  waybar and mako are untouched. By Devin, on the owner's ask.
+- **ACTIVITY cooldowns in metric time.** The spent "idle until" countdown
+  (under an hour) and the polling seats' "next check"/"check late" timers
+  now show milliseconds — `58:20.250`, `1d 00:00:00.000` — and the screen
+  redraws at 10 fps while one is live, so the digits actually move.
+  Longer waits keep the coarse countdown. By Devin, on the owner's ask.
+- **Scratchpad cells meet.** The gap between the cells is 0, so the agent
+  windows sit flush. The outer margin stays 22. Hyprland still draws a 2px
+  border, rounded corners and a shadow on each window; the layout script
+  clears those on the scratchpad windows only, and leaves the global config
+  alone. By Alice.
+- **The task board.** An owner request to two or more agents becomes one
+  task with one holder, chosen by the deck from availability. Every copy of
+  the note says who holds it, a second claim is refused, and the service hands
+  the task on when the holder goes spent, away or idle past its lease. The
+  board is its own repo, [load-balancer](https://github.com/whyyyyyai/load-balancer).
+  comms-deck loads it if it's installed and runs exactly as before if it
+  isn't. New MCP tools: `tasks`, `claim_task`, `release_task`, `done_task`.
+  Open tasks show under ACTIVITY. By Claude, on the owner's ask, after
+  tonight's duplicate PRs. The idea is Lumo's (#40).
 - **The agents, categorised: CONTEXT and PLAN USAGE lists.** Under the
   pie, two sorted lists in the usage column: CONTEXT, one row per
   reporting seat with its current context and its share of the pool, the
@@ -121,7 +309,7 @@ folder.
   pasted into its own kitty window through remote control, without moving
   focus, and never while there's unsent text in that window or it has focus.
 - **Seats:** `claude` (Claude Code), `grok` (Grok CLI), `gravity`
-  (Antigravity CLI), `codex`, app seats `alice` and `juno` (Grok Bot app),
+  (Antigravity CLI), `codex`, the app seats (Grok Bot app),
   `lumo` (not set up), and `owner`. Terminal agents are recognised by their
   process.
 - **Grok Bot app seats** (Grok). The service types notes into a bot's own

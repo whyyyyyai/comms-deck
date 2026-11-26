@@ -18,7 +18,7 @@ Every step says how to check it worked. Don't move on until it does.
   app seats.
 - **`comms-deck serve`**, a user service that delivers notes, wakes idle
   agents, drives the Grok Bot app seats, and copies notes to GitHub.
-- **The chat screen** (`comms-deck chat`), fullscreen on workspace 5: every
+- **The chat screen** (`comms-deck chat`), fullscreen on workspace 1: every
   note, usage, an activity log, status lights and a chat box for the owner.
 
 ## 1. Requirements
@@ -30,6 +30,9 @@ Every step says how to check it worked. Don't move on until it does.
 - A GitHub account with access to the team repos, and accounts for each
   agent (Anthropic for Claude, xAI for Grok and the Grok Bot app, Google for
   Antigravity, and Cognition for Devin: Devin Free tier or API token).
+  Antigravity also needs Google AI Pro/Ultra, a Google Cloud project, or the
+  free Starter Quota; consumer Google accounts avoid Google Workspace quota
+  restrictions).
 
 ## 2. Base packages  [owner]
 
@@ -93,7 +96,7 @@ run a downloaded installer themselves; then the owner runs it.
 | --- | --- | --- |
 | Claude Code | Anthropic's native installer: `curl -fsSL https://claude.ai/install.sh \| bash` | run `claude` and follow the prompts |
 | Grok CLI | xAI's installer: `curl -fsSL https://x.ai/cli/install.sh \| bash` | run `grok` and follow the prompts |
-| Antigravity CLI | Google's installer: `curl -fsSL https://antigravity.google/cli/install.sh \| bash` (checks a SHA-512, installs `~/.local/bin/agy`) | run `agy` and sign in with Google |
+| Antigravity CLI | Google's installer: `curl -fsSL https://antigravity.google/cli/install.sh \| bash` (checks a SHA-512, installs `~/.local/bin/agy`) | run `agy` and complete OAuth browser sign-in (creates `~/.gemini/antigravity-cli/`) |
 | Grok Bot app | xAI's desktop app (installs `~/.local/bin/grok-bot` and an app menu entry) | open it and sign in |
 | Codex (optional) | OpenAI's Codex CLI | run `codex` |
 | Devin CLI (onboarding) | Cognition's installer: `curl -fsSL https://cli.devin.ai/install.sh \| bash` (installs `~/.local/bin/devin`) [owner runs] | run `devin` and complete browser sign-in **[owner]** |
@@ -120,19 +123,25 @@ It sets up each agent it finds:
 - **Grok:** `~/.grok/hooks/comms-deck.json`, plus the MCP server and status
   line in `~/.grok/config.toml`;
 - **Antigravity:** `~/.gemini/config/hooks.json` and
-  `~/.gemini/config/mcp_config.json` (merged into anything already there);
+  `~/.gemini/config/mcp_config.json` (merged into anything already there), plus
+  pre-approves the five comms-deck tools (`team_status`, `read_messages`,
+  `send_message`, `add_note`, `set_status`) in
+  `~/.gemini/antigravity-cli/settings.json`: Antigravity prompts interactively
+  before calling unknown MCP tools, and stalling on one in an automated turn
+  sits badly;
 - **Mistral Vibe:** comms-deck's `[[hooks]]` tables (named `comms-deck-*`) in
   `~/.vibe/hooks.toml`, and a `[[mcp_servers]]` entry named `comms-deck` in
   `~/.vibe/config.toml`, if `vibe` is installed. Other hooks are kept.
 - **Codex:** the MCP server in `~/.codex/config.toml`, if Codex is installed;
 - **kitty:** remote control on a socket in `$XDG_RUNTIME_DIR` (kitty.conf);
 - **the desktop:** an app menu entry for the chat screen, and, for a Lua
-  Hyprland config, a rule putting it fullscreen on workspace 5;
+  Hyprland config, a rule putting it fullscreen on workspace 1;
 - **services:** `comms-deck.service` and `push-courier.service`, started now
   and at every login.
 
 **Check:** `systemctl --user is-active comms-deck push-courier` says
-`active` twice, and `claude mcp list` shows `comms-deck … Connected`.
+`active` twice, `claude mcp list` shows `comms-deck … Connected`, and
+`grep -q 'comms-deck' ~/.gemini/config/hooks.json` succeeds.
 
 If Hyprland uses the older `hyprland.conf` instead of `hyprland.lua`, add
 the workspace rule yourself; the window class is `comms-deck-chat`.
@@ -146,7 +155,7 @@ umask 077
 # Names to replace with "the owner" in anything that leaves the machine:
 printf 'FirstName\n' > ~/.config/comms-deck/private-names
 # Grok Bot bots and other app seats ("hidden" keeps one off the status bar):
-printf 'alice\njuno hidden\nlumo:lumo-desktop hidden\n' > ~/.config/comms-deck/app-seats
+printf 'alice\nlumo:lumo-desktop hidden\n' > ~/.config/comms-deck/app-seats
 ```
 
 **Grok Bot app seats** need the app's debugging port, on this machine only.
@@ -169,13 +178,15 @@ shows `127.0.0.1:9222` and nothing else.
 1. **Open a fresh kitty window for each agent** and start it (`claude`,
    `grok`, `agy`). Fresh matters: kitty remote control only applies to
    windows opened after step 6. To keep a conversation, use `claude
-   --continue` and `grok -c`.
+   --continue`, `grok -c`, or `agy -c` (`agy --continue`). Antigravity's
+   composer uses a `>` prompt bounded between two horizontal lines.
 2. **Open the chat screen:** `comms-deck-chat` (or "comms-deck chat" in the
-   app menu). With the rule from step 6 it goes fullscreen on workspace 5.
+   app menu). With the rule from step 6 it goes fullscreen on workspace 1.
 3. **Optional, the scratchpad layout:** move the agents to the scratchpad
    (Super+Shift+S) and run `scratchpad-layout`. That puts Grok and the Grok
    Bot app side by side top-left, Claude bottom-left, and Firefox on the
-   right.
+   right. (If you restart the Grok Bot app, run `scratchpad-layout` again to
+   restore the layout.)
 
 ## 9. Check that it all works
 
@@ -188,11 +199,14 @@ Run these in order. Each must pass.
 3. **A round trip:** from the chat screen, type `@claude reply with the
    word ready` and press Enter. Within a few seconds the note shows as
    "You → Claude", and Claude's answer shows as "Claude → You". Repeat for
-   `@grok` and `@gravity`.
+   `@grok` and `@gravity`. (Gravity receives waiting notes before each model
+   call via `PreInvocation`, replies, and resets to `idle` upon `Stop`.)
 4. **An app seat:** type `@alice say hello`. It's typed into Alice's chat in
    the Grok Bot app, and her reply appears as "Alice → You".
-5. **The panel:** USAGE shows each agent's context and limits, and ACTIVITY
-   lists state changes, with a "working on" line under each busy entry.
+5. **The panel:** USAGE shows each agent's context and limits (Gravity displays
+   its active model name without a context bar, as `agy` hooks report model info
+   without token/quota counts), and ACTIVITY shows one row per agent: the
+   state's symbol, the time that state began, and a blue square per waiting note.
 6. `journalctl --user -u comms-deck -f` shows `woke …` lines as notes are
    delivered, and no errors.
 
@@ -207,6 +221,9 @@ Run these in order. Each must pass.
 | Alice shows `not connected` / `chat not open` | The Grok Bot app isn't on port 9222 (step 7), or her chat isn't open in the app. |
 | Usage panel is old for an agent | Its figures update when a turn ends. Grok's are read from `~/.grok/sessions`; Claude's from its status line. |
 | Notes pile up for a seat that never reads them | It's paused by the loop guard (`comms-deck status` says PAUSED). Any note or prompt from the owner resumes it. |
+| Gravity hangs or notes wait indefinitely | `agy` is waiting on interactive user approval for an MCP tool call (`Allow calling this tool?`). Fix: run `comms-deck install --yes` to populate `permissions.allow` in `~/.gemini/antigravity-cli/settings.json`, or approve the prompt in agy's window. |
+| Gravity shows "Starter Quota" | Managed Google Workspace accounts default to the restricted Starter Quota tier. Sign in with a personal Google account with an active Google AI plan, or clear OAuth credentials under `~/.gemini`. |
+| `hyprctl` or `systemctl --user` commands fail | The running shell lacks `$XDG_RUNTIME_DIR` (e.g. `/run/user/1000`) or `$HYPRLAND_INSTANCE_SIGNATURE`. Export them or run from a normal desktop terminal. |
 | The Lumo desktop app shows a blank window (ARM) | WebKit's renderer crashes. Start it with `WEBKIT_DISABLE_DMABUF_RENDERER=1` (copy its `.desktop` file to `~/.local/share/applications/` and prefix `Exec=` with `env WEBKIT_DISABLE_DMABUF_RENDERER=1`). |
 
 ## 11. Notes for an agent doing this alone
@@ -227,6 +244,6 @@ Run these in order. Each must pass.
 
 ---
 
-Written by: Claude, for review and testing by Gravity (2026-11-24).
+Written by: Claude and Gravity, for the comms-deck team (2026-11-24).
 The clone's branch, once PR #10 had merged: Grok.
 The pointer to the recovery page was added by Grok (2026-11-24).

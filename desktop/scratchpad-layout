@@ -20,22 +20,33 @@ left alone, so running it again changes nothing.
     scratchpad-layout --watch   keep it arranged: at login, and whenever a
                                 window opens, closes, changes workspace or
                                 floating. Also opens the chat views (full on
-                                workspace 5, half on 1) if they aren't
-                                open. The small view is no longer opened
-                                here (the owner: not enough room). Run by scratchpad-keeper.service.
+                                workspace 1) if it isn't open. The half and
+                                small views are no longer opened here: the
+                                full view covers workspace 1 (the owner,
+                                2026-11-25), and the scratchpad has no room. Run by scratchpad-keeper.service.
+    scratchpad-layout --self-test
+                                check the cell maths; does not move windows.
 
 After its first pass, --watch leaves a window that is already floating on
 the scratchpad wherever it is, so a window you drag or resize by hand
 stays put. It places only windows that open, come back to the scratchpad,
 or stop floating. Run scratchpad-layout (no flag) to snap everything back.
 
+The cells meet: the inner gap is 0 and the outer margin stays 22. Hyprland
+still draws a 2px border, rounded corners and a shadow (general:border_size
+2, decoration.rounding 10). noborder is gone in Hyprland 0.57, so this
+script sets border_size 0, rounding 0 and no_shadow on the scratchpad
+windows only, in the same pass that moves them. It does not change the
+global Hyprland config.
+
 Written by: Claude (2026-11-24)
+Written by: Alice (2026-11-25)
 """
 import json
 import subprocess
 from pathlib import Path
 
-GAP_OUT, GAP_IN = 22, 14       # match the tiled gaps already in use
+GAP_OUT, GAP_IN = 22, 0        # outer margin kept; cells meet
 WORKSPACE = "special:magic"
 
 
@@ -47,6 +58,29 @@ def dispatch(expr):
     out = hypr("dispatch", expr).strip()
     if out != "ok":
         raise SystemExit(f"hyprctl refused {expr}: {out}")
+
+
+def set_window_prop(address, prop, value):
+    """Set one Hyprland window property on this window only."""
+    if isinstance(value, bool):
+        # set_prop wants a string, not a Lua boolean (review by Devin on #58).
+        lua_value = '"true"' if value else '"false"'
+    elif isinstance(value, str):
+        lua_value = '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    else:
+        lua_value = str(value)
+    dispatch(
+        f'hl.dsp.window.set_prop({{ window = "address:{address}", '
+        f'prop = "{prop}", value = {lua_value} }})'
+    )
+
+
+def strip_cell_chrome(win):
+    """Remove the border, rounding and shadow so neighbouring cells sit flush."""
+    address = win["address"]
+    set_window_prop(address, "border_size", 0)
+    set_window_prop(address, "rounding", 0)
+    set_window_prop(address, "no_shadow", True)
 
 
 def proc_tree():
@@ -130,6 +164,7 @@ def arrange(quiet=False, keep_hand_moves=False):
             if not quiet:
                 print(f"skipped {label}: not open")
             continue
+        strip_cell_chrome(win)  # even if the place is already right, or left by hand
         in_place = (win["workspace"]["name"] == WORKSPACE and win["floating"]
                     and abs(win["at"][0] - x) <= 2 and abs(win["at"][1] - y) <= 2
                     and abs(win["size"][0] - w) <= 8 and abs(win["size"][1] - h) <= 8)
@@ -167,9 +202,9 @@ def event_socket():
 
 
 def open_chat_views():
-    """Start any chat view that isn't open. The launcher itself skips ones that are."""
+    """Start the full chat view if it isn't open. The launcher itself skips it if it is."""
     launcher = Path(__file__).resolve().parent / "comms-deck-chat"
-    for view in ("full", "half"):  # not "small": the scratchpad has no room for it (the owner)
+    for view in ("full",):  # fullscreen on workspace 1 (the owner, 22:49); "half" sat on 1 too, under it
         subprocess.Popen([str(launcher), view], start_new_session=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -255,10 +290,136 @@ def watch():
                         print(f"arrange failed: {error}", flush=True)
 
 
+def _tiles(cells, x, y, w, h):
+    """Raise if `cells` do not fill (x, y, w, h) exactly, with no overlap."""
+    area = 0
+    boxes = []
+    for _label, _win, cx, cy, cw, ch in cells:
+        if cw <= 0 or ch <= 0:
+            raise AssertionError(f"empty cell {_label}: {cw}x{ch}")
+        if not (cx >= x and cy >= y and cx + cw <= x + w and cy + ch <= y + h):
+            raise AssertionError(f"{_label} {cx},{cy} {cw}x{ch} leaves {x},{y} {w}x{h}")
+        for ox, oy, ow, oh in boxes:
+            if not (cx + cw <= ox or ox + ow <= cx or cy + ch <= oy or oy + oh <= cy):
+                raise AssertionError(f"{_label} overlaps {(ox, oy, ow, oh)}")
+        boxes.append((cx, cy, cw, ch))
+        area += cw * ch
+    if area != w * h:
+        raise AssertionError(f"area {area} != {w * h}")
+
+
+def _fake_win(address, cls, pid):
+    return {"address": address, "class": cls, "pid": pid,
+            "workspace": {"name": "x"}, "floating": False, "at": [0, 0], "size": [1, 1]}
+
+
+def _open_clients(shared_open):
+    """Fake kitty/app windows so plan_layout can run without Hyprland."""
+    clients = [
+        _fake_win("0x1", "kitty", 101),
+        _fake_win("0x2", "grok-bot", 201),
+        _fake_win("0x3", "kitty", 301),
+        _fake_win("0x4", "kitty", 401),
+        _fake_win("0x5", "lumo-desktop", 501),
+        _fake_win("0x6", "kitty", 601),
+        _fake_win("0x7", "kitty", 701),
+    ]
+    programs = [("grok", 102), ("vibe-rs", 302), ("claude", 402)]
+    if "Gravity" in shared_open:
+        programs.append(("agy", 602))
+    else:
+        clients = [c for c in clients if c["pid"] != 601]
+    if "Devin" in shared_open:
+        programs.append(("devin", 702))
+    else:
+        clients = [c for c in clients if c["pid"] != 701]
+    if "Lumo" not in shared_open:
+        clients = [c for c in clients if c["class"] != "lumo-desktop"]
+    tree = {}
+    for name, pid in programs:
+        tree[pid] = (pid - 1, name)
+        tree[pid - 1] = (1, "kitty")
+    return clients, tree
+
+
+def self_check():
+    """Check that the cells tile exactly. Does not talk to Hyprland or move windows."""
+    if GAP_OUT != 22 or GAP_IN != 0:
+        raise SystemExit(f"expected GAP_OUT 22 and GAP_IN 0, got {GAP_OUT}, {GAP_IN}")
+    monitors = [
+        {"reserved": [0, 0, 0, 0], "width": 1920, "height": 1080, "scale": 1, "x": 0, "y": 0},
+        {"reserved": [0, 48, 0, 0], "width": 2560, "height": 1440, "scale": 1, "x": 0, "y": 0},
+        {"reserved": [0, 0, 0, 0], "width": 1921, "height": 1081, "scale": 1, "x": 100, "y": 50},
+        {"reserved": [10, 20, 30, 40], "width": 3840, "height": 2160, "scale": 2, "x": 0, "y": 0},
+    ]
+    shared_cases = [
+        ("Lumo", "Gravity", "Devin"),
+        ("Lumo", "Gravity"),
+        ("Lumo", "Devin"),
+        ("Gravity", "Devin"),
+        ("Lumo",),
+        ("Gravity",),
+        ("Devin",),
+        (),
+    ]
+    for mon in monitors:
+        left, top, right, bottom = mon["reserved"]
+        width = round(mon["width"] / mon["scale"]) - left - right - 2 * GAP_OUT
+        height = round(mon["height"] / mon["scale"]) - top - bottom - 2 * GAP_OUT
+        x0, y0 = mon["x"] + left + GAP_OUT, mon["y"] + top + GAP_OUT
+        half_w = (width - GAP_IN) // 2
+        half_h = (height - GAP_IN) // 2
+        lower_y, lower_h = y0 + half_h + GAP_IN, height - half_h - GAP_IN
+        right_x, right_w = x0 + half_w + GAP_IN, width - half_w - GAP_IN
+        for shared in shared_cases:
+            clients, tree = _open_clients(shared)
+            plan = plan_layout(mon, clients, tree)
+            by = {label: (x, y, w, h, win) for label, win, x, y, w, h in plan}
+            top = [item for item in plan if item[0] in ("Grok", "Grok Bot", "Vibe") and item[1]]
+            _tiles(top, x0, y0, width, half_h)
+            claude = [item for item in plan if item[0] == "Claude" and item[1]]
+            _tiles(claude, x0, lower_y, half_w, lower_h)
+            vx, vy, vw, vh, vwin = by["Vibe"]
+            if vwin is None or (vx, vy, vw, vh) != (right_x, y0, right_w, half_h):
+                raise AssertionError(f"Vibe cell {by['Vibe']}")
+            if by["Grok"][0] + by["Grok"][2] != by["Grok Bot"][0]:
+                raise AssertionError("Grok and Grok Bot do not meet")
+            if by["Grok Bot"][0] + by["Grok Bot"][2] != by["Vibe"][0]:
+                raise AssertionError("Grok Bot and Vibe do not meet")
+            if by["Grok"][1] + by["Grok"][3] + GAP_IN != by["Claude"][1]:
+                raise AssertionError("top row and Claude do not meet")
+            open_shared = [item for item in plan if item[0] in ("Lumo", "Gravity", "Devin") and item[1]]
+            if open_shared:
+                _tiles(open_shared, right_x, lower_y, right_w, lower_h)
+                if open_shared[0][2] != right_x:
+                    raise AssertionError("shared row does not start at the right column")
+                last = open_shared[-1]
+                if last[2] + last[4] != right_x + right_w:
+                    raise AssertionError("shared row does not fill the right column")
+                if any(item[3] != lower_y or item[5] != lower_h for item in open_shared):
+                    raise AssertionError("shared row height is wrong")
+            elif any(item[1] for item in plan if item[0] in ("Lumo", "Gravity", "Devin")):
+                raise AssertionError("a closed shared seat was treated as open")
+            # With no shared window open, the bottom-right cell is empty on purpose.
+            present = [item for item in plan if item[1]]
+            if open_shared:
+                _tiles(present, x0, y0, width, height)
+        for n in (1, 2, 3):
+            wins = [(f"s{i}", {"i": i}) for i in range(n)] + [(f"closed{n}", None)]
+            row = share_row(wins, right_x, lower_y, right_w, lower_h)
+            open_row = [item for item in row if item[1]]
+            if len(open_row) != n or len(row) != n + 1:
+                raise AssertionError(f"share_row n={n} listed {row}")
+            _tiles(open_row, right_x, lower_y, right_w, lower_h)
+    print("layout tiles ok")
+
+
 def main():
     import sys
     if "--watch" in sys.argv[1:]:
         watch()
+    elif "--self-test" in sys.argv[1:]:
+        self_check()
     else:
         arrange()
 

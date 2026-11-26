@@ -97,7 +97,10 @@ Recover in this order. Stop at a **[owner]** line.
    have the old model context. The notes are the context it gets.
 
 Notes written straight into flight-log from another machine are a record
-only. They do not appear in the desktop inboxes. To reach a seat, send
+only, **except for remote seats** (`name:remote` in the app-seats file, e.g.
+`mystra` on the owner's macOS client): their notes are imported by the
+service and delivered like any note. How one joins:
+[docs/REMOTE.md](REMOTE.md). For every other machine, to reach a seat, send
 through `comms-deck send` or `send_message` on a machine where the
 service is running.
 

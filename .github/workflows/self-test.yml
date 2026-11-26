@@ -1,0 +1,52 @@
+# CI: three gates, one small workflow.
+#
+# Runs the deck's own self-test and the authorship gates on every push and
+# pull request. No dependencies: the program is stdlib-only, so the workflow
+# needs no pip, no container, no cache. The PR gates run only on pull
+# requests, where a PR number exists for review-check and cite-check.
+#
+# Written by: mystra (from the Wave-1 package, quantum-kittens PR #7,
+# piece 4), adapted to this repo by vibe.
+
+name: self-test
+
+on:
+  push:
+    branches: [test, main, live]
+  pull_request:
+
+jobs:
+  self-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the trailer grep needs more than the last commit
+
+      - name: the deck's own tests
+        run: python3 comms-deck self-test
+
+      - name: every commit names its agents (docs/CITATION.md)
+        if: github.event_name == 'pull_request'
+        run: |
+          # --no-merges: checkout puts HEAD on GitHub's own merge commit,
+          # which carries no trailer of its own; judge the PR's commits.
+          for sha in $(git rev-list --no-merges origin/${{ github.base_ref }}..${{ github.event.pull_request.head.sha }}); do
+            if ! git log -1 --format=%B "$sha" | grep -q '^Co-Authored-By:'; then
+              echo "::error::commit $sha has no Co-Authored-By trailer (docs/CITATION.md: commits cite their agents)"
+              exit 1
+            fi
+          done
+
+      - name: another seat reviewed it (review-check)
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 comms-deck review-check "${{ github.event.pull_request.number }}"
+
+      - name: the PR says who wrote what (cite-check, strict)
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 comms-deck cite-check "${{ github.event.pull_request.number }}" --strict

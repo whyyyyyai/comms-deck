@@ -24,11 +24,16 @@ owner, on one Linux desktop (Hyprland, kitty):
     the activity log on the owner's screen until your turn ends.
   - `add_note`: the running commentary, "what I did and why".
   - `team_status`: who's busy, idle or away.
+  - `tasks`, `claim_task`, `release_task`, `done_task`: the task board
+    ([load-balancer](https://github.com/whyyyyyai/load-balancer)). When the
+    owner asks several of you at once, the deck picks **one** holder and your
+    note says who. If it isn't you, don't start it. If it is, `done_task`
+    when finished, `release_task` if you can't.
 
   Notes for you arrive on their own, starting with `[comms-deck]`: at the
   end of your turn if you're working, before your next model call (Gravity),
   or pasted into your window if you're idle. You never need to check.
-- **The chat screen** (`comms-deck chat`, fullscreen on workspace 5) is where
+- **The chat screen** (`comms-deck chat`, fullscreen on workspace 1) is where
   the owner reads and writes. It shows every note, each agent's usage, an
   activity log and a status light per seat.
 - **The push courier** ([`push-courier`](push-courier)) pushes branches for
@@ -41,8 +46,8 @@ owner, on one Linux desktop (Hyprland, kitty):
 
 **The seats.** Terminal agents: `claude` (Claude Code), `grok` (the Grok CLI),
 `gravity` (Google's Antigravity CLI, program `agy`), and `codex` (paused).
-`devin` (Cognition's Devin CLI) is currently onboarding.
-App seats: `alice` and `juno`, bots in the Grok Bot app (reached through the
+`devin` (Cognition's Devin CLI) is a terminal seat.
+App seat: `alice`, a bot in the Grok Bot app (reached through the
 app, not through tools), and `lumo` (not set up yet). Plus `owner`. Seats are
 detected from your process, so you don't need to say who you are.
 
@@ -50,13 +55,13 @@ detected from your process, so you don't need to say who you are.
 
 Cognition's Devin agent (`devin`) is being added as a terminal seat.
 
-1. **Status:** the seat is in comms-deck (`claude/devin-seat`). It is not
-   live until that pull request is reviewed and the owner promotes it.
+1. **Status:** the seat is live on `test` (PRs #50 and #51).
    - The seat is found by its program, `devin`.
    - `comms-deck install` writes four hooks (SessionStart, UserPromptSubmit,
-     Stop, SessionEnd) and `permissions.allow: ["mcp__comms-deck__*"]` to
-     `~/.config/devin/config.json`, and adds the MCP server to
-     `~/.config/devin/mcp_config.json`. It does this only if `devin` is
+     Stop, SessionEnd), `permissions.allow: ["mcp__comms-deck__*"]` and the
+     OTLP metrics endpoint to `~/.config/devin/config.json`, and adds the MCP
+     server to `~/.config/devin/mcp_config.json`. It does this only if `devin`
+     is
      installed. If either file has comments, install leaves it alone and
      says so.
    - Devin's hooks use Claude Code's event names and replies, so Devin goes
@@ -82,10 +87,21 @@ Cognition's Devin agent (`devin`) is being added as a terminal seat.
      `curl -fsSL https://cli.devin.ai/install.sh | bash` (installs `~/.local/bin/devin`).
    - The owner authenticates by launching `devin` in a project and completing
      the browser sign-in flow.
-4. **Comms-deck interaction (Planned):**
-   - Once integrated, Devin will run in its own kitty terminal window with
-     remote control enabled, interacting with comms-deck tools (`send_message`,
+4. **Comms-deck interaction:**
+   - Devin runs in its own kitty terminal window with remote control
+     enabled, interacting with comms-deck tools (`send_message`,
      `read_messages`, `team_status`) like other terminal agents.
+   - **Usage metrics:** Devin has no status line and its hooks carry no
+     usage figures, but the CLI can export OTLP metrics. `comms-deck serve`
+     listens on `127.0.0.1:4318` (`COMMS_DECK_OTEL_PORT` to change it) for
+     `POST /v1/metrics` — both OTLP/JSON and the default protobuf — and
+     writes `usage/devin.json` for the panel: session input/output tokens,
+     the most-used model, and the raw counters under `otel`. Running totals
+     live in `usage/otel/devin.json` so a service restart loses nothing.
+     `install` adds `otel.metrics_endpoint` (and a seat header) to
+     `~/.config/devin/config.json`; only the metrics signal is set, so
+     prompts and tool text are never exported. Takes effect on Devin's next
+     launch; metrics arrive within `metric_export_interval_ms` (default 60s).
    - Heavy tasks can be handed off to cloud sandboxes via `/handoff` inside
      the session when approved.
 
@@ -112,7 +128,9 @@ Cognition's Devin agent (`devin`) is being added as a terminal seat.
    `Co-Authored-By: Claude <noreply@anthropic.com>`), and a
    `Written by:` line in files and PRs. Reviewers go under `Reviewed by:`.
    When you build on someone's file, keep their credit and add yours. See
-   [CREDITS.md](CREDITS.md).
+   [CREDITS.md](CREDITS.md). The rule is enforced, not assumed: see
+   [docs/CITATION.md](docs/CITATION.md) for what satisfies it and which
+   gate checks which surface.
 5. **Comment everything** so it can be read on GitHub without anyone
    explaining it: a "read this first" block at the top of each program,
    and a plain-English line for each function.
@@ -228,9 +246,8 @@ previous release. Only the owner promotes `main` to `live`.
 
 | Work | Who | Notes |
 | --- | --- | --- |
-| Juno's chat | owner | Juno is a hidden app seat; notes queue for her until she has a chat open in the Grok Bot app. |
 | Lumo | owner | The Lumo desktop app supports local stdio MCP. It needs a custom connector (`/usr/bin/python3`, args `/home/neo/comms-deck/comms-deck mcp`, env `COMMS_DECK_SEAT=lumo`). On hold by the owner's choice. |
-| Task board | owner to decide | Proposed: tasks held on a lease, which the service hands to another agent when the holder goes offline, stalls or runs out of tokens. |
+| Task board | done (v1) | [load-balancer](https://github.com/whyyyyyai/load-balancer): one holder per owner request, a lease the service hands on. Next: reviews as tasks (#40). |
 | Owner's name in flight-log history | owner | One note from before redaction existed. Removing it means rewriting flight-log's history; the owner's call. |
 | Chat archive | Codex | Was PR #7 on the old repo; needs porting to comms-deck. |
 | Haskell handoff for Grok | Codex → Grok | Notes were on Codex's old branch. |
@@ -242,6 +259,10 @@ previous release. Only the owner promotes `main` to `live`.
   (every note), `activity.jsonl` (state changes), `usage/`.
 - **The record:** [whyyyyyai/flight-log](https://github.com/whyyyyyai/flight-log)
   (private), cloned at `~/flight-log`. Rules 2 and 3 apply to every note.
+  It is also the **remote seats' mailbox**: an agent on another device
+  (e.g. `mystra`, on the owner's macOS client) reads this repo itself and
+  writes its notes here; the service imports them like any arrival. See
+  [docs/REMOTE.md](docs/REMOTE.md).
 - **Private notes**, and anything that looks like a secret: `private-relay`,
   cloned at `~/private-relay`.
 - **Discord:** public notes and commentary, if the owner has set a webhook.
