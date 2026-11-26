@@ -27,7 +27,7 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScree
 use ratatui::backend::{CrosstermBackend, TestBackend};
 use ratatui::Terminal;
 
-use ui::{App, View};
+use ui::{App, View, JUMP_SECS};
 
 enum Msg {
     Snap(data::Snapshot),
@@ -129,6 +129,7 @@ fn run(view: View, half: bool) -> io::Result<()> {
         }
         let dt = last.elapsed().as_secs_f64();
         last = Instant::now();
+        app.tick(dt);
         if app.view == View::Nav {
             let w = app.warp();
             app.stars.step(dt, 0.12 * w);
@@ -367,6 +368,36 @@ fn self_test() -> bool {
         half.contains("04 WARP CORE") && half.find("04 WARP CORE").zip(half.find("01 CREW")).is_some_and(|(c, k)| (k / 110) > (c / 110)), &half);
     let routed = send::route("@grok -claude hi", &["grok".into(), "claude".into()]);
     check("chat box routing matches comms-deck route()", routed.as_deref() == Ok("grok -claude"), &format!("{routed:?}"));
+
+    // The warp jump: a fresh note to all (or a merge note) bursts the speed,
+    // once, then fades. An old broadcast fires nothing.
+    let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let all_note = |time: &str, to: &str, text: &str| data::Note {
+        from: "owner".into(),
+        to: to.into(),
+        time: time.into(),
+        text: text.into(),
+        quiet: false,
+    };
+    let mut fresh = data::Snapshot { time: data::now(), ..Default::default() };
+    fresh.notes = vec![all_note(&stamp, "all", "bring everyone back online")];
+    check("a fresh note to all is a jump trigger", fresh.newest_jump_note(120.0).is_some(), "no trigger");
+    let mut old = data::Snapshot { time: data::now() + 3600.0, ..Default::default() };
+    old.notes = vec![all_note(&stamp, "all", "bring everyone back online")];
+    check("an hour-old broadcast is not a jump trigger", old.newest_jump_note(120.0).is_none(), "fired anyway");
+    let mut merge = data::Snapshot { time: data::now(), ..Default::default() };
+    merge.notes = vec![all_note(&stamp, "claude", "merged #144, thanks for the review")];
+    check("a merge note is a jump trigger too", merge.newest_jump_note(120.0).is_some(), "no trigger");
+    let mut japp = App::new(View::Nav, data::Snapshot { time: data::now(), ..Default::default() });
+    let base = japp.warp();
+    japp.refresh(data::Snapshot { jump_trigger: Some(data::now()), ..Default::default() });
+    check("the warp jump bursts above the traffic's warp", japp.jump_left > 0.0 && japp.warp() > base, &format!("{} vs {base}", japp.warp()));
+    japp.tick(JUMP_SECS);
+    check("the burst fades when its timer runs out", japp.jump_left == 0.0 && japp.warp() == base, &format!("{}", japp.warp()));
+    japp.refresh(data::Snapshot { jump_trigger: Some(data::now()), ..Default::default() });
+    let fired = japp.jump_left;
+    japp.refresh(data::Snapshot { jump_trigger: Some(japp.seen_trigger), ..Default::default() });
+    check("the same broadcast doesn't fire twice", japp.jump_left == fired, &format!("{} then {}", fired, japp.jump_left));
     println!("{}", if ok { "all passed" } else { "some failed" });
     ok
 }

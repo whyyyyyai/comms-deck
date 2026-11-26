@@ -111,6 +111,10 @@ pub struct Snapshot {
     pub nav: crate::navdata::NavData,
     /// The status call's own time, for NAV-TIME.
     pub status_time: f64,
+    /// The epoch of the newest note that fires a warp jump — one to `all`,
+    /// or one announcing a merge — if it is fresh (2 minutes). None when the
+    /// log holds no such note. The App jumps once, then remembers it.
+    pub jump_trigger: Option<f64>,
 }
 
 impl Snapshot {
@@ -122,6 +126,20 @@ impl Snapshot {
     pub fn notes_last_hour(&self) -> usize {
         let cutoff = self.time - 3600.0;
         self.activity.iter().filter(|a| a.time >= cutoff && a.state == "busy").count()
+    }
+
+    /// The epoch of the newest jump-worthy note (one to `all`, or one
+    /// announcing a merge), or None. Only notes newer than `fresh` seconds
+    /// count, so a restart doesn't replay an old broadcast as a jump.
+    pub fn newest_jump_note(&self, fresh: f64) -> Option<f64> {
+        self.notes
+            .iter()
+            .filter(|n| n.to == "all" || n.text.to_lowercase().contains("merged #"))
+            .filter_map(|n| {
+                let t = crate::navdata::event_time(Some(&Value::String(n.time.clone())));
+                (t > 0.0 && self.time - t <= fresh).then_some(t)
+            })
+            .fold(None, |acc: Option<f64>, t| Some(acc.map_or(t, |a: f64| a.max(t))))
     }
 }
 
@@ -150,6 +168,7 @@ pub fn load() -> Snapshot {
     snap.workspaces = hypr_workspaces();
     let waiting = snap.seats.iter().map(|s| s.waiting).sum();
     snap.nav = crate::navdata::load(waiting, 0.0, snap.status_time);
+    snap.jump_trigger = snap.newest_jump_note(120.0);
     snap
 }
 
