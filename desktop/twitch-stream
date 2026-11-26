@@ -34,6 +34,9 @@ PY
 }
 
 case "${1:-start}" in
+    start) ;;
+    -h|--help)
+        sed -n '2,12p' "$0"; exit 0 ;;
     status)
         if [ -f "$STATE" ] && kill -0 "$(cat "$STATE")" 2>/dev/null; then
             echo "streaming (pid $(cat "$STATE"))"
@@ -48,6 +51,8 @@ case "${1:-start}" in
             echo "not streaming"
         fi
         exit 0 ;;
+    *)
+        echo "usage: twitch-stream [start|status|stop]" >&2; exit 2 ;;
 esac
 
 [ -f "$SECRET" ] || { echo "no $SECRET — put the Twitch stream key there (chmod 600)" >&2; exit 1; }
@@ -62,6 +67,9 @@ command -v parecord   >/dev/null || { echo "parecord not installed (pipewire-pul
 command -v ffmpeg      >/dev/null || { echo "ffmpeg not installed" >&2; exit 1; }
 
 W=$(cfg width 1920); H=$(cfg height 1080); FPS=$(cfg fps 30); BR=$(cfg bitrate 4500k)
+# bitrate is kilobits ("4500k" or "4500"); bufsize wants ~2x that, as "Nk".
+BRN=$(echo "$BR" | tr 'A-Z' 'a-z' | sed 's/[^0-9.].*//')
+BUFSIZE="$(( ${BRN%.*} * 2 ))k"
 MONITOR=$(pactl get-default-sink 2>/dev/null).monitor
 [ "$MONITOR" != ".monitor" ] || MONITOR=""
 
@@ -69,11 +77,11 @@ MONITOR=$(pactl get-default-sink 2>/dev/null).monitor
 # capture pipes die with it.
 ffmpeg -hide_banner -loglevel warning -stats \
     -f matroska -i <(wf-recorder -o - -f matroska) \
-    ${MONITOR:+-f s16le -ar 48000 -ac 2 -i <(parecord --device="$MONITOR" --format=s16le --rate=48000 --channels=2)} \
+    ${MONITOR:+-f s16le -ar 48000 -ac 2 -i <(parecord --raw --device="$MONITOR" --format=s16le --rate=48000 --channels=2)} \
     -map 0:v ${MONITOR:+-map 1:a} \
     -vf "scale=${W}:${H},fps=${FPS}" -r "$FPS" \
     -c:v libx264 -preset veryfast -tune zerolatency \
-    -b:v "$BR" -maxrate "$BR" -bufsize "$(( ${BR%k} * 2 ))k" -g $((FPS * 2)) \
+    -b:v "$BR" -maxrate "$BR" -bufsize "$BUFSIZE" -g $((FPS * 2)) \
     -pix_fmt yuv420p \
     ${MONITOR:+-c:a aac -b:a 160k -ar 48000} \
     -f flv "$URL/$KEY" &
