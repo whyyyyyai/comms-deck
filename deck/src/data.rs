@@ -296,6 +296,42 @@ impl Snapshot {
             .filter_map(|(seat, u)| u.context_tokens.map(|t| (seat.clone(), t)))
             .collect()
     }
+
+    /// How fast each seat's stars run in the warp core. The metric is the
+    /// seat's own pressure: the fullest of its context / 5-hour / weekly
+    /// meters, plus live traffic (busy, then notes waiting). No usage files
+    /// means a neutral 0.75 base, so an idle seat never stalls the field.
+    pub fn seat_pace(&self) -> Vec<(String, f64)> {
+        let mut out: BTreeMap<String, f64> = BTreeMap::new();
+        for s in &self.seats {
+            out.insert(s.name.clone(), seat_pace(Some(s), self.usage.get(&s.name)));
+        }
+        for (seat, u) in &self.usage {
+            out.entry(seat.clone()).or_insert_with(|| seat_pace(None, Some(u)));
+        }
+        out.into_iter().collect()
+    }
+}
+
+fn seat_pace(seat: Option<&Seat>, usage: Option<&Usage>) -> f64 {
+    let pressure = usage
+        .map(|u| {
+            [u.context_pct, u.five_hour_pct, u.week_pct]
+                .into_iter()
+                .flatten()
+                .fold(0.0f64, |a, b| a.max(b))
+                / 100.0
+        })
+        .unwrap_or(0.0)
+        .clamp(0.0f64, 1.0f64);
+    let mut pace = 0.75 + 0.75 * pressure;
+    if seat.is_some_and(|s| s.shown == "busy") {
+        pace += 0.20;
+    }
+    if let Some(s) = seat {
+        pace += s.waiting.min(25) as f64 * 0.008;
+    }
+    pace.clamp(0.6, 1.8)
 }
 
 pub fn read_meminfo(path: &Path) -> Memory {
@@ -368,5 +404,25 @@ mod tests {
     fn private_notes_never_reach_the_screen() {
         let v: Value = serde_json::from_str(r#"{"kind":"message","from":"a","to":"b","text":"x","private":true}"#).unwrap();
         assert!(parse_note(&v).is_none());
+    }
+
+    #[test]
+    fn pace_is_pressure_plus_traffic() {
+        let status: Value = serde_json::from_str(
+            r#"{"seats": {
+                "claude": {"shown":"busy","waiting":10,"rank":[0]},
+                "grok": {"shown":"ready","waiting":0,"rank":[1]}
+            }}"#,
+        )
+        .unwrap();
+        let mut snap = Snapshot { time: now(), seats: parse_status(&status), ..Default::default() };
+        snap.usage.insert(
+            "claude".into(),
+            Usage { context_pct: Some(80.0), five_hour_pct: Some(20.0), week_pct: Some(10.0), ..Default::default() },
+        );
+        snap.usage.insert("grok".into(), Usage { context_pct: Some(10.0), ..Default::default() });
+        let pace: BTreeMap<String, f64> = snap.seat_pace().into_iter().collect();
+        assert!(pace["claude"] > pace["grok"], "{pace:?}");
+        assert!(pace["claude"] <= 1.8 && pace["grok"] >= 0.6, "{pace:?}");
     }
 }

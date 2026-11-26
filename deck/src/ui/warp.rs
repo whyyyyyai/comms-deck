@@ -5,7 +5,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::Widget;
 
 use super::theme::seat_colour;
@@ -16,6 +16,8 @@ pub struct Star {
     y: f64,
     z: f64,
     pub seat: Option<String>,
+    /// This seat's metric pace (Snapshot::seat_pace), 0.6..1.8.
+    pace: f64,
 }
 
 pub struct Starfield {
@@ -23,15 +25,17 @@ pub struct Starfield {
     rng: u64,
     /// (seat, share 0..1), cumulative order kept stable for dealing.
     split: Vec<(String, f64)>,
+    /// (seat, pace) looked up when a star is dealt or respawns.
+    pace: Vec<(String, f64)>,
 }
 
 const NEAR: f64 = 0.05;
 
 impl Starfield {
     pub fn new(count: usize, seed: u64) -> Self {
-        let mut f = Starfield { stars: Vec::with_capacity(count), rng: seed | 1, split: Vec::new() };
+        let mut f = Starfield { stars: Vec::with_capacity(count), rng: seed | 1, split: Vec::new(), pace: Vec::new() };
         for _ in 0..count {
-            let mut s = Star { x: 0.0, y: 0.0, z: 0.0, seat: None };
+            let mut s = Star { x: 0.0, y: 0.0, z: 0.0, seat: None, pace: 1.0 };
             f.respawn(&mut s, true);
             f.stars.push(s);
         }
@@ -60,8 +64,24 @@ impl Starfield {
             let seats: Vec<Option<String>> = (0..n).map(|i| self.deal_exact(i, n)).collect();
             for (s, seat) in self.stars.iter_mut().zip(seats) {
                 s.seat = seat;
+                s.pace = Self::pace_of(&self.pace, s.seat.as_deref());
             }
         }
+    }
+
+    /// Set each seat's pace from Snapshot::seat_pace and apply it to the
+    /// stars already in the sky, so a meter change shows on the next frame.
+    pub fn set_pace(&mut self, pace: &[(String, f64)]) {
+        self.pace = pace.iter().map(|(s, p)| (s.clone(), p.clamp(0.5, 2.0))).collect();
+        for s in self.stars.iter_mut() {
+            s.pace = Self::pace_of(&self.pace, s.seat.as_deref());
+        }
+    }
+
+    fn pace_of(pace: &[(String, f64)], seat: Option<&str>) -> f64 {
+        seat.and_then(|name| pace.iter().find(|(s, _)| s == name).map(|(_, p)| *p))
+            .unwrap_or(1.0)
+            .clamp(0.5, 2.0)
     }
 
     /// The seat for star `i` of `n` when dealing all at once.
@@ -94,13 +114,15 @@ impl Starfield {
         s.y = self.rand() * 2.0 - 1.0;
         s.z = if anywhere { NEAR + self.rand() * (1.0 - NEAR) } else { 1.0 };
         s.seat = self.deal();
+        s.pace = Self::pace_of(&self.pace, s.seat.as_deref());
     }
 
-    /// Move every star toward the viewer. `speed` is depth per second.
+    /// Move every star toward the viewer. `speed` is depth per second; each
+    /// star's own pace (its seat's meters and traffic) scales that speed.
     pub fn step(&mut self, dt: f64, speed: f64) {
         let mut stars = std::mem::take(&mut self.stars);
         for s in stars.iter_mut() {
-            s.z -= dt * speed;
+            s.z -= dt * speed * s.pace;
             if s.z <= NEAR {
                 self.respawn(s, false);
             }
@@ -157,13 +179,25 @@ pub fn star_counts(split: &[(String, f64)], n: usize) -> Vec<(String, usize)> {
 pub struct WarpCore<'a> {
     pub field: &'a Starfield,
     pub warp: f64,
-    pub shield_low: bool,
+    /// Memory available as a percentage; the shield readout and its colour.
+    pub shield_pct: f64,
     pub contacts: Vec<(String, u64)>,
 }
 
 /// The reticle's cell: the area's exact centre (nav-deck's HUD rule).
 pub fn centre(area: Rect) -> (u16, u16) {
     (area.x + area.width / 2, area.y + area.height / 2)
+}
+
+/// A contact's bearing: stable per seat, so adding or dropping another
+/// contact never swings this one around the reticle.
+fn bearing(seat: &str) -> f64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for b in seat.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    (h % 6283) as f64 / 1000.0
 }
 
 impl Widget for WarpCore<'_> {
@@ -174,31 +208,63 @@ impl Widget for WarpCore<'_> {
         let (cx, cy) = centre(area);
         let half_w = area.width as f64 / 2.0;
         let half_h = area.height as f64 / 2.0;
-        for s in &self.field.stars {
+        let project = |x: f64, y: f64, z: f64| -> Option<(u16, u16)> {
             // Cells are about twice as tall as wide: halve y to keep it round.
-            let px = cx as f64 + s.x / s.z * half_w * 0.5;
-            let py = cy as f64 + s.y / s.z * half_h * 0.5;
+            let px = cx as f64 + x / z * half_w * 0.5;
+            let py = cy as f64 + y / z * half_h * 0.5;
+            if px < area.x as f64 || py < area.y as f64 {
+                return None;
+            }
+            let (px, py) = (px as u16, py as u16);
+            if px >= area.right() || py >= area.bottom() {
+                return None;
+            }
+            Some((px, py))
+        };
+        // Trails are a warp readout: they only exist while the deck is hot.
+        if self.warp > 5.0 {
+            let n = (((self.warp - 5.0) * 0.6).round() as usize + 1).clamp(1, 3);
+            for s in &self.field.stars {
+                let colour = s.seat.as_deref().map(seat_colour).unwrap_or(Color::Indexed(244));
+                let trail = Style::default().fg(colour).add_modifier(Modifier::DIM);
+                for k in 1..=n {
+                    let tz = s.z * (1.0 + 0.30 * k as f64);
+                    if let Some((px, py)) = project(s.x, s.y, tz) {
+                        buf[(px, py)].set_symbol("·").set_style(trail);
+                    }
+                }
+            }
+        }
+        for s in &self.field.stars {
+            let Some((px, py)) = project(s.x, s.y, s.z) else { continue };
+            let glyph = if s.z < 0.25 { "✦" } else if s.z < 0.55 { "•" } else { "·" };
+            let colour = s.seat.as_deref().map(seat_colour).unwrap_or(Color::Indexed(244));
+            let mut style = Style::default().fg(colour);
+            if s.pace >= 1.5 {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            buf[(px, py)].set_symbol(glyph).set_style(style);
+        }
+        // Contacts keep a bearing of their own (stable per seat); more notes
+        // waiting pushes the blip out on its reach.
+        for (seat, waiting) in &self.contacts {
+            let angle = bearing(seat);
+            let reach = 0.45 + 0.25 * ((*waiting).min(30) as f64 / 30.0);
+            let px = cx as f64 + angle.cos() * half_w * reach;
+            let py = cy as f64 + angle.sin() * half_h * reach;
+            let label = format!("{}{}", seat.chars().next().unwrap_or('?').to_ascii_uppercase(), waiting);
             if px < area.x as f64 || py < area.y as f64 {
                 continue;
             }
             let (px, py) = (px as u16, py as u16);
-            if px >= area.right() || py >= area.bottom() {
+            if py >= area.bottom() || (px as usize + label.len()) >= area.right() as usize {
                 continue;
             }
-            let glyph = if s.z < 0.25 { "✦" } else if s.z < 0.55 { "•" } else { "·" };
-            let colour = s.seat.as_deref().map(seat_colour).unwrap_or(Color::Indexed(244));
-            buf[(px, py)].set_symbol(glyph).set_style(Style::default().fg(colour));
-        }
-        // Contacts: seats with notes waiting, at a bearing of their own.
-        for (i, (seat, waiting)) in self.contacts.iter().enumerate() {
-            let angle = (i as f64 + 0.5) * std::f64::consts::TAU / self.contacts.len().max(1) as f64;
-            let px = cx as f64 + angle.cos() * half_w * 0.6;
-            let py = cy as f64 + angle.sin() * half_h * 0.6;
-            let label = format!("{}{}", seat.chars().next().unwrap_or('?').to_ascii_uppercase(), waiting);
-            let (px, py) = (px as u16, py as u16);
-            if py >= area.y && py < area.bottom() && px >= area.x && (px as usize + label.len()) < area.right() as usize {
-                buf.set_string(px, py, label, Style::default().fg(seat_colour(seat)));
+            let mut style = Style::default().fg(seat_colour(seat));
+            if *waiting >= 10 {
+                style = style.add_modifier(Modifier::BOLD);
             }
+            buf.set_string(px, py, label, style);
         }
         // Reticle on the exact centre.
         let ret = Style::default().fg(Color::Indexed(252));
@@ -209,8 +275,10 @@ impl Widget for WarpCore<'_> {
         }
         let hud = format!(" WARP {:.1} ", self.warp);
         buf.set_string(area.x + 1, area.bottom() - 1, hud, Style::default().fg(Color::Indexed(117)));
-        let shield = if self.shield_low { " SHLD LOW " } else { " SHLD OK " };
-        let colour = if self.shield_low { Color::Indexed(203) } else { Color::Indexed(114) };
+        let pct = self.shield_pct.clamp(0.0, 100.0);
+        let low = pct < 15.0;
+        let shield = format!(" SHLD {} {:.0}% ", if low { "LOW" } else { "OK" }, pct);
+        let colour = if low { Color::Indexed(203) } else { Color::Indexed(114) };
         let x = area.right().saturating_sub(shield.len() as u16 + 1);
         buf.set_string(x, area.bottom() - 1, shield, Style::default().fg(colour));
     }
@@ -255,11 +323,20 @@ mod tests {
     }
 
     #[test]
+    fn pace_follows_the_seat_metric() {
+        let mut f = Starfield::new(100, 5);
+        f.set_split(&[("claude".into(), 1.0), ("grok".into(), 1.0)], true);
+        f.set_pace(&[("claude".into(), 1.8), ("grok".into(), 0.6)]);
+        assert!(f.stars.iter().filter(|s| s.seat.as_deref() == Some("claude")).all(|s| s.pace == 1.8));
+        assert!(f.stars.iter().filter(|s| s.seat.as_deref() == Some("grok")).all(|s| s.pace == 0.6));
+    }
+
+    #[test]
     fn reticle_is_on_the_exact_centre() {
         let area = Rect::new(0, 0, 41, 21);
         let mut buf = Buffer::empty(area);
         let f = Starfield::new(0, 1);
-        WarpCore { field: &f, warp: 1.0, shield_low: false, contacts: vec![] }.render(area, &mut buf);
+        WarpCore { field: &f, warp: 1.0, shield_pct: 100.0, contacts: vec![] }.render(area, &mut buf);
         assert_eq!(buf[(20, 10)].symbol(), "╋");
     }
 }
