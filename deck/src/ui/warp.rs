@@ -176,6 +176,16 @@ pub fn star_counts(split: &[(String, f64)], n: usize) -> Vec<(String, usize)> {
     counts
 }
 
+/// A streak across the core: `count` notes from `from` to `to` in the
+/// window, `age` seconds since the newest of them.
+#[derive(Clone, Debug)]
+pub struct WarpLink {
+    pub from: String,
+    pub to: String,
+    pub age: f64,
+    pub count: u32,
+}
+
 pub struct WarpCore<'a> {
     pub field: &'a Starfield,
     pub warp: f64,
@@ -186,6 +196,14 @@ pub struct WarpCore<'a> {
     pub selected: Option<String>,
     /// Zoomed: (seat, label) written round the edge at the seat's bearing.
     pub ring: Vec<(String, String)>,
+    /// Recent notes as seat-to-seat streaks.
+    pub links: Vec<WarpLink>,
+    /// Seats near a usage limit: (seat, fullest pct); they flicker red.
+    pub alerts: Vec<(String, f64)>,
+    /// Spent seats: their stars drift dim.
+    pub spent: Vec<String>,
+    /// Wall time for the flicker, in seconds.
+    pub now: f64,
 }
 
 /// Where a star at (x, y, z) lands in `area`, if it does.
@@ -272,6 +290,32 @@ impl Widget for WarpCore<'_> {
             Some(_) => style.add_modifier(Modifier::DIM),
             None => style,
         };
+        // Note streaks: a line across the core between the sender's and the
+        // receiver's bearings, in the sender's colour, dimming with age.
+        for l in &self.links {
+            if l.from == l.to {
+                continue;
+            }
+            let (a1, a2) = (bearing(&l.from), bearing(&l.to));
+            let r = 0.55;
+            let (x1, y1) = (cx as f64 + a1.cos() * half_w * r, cy as f64 + a1.sin() * half_h * r);
+            let (x2, y2) = (cx as f64 + a2.cos() * half_w * r, cy as f64 + a2.sin() * half_h * r);
+            let steps = ((x2 - x1).abs().max((y2 - y1).abs()) * 2.0).ceil() as usize + 1;
+            let mut style = Style::default().fg(seat_colour(&l.from));
+            if l.age > 300.0 {
+                style = style.add_modifier(Modifier::DIM);
+            } else if l.count >= 3 {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            let glyph = if l.count >= 3 { "•" } else { "·" };
+            for k in 0..steps {
+                let f = k as f64 / (steps - 1).max(1) as f64;
+                let (px, py) = (x1 + (x2 - x1) * f, y1 + (y2 - y1) * f);
+                if px >= area.x as f64 && py >= area.y as f64 && px < area.right() as f64 && py < area.bottom() as f64 {
+                    buf[(px as u16, py as u16)].set_symbol(glyph).set_style(style);
+                }
+            }
+        }
         // Trails are a warp readout: they only exist while the deck is hot.
         if self.warp > 5.0 {
             let n = (((self.warp - 5.0) * 0.6).round() as usize + 1).clamp(1, 3);
@@ -295,7 +339,11 @@ impl Widget for WarpCore<'_> {
                 style = style.add_modifier(Modifier::BOLD);
             }
             let glyph = if sel.is_some() && s.seat.as_deref() == sel && glyph == "·" { "•" } else { glyph };
-            buf[(px, py)].set_symbol(glyph).set_style(picked(s.seat.as_deref(), style));
+            let mut style = picked(s.seat.as_deref(), style);
+            if s.seat.as_deref().is_some_and(|n| self.spent.iter().any(|x| x == n)) {
+                style = style.add_modifier(Modifier::DIM);
+            }
+            buf[(px, py)].set_symbol(glyph).set_style(style);
         }
         // Contacts keep a bearing of their own (stable per seat); more notes
         // waiting pushes the blip out on its reach.
@@ -317,6 +365,20 @@ impl Widget for WarpCore<'_> {
                 style = style.add_modifier(Modifier::REVERSED);
             }
             buf.set_string(px, py, label, style);
+        }
+        // A seat near a usage limit flickers red on its bearing.
+        for (seat, _pct) in &self.alerts {
+            let angle = bearing(seat);
+            let px = cx as f64 + angle.cos() * half_w * 0.33;
+            let py = cy as f64 + angle.sin() * half_h * 0.33;
+            if px < area.x as f64 || py < area.y as f64 || px >= area.right() as f64 || py >= area.bottom() as f64 {
+                continue;
+            }
+            let on = (self.now * 2.0 + angle).rem_euclid(1.0) < 0.55;
+            let style = Style::default()
+                .fg(Color::Indexed(203))
+                .add_modifier(if on { Modifier::BOLD } else { Modifier::DIM });
+            buf[(px as u16, py as u16)].set_symbol(if on { "!" } else { "·" }).set_style(style);
         }
         // Zoomed: every seat's name round the edge, on its own bearing, so
         // the blips and stars can be read without the side panels.
@@ -402,7 +464,76 @@ mod tests {
         let area = Rect::new(0, 0, 41, 21);
         let mut buf = Buffer::empty(area);
         let f = Starfield::new(0, 1);
-        WarpCore { field: &f, warp: 1.0, shield_pct: 100.0, contacts: vec![], selected: None, ring: vec![] }.render(area, &mut buf);
+        core(&f).render(area, &mut buf);
         assert_eq!(buf[(20, 10)].symbol(), "╋");
+    }
+
+    fn core<'a>(field: &'a Starfield) -> WarpCore<'a> {
+        WarpCore {
+            field,
+            warp: 1.0,
+            shield_pct: 100.0,
+            contacts: vec![],
+            selected: None,
+            ring: vec![],
+            links: vec![],
+            alerts: vec![],
+            spent: vec![],
+            now: 0.0,
+        }
+    }
+
+    fn text(buf: &Buffer) -> String {
+        let a = buf.area;
+        let mut out = String::new();
+        for y in a.top()..a.bottom() {
+            for x in a.left()..a.right() {
+                out.push_str(buf[(x, y)].symbol());
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_note_streak_draws_between_the_two_seats() {
+        let f = Starfield::new(0, 1);
+        let area = Rect::new(0, 0, 80, 24);
+        let mut plain = Buffer::empty(area);
+        core(&f).render(area, &mut plain);
+        let mut linked = Buffer::empty(area);
+        WarpCore {
+            links: vec![WarpLink { from: "claude".into(), to: "grok".into(), age: 30.0, count: 1 }],
+            ..core(&f)
+        }
+        .render(area, &mut linked);
+        assert_ne!(text(&plain), text(&linked));
+    }
+
+    #[test]
+    fn a_usage_alert_flickers_red() {
+        let f = Starfield::new(0, 1);
+        let area = Rect::new(0, 0, 80, 24);
+        let alerts = vec![("claude".to_string(), 95.0)];
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..20 {
+            let mut buf = Buffer::empty(area);
+            WarpCore { alerts: alerts.clone(), now: i as f64 * 0.13, ..core(&f) }.render(area, &mut buf);
+            let t = text(&buf);
+            assert!(t.contains('!') || t.contains('·'), "alert glyph missing at {i}");
+            seen.insert(t);
+        }
+        assert!(seen.len() > 1, "the alert never changed");
+    }
+
+    #[test]
+    fn spent_seat_stars_go_dim() {
+        let mut f = Starfield::new(60, 9);
+        f.set_split(&[("claude".into(), 1.0), ("codex".into(), 1.0)], true);
+        let area = Rect::new(0, 0, 80, 24);
+        let mut lit = Buffer::empty(area);
+        core(&f).render(area, &mut lit);
+        let mut dim = Buffer::empty(area);
+        WarpCore { spent: vec!["codex".to_string()], ..core(&f) }.render(area, &mut dim);
+        assert_ne!(lit, dim);
     }
 }

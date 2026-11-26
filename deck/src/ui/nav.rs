@@ -17,9 +17,9 @@ use ratatui::Frame;
 use super::comms::{draw_crew_titled, draw_usage, wrap};
 use super::crew::Crew;
 use super::theme::{bar, dim, display_name, meter_colour, panel, seat_colour};
-use super::warp::WarpCore;
+use super::warp::{WarpCore, WarpLink};
 use super::App;
-use crate::navdata::{clock, human_dur, SPARK_POINTS};
+use crate::navdata::{clock, event_time, human_dur, SPARK_POINTS};
 
 const BLOCKS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
@@ -168,6 +168,57 @@ fn draw_crew_map(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Crew { snap: &app.snap, now: app.snap.time }, inner);
 }
 
+/// The note streaks the warp core draws: notes of the last 30 minutes (the
+/// newest 300), grouped sender -> receiver, "all" fanned out to the seats —
+/// the same window the crew map's links use.
+fn warp_links(app: &App) -> Vec<WarpLink> {
+    use std::collections::HashMap;
+    const SHOWN: f64 = 1800.0;
+    let now = app.snap.time;
+    let seats: Vec<&str> = app.snap.seats.iter().filter(|s| !s.hidden).map(|s| s.name.as_str()).collect();
+    let mut known: Vec<&str> = seats.clone();
+    known.push("owner");
+    let mut agg: HashMap<(String, String), (u32, f64)> = HashMap::new();
+    for n in app.snap.notes.iter().rev().take(300) {
+        let t = event_time(Some(&serde_json::Value::String(n.time.clone())));
+        let age = now - t;
+        if t <= 0.0 || !(0.0..SHOWN).contains(&age) {
+            continue;
+        }
+        let targets: Vec<&str> = if n.to == "all" { seats.clone() } else { n.to.split('+').collect() };
+        for to in targets {
+            if to == n.from || !known.contains(&to) {
+                continue;
+            }
+            let e = agg.entry((n.from.clone(), to.to_string())).or_insert((0, age));
+            e.0 += 1;
+            e.1 = e.1.min(age);
+        }
+    }
+    let mut out: Vec<WarpLink> = agg.into_iter().map(|((from, to), (count, age))| WarpLink { from, to, age, count }).collect();
+    out.sort_by(|a, b| a.age.partial_cmp(&b.age).unwrap_or(std::cmp::Ordering::Equal));
+    out.truncate(24);
+    out
+}
+
+/// Seats within reach of a usage limit: the fullest of ctx / 5h / week at or
+/// over 90%. A spent seat is already out, so it doesn't flicker.
+fn usage_alerts(app: &App) -> Vec<(String, f64)> {
+    let mut out: Vec<(String, f64)> = app
+        .snap
+        .usage
+        .iter()
+        .filter_map(|(seat, u)| {
+            let pct = [u.context_pct, u.five_hour_pct, u.week_pct].into_iter().flatten().fold(0.0f64, f64::max);
+            let spent = app.snap.seat(seat).map_or(false, |s| s.shown == "spent");
+            (pct >= 90.0 && !spent).then(|| (seat.clone(), pct))
+        })
+        .collect();
+    out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    out.truncate(6);
+    out
+}
+
 fn draw_core(f: &mut Frame, area: Rect, app: &App) {
     let warp = app.warp();
     let title = if app.zoom { "04 WARP CORE · zoomed (z back)" } else { "04 WARP CORE · the pilot's seat" };
@@ -198,6 +249,10 @@ fn draw_core(f: &mut Frame, area: Rect, app: &App) {
             contacts: app.contacts(),
             selected: app.selected.clone(),
             ring,
+            links: warp_links(app),
+            alerts: usage_alerts(app),
+            spent: app.snap.seats.iter().filter(|s| s.shown == "spent").map(|s| s.name.clone()).collect(),
+            now: app.now,
         },
         inner,
     );
@@ -493,6 +548,30 @@ fn pulse_lines(app: &App, width: usize) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::{Note, Seat, Snapshot};
+    use crate::ui::{App, View};
+
+    #[test]
+    fn warp_links_group_notes_and_fan_out_all() {
+        let mut snap = Snapshot::default();
+        snap.seats = vec![
+            Seat { name: "claude".into(), shown: "busy".into(), ..Default::default() },
+            Seat { name: "grok".into(), shown: "ready".into(), ..Default::default() },
+        ];
+        let t = event_time(Some(&serde_json::Value::String("2026-11-26 16:16:48".into())));
+        snap.time = t + 60.0;
+        snap.notes = vec![
+            Note { from: "claude".into(), to: "grok".into(), time: "2026-11-26 16:16:48".into(), text: "a".into(), quiet: false },
+            Note { from: "claude".into(), to: "grok".into(), time: "2026-11-26 16:16:48".into(), text: "b".into(), quiet: false },
+            Note { from: "owner".into(), to: "all".into(), time: "2026-11-26 16:16:48".into(), text: "c".into(), quiet: false },
+        ];
+        let app = App::new(View::Nav, snap);
+        let links = warp_links(&app);
+        let pair = |f: &str, t: &str| links.iter().find(|l| l.from == f && l.to == t);
+        assert_eq!(pair("claude", "grok").map(|l| l.count), Some(2));
+        assert!(pair("owner", "claude").is_some() && pair("owner", "grok").is_some());
+        assert!(links.iter().all(|l| l.age < 1800.0));
+    }
 
     #[test]
     fn rows_are_shared_like_nav_deck() {
