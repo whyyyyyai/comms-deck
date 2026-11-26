@@ -48,7 +48,17 @@ pub struct App {
     pub core_area: Cell<Rect>,
     /// Wall time of the last frame, for the warp core's flicker.
     pub now: f64,
+    /// Nav in two columns (--half): the tiled half-window's layout.
+    pub half: bool,
+    /// Seconds left of the warp jump's burst (a note to all, or a merge).
+    pub jump_left: f64,
+    /// The jump trigger this App has already fired, so it jumps once.
+    pub seen_trigger: f64,
 }
+
+/// How long a warp jump's burst lasts, and the speed it adds to warp().
+pub const JUMP_SECS: f64 = 2.5;
+pub const JUMP_BOOST: f64 = 4.0;
 
 impl App {
     pub fn new(view: View, snap: Snapshot) -> Self {
@@ -71,20 +81,45 @@ impl App {
             selected: None,
             core_area: Cell::new(Rect::default()),
             now: crate::data::now(),
+            half: false,
+            jump_left: 0.0,
+            seen_trigger: 0.0,
         }
     }
 
     pub fn refresh(&mut self, snap: Snapshot) {
         self.stars.set_split(&snap.context_split(), false);
         self.stars.set_pace(&snap.seat_pace());
+        // A fresh broadcast (or merge note) fires the warp jump: once, then
+        // the burst runs out on its own.
+        if let Some(t) = snap.jump_trigger {
+            if t > self.seen_trigger {
+                self.seen_trigger = t;
+                self.jump_left = JUMP_SECS;
+            }
+        }
         self.snap = snap;
     }
 
-    /// Warp factor from the deck's traffic: nav-deck's warp_factor.
+    /// One frame older: the jump burst counts down here.
+    pub fn tick(&mut self, dt: f64) {
+        if self.jump_left > 0.0 {
+            self.jump_left = (self.jump_left - dt).max(0.0);
+        }
+    }
+
+    /// Warp factor from the deck's traffic: nav-deck's warp_factor, plus the
+    /// warp jump's burst while it lasts (a decay, not a step, so the stars
+    /// surge and fade instead of snapping).
     pub fn warp(&self) -> f64 {
         let busy = self.snap.seats.iter().filter(|s| s.state == "busy").count();
         let waiting = self.snap.seats.iter().map(|s| s.waiting).sum();
-        crate::navdata::warp_factor(busy, waiting, &self.snap.nav.hours, self.snap.nav.load)
+        let base = crate::navdata::warp_factor(busy, waiting, &self.snap.nav.hours, self.snap.nav.load);
+        if self.jump_left > 0.0 {
+            (base + JUMP_BOOST * (self.jump_left / JUMP_SECS)).min(9.9)
+        } else {
+            base
+        }
     }
 
     /// The warp core's contact blips: seats that are busy or have notes
@@ -139,6 +174,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         View::Comms => comms::draw(f, body, app),
         // Zoom is checked first, so it works in every nav layout.
         View::Nav if app.zoom => nav::draw_zoomed(f, body, app),
+        View::Nav if app.half => nav::draw_half(f, body, app),
         View::Nav => nav::draw(f, body, app),
     }
     draw_keys(f, bottom, app);
