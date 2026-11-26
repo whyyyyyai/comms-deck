@@ -48,6 +48,10 @@ pub struct App {
     pub core_area: Cell<Rect>,
     /// Wall time of the last frame, for the warp core's flicker.
     pub now: f64,
+    /// Nav: the 05 COMMS chat box has the keyboard (Enter or a click on it).
+    pub typing: bool,
+    /// Where 05 COMMS was last drawn, so a click on it starts typing.
+    pub chat_area: Cell<Rect>,
     /// Nav in two columns (--half): the tiled half-window's layout.
     pub half: bool,
     /// Seconds left of the warp jump's burst (a note to all, or a merge).
@@ -81,6 +85,8 @@ impl App {
             selected: None,
             core_area: Cell::new(Rect::default()),
             now: crate::data::now(),
+            typing: false,
+            chat_area: Cell::new(Rect::default()),
             half: false,
             jump_left: 0.0,
             seen_trigger: 0.0,
@@ -205,6 +211,11 @@ fn draw_strip(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_keys(f: &mut Frame, area: Rect, app: &App) {
+    if app.view == View::Nav && app.typing && app.flash.is_none() {
+        let line = Line::from(Span::styled(" writing · Enter send · @seat to address · ↑↓ history · Esc stop writing", dim()));
+        f.render_widget(Paragraph::new(line), area);
+        return;
+    }
     if app.view == View::Nav {
         if let Some(p) = app.prompt {
             let label = if p == 'w' { "wake" } else { "goto" };
@@ -239,7 +250,7 @@ fn draw_keys(f: &mut Frame, area: Rect, app: &App) {
                     Some('w') => " wake which seat? (the deck's rules apply) · Enter · Esc",
                     Some(_) => " go to which workspace? (comms, nav, mail, 3..0, or a name) · Enter · Esc",
                     None if app.selected.is_some() => " click it again: its window · w wake it · Esc let go · z zoom",
-                    None => " click a star: whose · z zoom · w <seat> wake · g <ws> goto · c / ` / Tab comms · m mail · Ctrl+C quit",
+                    None => " Enter write · click a star: whose · z zoom · w <seat> wake · g <ws> goto · m mail · Tab comms · Ctrl+C quit",
                 },
             },
             dim(),

@@ -168,7 +168,10 @@ fn on_key(app: &mut App, k: KeyEvent, tx: &mpsc::Sender<Msg>) {
         KeyCode::Tab => app.view = if app.view == View::Comms { View::Nav } else { View::Comms },
         KeyCode::F(1) => app.view = View::Comms,
         KeyCode::F(2) => app.view = View::Nav,
-        _ if app.view == View::Nav => on_nav_key(app, k),
+        // Nav: the chat box in 05 has the keyboard only while writing, so
+        // nav's one-letter keys still work the rest of the time.
+        KeyCode::Esc if app.view == View::Nav && app.typing => app.typing = false,
+        _ if app.view == View::Nav && !app.typing => on_nav_key(app, k),
         KeyCode::Enter => submit(app, tx),
         KeyCode::Char(c) => {
             let at = byte_at(&app.input, app.cursor);
@@ -205,6 +208,13 @@ fn on_key(app: &mut App, k: KeyEvent, tx: &mpsc::Sender<Msg>) {
 /// A click in the warp core picks the seat under it; a second click on the
 /// same seat shows its window. A click on empty space lets go.
 fn on_core_click(app: &mut App, col: u16, row: u16) {
+    let pos = ratatui::layout::Position { x: col, y: row };
+    // A click on 05 COMMS starts writing; anywhere else stops.
+    if !app.zoom && app.chat_area.get().contains(pos) {
+        app.typing = true;
+        return;
+    }
+    app.typing = false;
     let area = app.core_area.get();
     if !area.contains(ratatui::layout::Position { x: col, y: row }) {
         return;
@@ -250,6 +260,16 @@ fn on_nav_key(app: &mut App, k: KeyEvent) {
     match k.code {
         KeyCode::Char('`') | KeyCode::Char('c') => app.view = View::Comms,
         KeyCode::Char('z') => app.zoom = !app.zoom,
+        // Enter writes in 05 COMMS; with a seat picked, the note starts @seat.
+        KeyCode::Enter => {
+            app.typing = true;
+            app.zoom = false;
+            app.flash = None;
+            if let (Some(seat), true) = (app.selected.clone(), app.input.is_empty()) {
+                app.input = format!("@{seat} ");
+                app.cursor = app.input.chars().count();
+            }
+        }
         KeyCode::Esc => {
             app.selected = None;
             app.flash = None;
@@ -372,13 +392,13 @@ fn self_test() -> bool {
 
     let mut app = App::new(View::Nav, snap);
     let nav = render_text(&app, 160, 48);
-    for panel in ["01 CREW", "02 ACTIVITY", "03 USAGE", "04 WARP CORE", "05 EVENT TAIL", "06 WORKSPACES",
-                  "07 VITALS", "08 NAV-TIME", "09 DECK PULSE", "10 COCKPIT-CHAT"] {
+    for panel in ["01 CREW", "02 ACTIVITY", "03 USAGE", "04 WARP CORE", "05 COMMS", "06 WORKSPACES",
+                  "07 VITALS", "08 NAV-TIME", "09 DECK PULSE", "10 CONTEXT SPLIT"] {
         check(&format!("nav view at 160x48 shows {panel}"), nav.contains(panel), &nav);
     }
     let big = render_text(&app, 209, 50);
     check("nav at the owner's 209x50 shows every panel title",
-        ["03 USAGE", "06 WORKSPACES", "07 VITALS", "10 COCKPIT", "08 NAV-TIME", "09 DECK PULSE"].iter().all(|p| big.contains(p)), &big);
+        ["03 USAGE", "05 COMMS", "06 WORKSPACES", "07 VITALS", "10 CONTEXT SPLIT", "08 NAV-TIME", "09 DECK PULSE"].iter().all(|p| big.contains(p)), &big);
     let total = app.stars.stars.len();
     let claude = app.stars.count_for("claude");
     check("stars are dealt by the context split (claude 300k : grok 100k = 3:1)",
@@ -415,8 +435,8 @@ fn self_test() -> bool {
     // The half view: same ten panels in two columns, at a half-window's size.
     app.half = true;
     let half = render_text(&app, 110, 30);
-    for panel in ["01 CREW", "02 ACTIVITY", "03 USAGE", "04 WARP CORE", "05 EVENT TAIL", "06 WORKSPACES",
-                  "07 VITALS", "08 NAV-TIME", "09 DECK PULSE", "10 COCKPIT-CHAT"] {
+    for panel in ["01 CREW", "02 ACTIVITY", "03 USAGE", "04 WARP CORE", "05 COMMS", "06 WORKSPACES",
+                  "07 VITALS", "08 NAV-TIME", "09 DECK PULSE", "10 CONTEXT SPLIT"] {
         check(&format!("half nav at 110x30 shows {panel}"), half.contains(panel), &half);
     }
     check("half nav is two columns (the core shares the left with the crew)",
@@ -424,6 +444,26 @@ fn self_test() -> bool {
             let (line_c, line_k) = (half[..c].lines().count(), half[..k].lines().count());
             line_k > line_c
         }), &half);
+    // One deck: nav carries the chat (05) and the context split (10).
+    app.half = false;
+    app.zoom = false;
+    app.selected = None;
+    let one = render_text(&app, 209, 50);
+    check("nav's 05 COMMS shows the conversation", one.contains("05 COMMS") && one.contains("make it one program"), &one);
+    check("nav's 10 CONTEXT SPLIT shows the dots and the shares (claude 75%)",
+        one.contains("10 CONTEXT SPLIT") && one.contains('●') && one.contains("75.0%"), &one);
+    on_nav_key(&mut app, event::KeyEvent::from(KeyCode::Enter));
+    check("Enter in nav starts writing in 05", app.typing, "not typing");
+    for c in "hi".chars() {
+        let (tx, _rx) = mpsc::channel::<Msg>();
+        on_key(&mut app, event::KeyEvent::from(KeyCode::Char(c)), &tx);
+    }
+    check("while writing, letters go to the chat box, not nav's keys", app.input == "hi" && !app.zoom && app.prompt.is_none(), &app.input);
+    let (tx, _rx) = mpsc::channel::<Msg>();
+    on_key(&mut app, event::KeyEvent::from(KeyCode::Esc), &tx);
+    check("Esc stops writing and keeps the draft", !app.typing && app.input == "hi", &app.input);
+    app.input.clear();
+    app.cursor = 0;
     let routed = send::route("@grok -claude hi", &["grok".into(), "claude".into()]);
     check("chat box routing matches comms-deck route()", routed.as_deref() == Ok("grok -claude"), &format!("{routed:?}"));
 
