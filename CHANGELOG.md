@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **nav-deck's warp core stars burn in seat colours, doled out by the
+  context split.** The owner (2026-11-26): the starfield's stars now each
+  belong to a seat — every reporting seat gets at least one, the rest
+  split by tokens with comms-deck's own largest-remainder deal, so a seat
+  holding a quarter of the context pool owns a quarter of the sky, in that
+  seat's colour from the deck key. Waiting-note contacts take their seat's
+  colour too. With no usage figures the field stays the plain grey it
+  always was. By devin.
+
 - **The owner's name is Y.** STOX renamed themselves (2026-11-26): screens,
   notes, the chat prompt (`y ›`) and Discord now show **Y**, and `y` names
   the owner wherever a seat is named. The seat id stays `owner` in files
