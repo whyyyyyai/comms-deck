@@ -38,6 +38,8 @@ pub struct App {
     pub quit: bool,
     /// Nav's one-line prompt: 'w' (wake a seat) or 'g' (go to a workspace).
     pub prompt: Option<char>,
+    /// Nav in two columns (--half): the tiled half-window's layout.
+    pub half: bool,
 }
 
 impl App {
@@ -56,6 +58,7 @@ impl App {
             stars,
             quit: false,
             prompt: None,
+            half: false,
         }
     }
 
@@ -88,7 +91,13 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_strip(f, top, app);
     match app.view {
         View::Comms => comms::draw(f, body, app),
-        View::Nav => nav::draw(f, body, app),
+        View::Nav => {
+            if app.half {
+                nav::draw_half(f, body, app)
+            } else {
+                nav::draw(f, body, app)
+            }
+        }
     }
     draw_keys(f, bottom, app);
 }
