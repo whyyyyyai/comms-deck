@@ -2,7 +2,6 @@
 
 pub mod comms;
 pub mod crew;
-pub mod crew;
 pub mod nav;
 pub mod theme;
 pub mod warp;
