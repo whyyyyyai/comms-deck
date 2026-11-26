@@ -663,6 +663,129 @@ def nav_time_panel(width, timing):
     return rows
 
 
+# ------------------------------------------------------- event tail --------
+# 05 EVENT TAIL: the cockpit's live feed — the newest records from the note
+# log and the activity log, merged by timestamp, newest at the bottom like
+# `tail -f`. `now` is injectable so the self-test can pin the clock.
+
+TAIL_BYTES = 1 << 18   # read this much off each log's tail; ~64 KiB of jsonl is thousands of events
+
+
+def tail_jsonl(path, limit):
+    """The newest `limit` JSON records in a .jsonl, oldest→newest, tail-read only."""
+    out = []
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - TAIL_BYTES))
+            lines = f.read().decode(errors="replace").splitlines()
+    except OSError:
+        return []
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            continue
+        if len(out) >= limit:
+            break
+    out.reverse()
+    return out
+
+
+def event_line(rec, src):
+    """One tail row's parts: (epoch, seat, tag, text). Undated records sort first."""
+    ts = parse_event_time(rec.get("time"))
+    if src == "act":
+        seat = rec.get("seat") or "?"
+        doing = (rec.get("doing") or "").strip()
+        text = f"{rec.get('state', '?')}" + (f" — {doing}" if doing else "")
+        return ts, seat, "act", text
+    seat = rec.get("from") or rec.get("seat") or rec.get("kind") or "?"
+    kind = rec.get("kind") or "note"
+    if kind == "message":
+        to = rec.get("to") or "?"
+        text = f"→ {to}: {(rec.get('text') or '').strip()}"
+    else:
+        text = (rec.get("text") or rec.get("doing") or kind).strip() or kind
+    return ts, seat, kind[:4], text
+
+
+def event_tail(now=None, limit=200, data=None):
+    """Merged newest-first tail of log.jsonl + activity.jsonl.
+
+    Returns [{ts, seat, tag, text, src}] newest→oldest. `data` is the deck
+    data dir (DATA in production, a tmp dir in the self-test).
+    """
+    data = data or DATA
+    now = now or time.time()
+    merged = []
+    for src, name in (("log", "log.jsonl"), ("act", "activity.jsonl")):
+        for rec in tail_jsonl(data / name, limit):
+            ts, seat, tag, text = event_line(rec, src)
+            if ts:
+                merged.append({"ts": ts, "seat": seat, "tag": tag,
+                               "text": text, "src": src})
+    merged.sort(key=lambda e: -e["ts"])
+    return merged[:limit]
+
+
+def event_tail_panel(width, height, now=None):
+    """Panel 05: the live event tail. Newest at the bottom, `tail -f` style."""
+    rows = [panel_title("event tail", "(the deck's own feed, live)", width)]
+    events = event_tail(now=now)
+    body_h = max(1, height - 2)
+    shown = events[-body_h:] if len(events) > body_h else events
+    for e in reversed(shown):          # file order: oldest of the window first
+        age = (now or time.time()) - e["ts"]
+        stamp = time.strftime("%H:%M:%S", time.localtime(e["ts"]))
+        ago = human_dur(age) if age < 3600 else time.strftime("%m-%d %H:%M", time.localtime(e["ts"]))
+        seat_col = 39 if e["src"] == "act" else 45
+        line = (f"{colour(240)}{stamp} {ago:>4}{colour(0)} "
+                f"{colour(67)}{e['tag']:<4}{colour(0)} "
+                f"{colour(seat_col)}{e['seat']:<8}{colour(0)}{e['text']}")
+        rows.append(fit(line, width))
+    if not shown:
+        rows.append(fit(dim("  the deck has not spoken yet"), width))
+    return rows
+
+
+# ------------------------------------------------------------- stream -------
+# The Twitch stream's state for the instrument row: alive pid under
+# $XDG_RUNTIME_DIR/comms-deck (desktop/twitch-stream writes it).
+
+STREAM_PID = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "comms-deck" / "twitch-stream.pid"
+
+
+def stream_status(now=None):
+    """{live, pid, uptime_s} for the running twitch-stream, or live=False."""
+    try:
+        pid = int(STREAM_PID.read_text().strip())
+        os.kill(pid, 0)
+    except (OSError, ValueError):
+        return {"live": False}
+    uptime = 0.0
+    try:
+        uptime = (now or time.time()) - os.path.getmtime(STREAM_PID)
+    except OSError:
+        pass
+    return {"live": True, "pid": pid, "uptime_s": uptime}
+
+
+def stream_panel(width, now=None):
+    """Panel: is the desktop streaming to Twitch, and for how long."""
+    st = stream_status(now)
+    if st.get("live"):
+        line = (f"  {colour(78)}● live{colour(0)}  pid {st['pid']}  "
+                f"up {human_dur(st['uptime_s'])}")
+    else:
+        line = f"  {dim('○ idle — desktop/twitch-stream to go live')}"
+    return [panel_title("stream", "(twitch)", width), fit(line, width)]
+
+
 KEYS_LINE = "  q quit · r redraw · w <seat> wake (the deck's rules apply) · g <ws> goto · c chat · n notes"
 
 
@@ -1145,6 +1268,46 @@ def self_test():
     assert parse_event_time("2026-11-26 03:00:00") == datetime(2026, 11, 26, 3, 0, 0).timestamp()
     assert parse_event_time(1700000000.0) == 1700000000.0
     assert parse_event_time("garbage") == 0.0 and parse_event_time(None) == 0.0
+
+    # event tail: merged log+activity feed, newest last in the panel
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        t0 = now - 100
+        (d / "log.jsonl").write_text(
+            json.dumps({"kind": "message", "from": "claude", "to": "devin",
+                        "time": "2026-11-26 03:00:00", "text": "hello"}) + "\n"
+            + json.dumps({"kind": "message", "from": "vibe", "to": "owner",
+                          "time": t0 + 50, "text": "newer note"}) + "\n")
+        (d / "activity.jsonl").write_text(
+            json.dumps({"time": t0 + 80, "seat": "claude", "state": "busy",
+                        "doing": "reviewing"}) + "\n")
+        ev = event_tail(now=now, data=d)
+        assert [e["seat"] for e in ev] == ["claude", "vibe", "claude"], ev
+        assert ev[0]["src"] == "act" and ev[0]["tag"] == "act"
+        data_old = globals()["DATA"]
+        globals()["DATA"] = d
+        try:
+            panel = ANSI.sub("", "\n".join(event_tail_panel(100, 8, now=now)))
+            assert "event tail" in panel and "newer note" in panel and "reviewing" in panel
+            assert panel.index("hello") < panel.index("newer note") < panel.index("busy")
+        finally:
+            globals()["DATA"] = data_old
+
+    # stream_status: dead pid file reads idle, live pid reads live
+    fake = Path(tempfile.mkdtemp()) / "twitch-stream.pid"
+    old_sp = globals()["STREAM_PID"]
+    globals()["STREAM_PID"] = fake
+    try:
+        assert stream_status(now=now) == {"live": False}
+        assert "idle" in ANSI.sub("", "\n".join(stream_panel(60, now=now)))
+        fake.write_text(str(os.getpid()))
+        st = stream_status(now=now + 60)
+        assert st["live"] and st["pid"] == os.getpid() and st["uptime_s"] >= 55
+        assert "live" in ANSI.sub("", "\n".join(stream_panel(60, now=now + 60)))
+        fake.write_text("999999")
+        assert stream_status(now=now) == {"live": False}
+    finally:
+        globals()["STREAM_PID"] = old_sp
 
     print("navigation-deck self-test: ok")
 
