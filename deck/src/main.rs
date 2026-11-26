@@ -106,6 +106,7 @@ fn run(view: View) -> io::Result<()> {
     let mut memory_at = 0.0;
     while !app.quit {
         let t = data::now();
+        app.now = t;
         if t - memory_at >= 5.0 && app.snap.memory.available_kb > 0 {
             memory_at = t;
             navdata::record_memory(app.snap.memory.available_kb * 1024, t);

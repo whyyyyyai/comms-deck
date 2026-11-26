@@ -46,6 +46,8 @@ pub struct App {
     pub selected: Option<String>,
     /// Where the warp core was last drawn, for mapping clicks onto it.
     pub core_area: Cell<Rect>,
+    /// Wall time of the last frame, for the warp core's flicker.
+    pub now: f64,
 }
 
 impl App {
@@ -68,6 +70,7 @@ impl App {
             zoom: false,
             selected: None,
             core_area: Cell::new(Rect::default()),
+            now: crate::data::now(),
         }
     }
 
