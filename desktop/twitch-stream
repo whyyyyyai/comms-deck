@@ -76,7 +76,7 @@ MONITOR=$(pactl get-default-sink 2>/dev/null).monitor
 # ffmpeg is the pid we track: killing it closes the rtmp socket and both
 # capture pipes die with it.
 ffmpeg -hide_banner -loglevel warning -stats \
-    -f matroska -i <(wf-recorder -o - -f matroska) \
+    -f matroska -i <(wf-recorder -f /dev/stdout -m matroska -y) \
     ${MONITOR:+-f s16le -ar 48000 -ac 2 -i <(parecord --raw --device="$MONITOR" --format=s16le --rate=48000 --channels=2)} \
     -map 0:v ${MONITOR:+-map 1:a} \
     -vf "scale=${W}:${H},fps=${FPS}" -r "$FPS" \
