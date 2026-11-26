@@ -64,17 +64,17 @@ impl Starfield {
         }
     }
 
-    /// The seat for star `i` of `n` when dealing all at once: exact
-    /// proportions (largest-remainder), so the self-test can count them.
+    /// The seat for star `i` of `n` when dealing all at once.
     fn deal_exact(&self, i: usize, n: usize) -> Option<String> {
-        let mut edge = 0.0;
-        for (seat, share) in &self.split {
-            edge += share * n as f64;
-            if (i as f64) < edge.round() {
-                return Some(seat.clone());
+        let counts = star_counts(&self.split, n);
+        let mut edge = 0;
+        for (seat, c) in counts {
+            edge += c;
+            if i < edge {
+                return Some(seat);
             }
         }
-        self.split.last().map(|(s, _)| s.clone())
+        None
     }
 
     fn deal(&mut self) -> Option<String> {
@@ -111,6 +111,47 @@ impl Starfield {
     pub fn count_for(&self, seat: &str) -> usize {
         self.stars.iter().filter(|s| s.seat.as_deref() == Some(seat)).count()
     }
+}
+
+/// Stars per seat out of `n`: nav-deck's star_seats() deal (Devin, #141).
+/// Largest remainder with a one-star floor, so every reporting seat shows;
+/// an overshoot from the floor is taken back from the biggest seat.
+pub fn star_counts(split: &[(String, f64)], n: usize) -> Vec<(String, usize)> {
+    if split.is_empty() || n == 0 {
+        return Vec::new();
+    }
+    if split.len() >= n {
+        let mut out: Vec<(String, usize)> = split.iter().map(|(s, _)| (s.clone(), 0)).collect();
+        for i in 0..n {
+            out[i % split.len()].1 += 1;
+        }
+        return out;
+    }
+    let raw: Vec<(String, f64)> = split.iter().map(|(s, share)| (s.clone(), share * n as f64)).collect();
+    let mut counts: Vec<(String, usize)> = raw.iter().map(|(s, r)| (s.clone(), (r.floor() as usize).max(1))).collect();
+    let mut spare = n as i64 - counts.iter().map(|(_, c)| *c as i64).sum::<i64>();
+    let mut order: Vec<usize> = (0..raw.len()).collect();
+    order.sort_by(|&a, &b| {
+        let fa = raw[a].1 - raw[a].1.floor();
+        let fb = raw[b].1 - raw[b].1.floor();
+        fb.partial_cmp(&fa).unwrap_or(std::cmp::Ordering::Equal).then(raw[a].0.cmp(&raw[b].0))
+    });
+    for &i in &order {
+        if spare <= 0 {
+            break;
+        }
+        counts[i].1 += 1;
+        spare -= 1;
+    }
+    while spare < 0 {
+        let big = (0..counts.len()).max_by_key(|&i| counts[i].1).unwrap_or(0);
+        if counts[big].1 <= 1 {
+            break;
+        }
+        counts[big].1 -= 1;
+        spare += 1;
+    }
+    counts
 }
 
 pub struct WarpCore<'a> {
@@ -185,6 +226,14 @@ mod tests {
         f.set_split(&[("claude".into(), 300.0), ("grok".into(), 100.0)], true);
         assert_eq!(f.count_for("claude"), 150);
         assert_eq!(f.count_for("grok"), 50);
+    }
+
+    #[test]
+    fn every_reporting_seat_gets_a_star() {
+        let split: Vec<(String, f64)> = vec![("big".into(), 0.999), ("tiny".into(), 0.001)];
+        let c = star_counts(&split, 90);
+        assert_eq!(c.iter().map(|x| x.1).sum::<usize>(), 90);
+        assert_eq!(c.iter().find(|x| x.0 == "tiny").unwrap().1, 1);
     }
 
     #[test]
