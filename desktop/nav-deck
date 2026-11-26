@@ -478,24 +478,41 @@ def workspaces_panel(clients, workspaces, width, own_class="nav-deck"):
     for w in named:
         name = w.get("name") or str(w.get("id"))
         seen.add(name)
-        rows.append(ws_row(name, by_ws.get(name, []), width, own_class))
+        rows.extend(ws_row(name, by_ws.get(name, []), width, own_class))
     for name in sorted(set(by_ws) - seen):
-        rows.append(ws_row(name, by_ws[name], width, own_class))
+        rows.extend(ws_row(name, by_ws[name], width, own_class))
     return rows
 
 
 def ws_row(name, cls_list, width, own_class):
+    """One workspace: its name, then a chip per window. Chips wrap onto
+    indented rows instead of being cut, and each row is cut by visible
+    width (fit), never by bytes: a byte cut lands inside colour codes and
+    chops a name mid-word (Y, 2026-11-26: "we need to fix the scaling")."""
+    room = max(8, width - 16)
     chips = []
     for c in cls_list:
         label = window_label(c)
-        shown = label[:15] + "…" if len(label) > 16 else label
+        limit = max(6, min(room - 3, 28))
+        shown = label[:limit - 1] + "…" if len(label) > limit else label
         col = 81 if label == own_class else 250
         chip = f"{colour(col)}[{shown}]{colour(0)}"
         if c.get("fullscreen"):
             chip += f"{colour(81)}▣{colour(0)}"
         chips.append(chip)
-    return (fit(f"  {colour(245)}{name:<14}{colour(0)}", 16)
-            + (" ".join(chips) if chips else dim("(empty)")))[:width]
+    if not chips:
+        chips = [dim("(empty)")]
+    rows, line, used = [], [], 0
+    for chip in chips:
+        w = len(ANSI.sub("", chip))
+        if line and used + 1 + w > room:
+            rows.append(" ".join(line))
+            line, used = [], 0
+        line.append(chip)
+        used += w + (1 if used else 0)
+    rows.append(" ".join(line))
+    head = fit(f"  {colour(245)}{name:<14}{colour(0)}", 16)
+    return [fit((head if i == 0 else " " * 16) + row, width) for i, row in enumerate(rows)]
 
 
 # A kitty window only says "kitty"; its seat is the process running inside
@@ -1066,6 +1083,53 @@ def nav_header(cols, records, status, info, hours, load, now):
     return out
 
 
+def share_rows(needs, total, floor=5):
+    """Rows for panels stacked in `total` rows. `needs` is each panel's
+    natural height (its content + the 4-row frame), or None for a panel
+    that takes whatever is left (at least `floor`).
+
+    Every panel gets at least `floor` rows (one line of content) before any
+    gets more, so nothing is drawn as an empty frame. Past the floors the
+    rows are poured in one at a time, round the panels that still want more
+    (water-filling): a short panel ends up whole, and when the column is
+    too short the long ones are trimmed to the same level, so 03 USAGE
+    can't starve 06 WORKSPACES and 06 can't starve 03. If even the floors
+    don't fit, the last panels are left out (0 rows) rather than every
+    panel being cut to nothing.
+    """
+    n = len(needs)
+    want = [floor if w is None else max(floor, w) for w in needs]
+    rows = [0] * n
+    left = total
+    for i in range(n):               # the floors, in order, while they fit
+        if left >= floor:
+            rows[i], left = floor, left - floor
+    hungry = [i for i in range(n) if rows[i] and needs[i] is not None and rows[i] < want[i]]
+    while left and hungry:           # one row each per round, top first
+        for i in list(hungry):
+            if not left:
+                break
+            rows[i], left = rows[i] + 1, left - 1
+            if rows[i] >= want[i]:
+                hungry.remove(i)
+    flex = [i for i in range(n) if needs[i] is None and rows[i]]
+    for k, i in enumerate(flex):     # what's left goes to the flexible ones
+        part = left // (len(flex) - k)
+        rows[i], left = rows[i] + part, left - part
+    if left and n:                   # nothing flexible: the last shown panel grows
+        last = max(i for i in range(n) if rows[i]) if any(rows) else 0
+        rows[last] += left
+    return rows
+
+
+def nav_widths(cols):
+    """(left, centre, right) for nav: the sides scale with the window
+    (30%, 40..80 columns) and stay equal, so the reticle keeps the
+    screen's centre line."""
+    side = max(40, min(80, int(cols * 0.30)))
+    return side, cols - 2 * side, side
+
+
 def cockpit_frame(width, height, status, clients, workspaces, hours, busy,
                   history, low, info, load, timing, records, now):
     """The wide dress: the comms-deck look, drawn with comms-deck's own
@@ -1077,7 +1141,7 @@ def cockpit_frame(width, height, status, clients, workspaces, hours, busy,
     frame = lambda *a, **k: CD.look_frame(*a, **k)
     tag = CD.look_tag
     esc = "\033["
-    lw, cw, rw = CD.look_widths(width)
+    lw, cw, rw = nav_widths(width)
     body_h = height - 5                      # the strip (3), the keys, the ticker
     snap = CD.panel_scans()
     working = CD.busy_seats(snap)
@@ -1125,28 +1189,31 @@ def cockpit_frame(width, height, status, clients, workspaces, hours, busy,
     vit_body = vitals_panel(rw - 4, history, low, info, load)[1:]
     nt_body = nav_time_panel(rw - 4, timing)[1:]
     pulse_body = pulse_panel(rw - 4, hours, busy)[1:]
-    tc_body = twitch_chat_panel(rw - 4, 8, now)
+    tc_body = twitch_chat_panel(rw - 4, max(1, body_h // 4), now)
     tc_state = (twitch_chat_state().get("state") or "")   # the reader's word
     CHAT_TAG = (f"{esc}38;5;42m● LIVE{esc}0m" if tc_state == "live"
                 else f"{esc}38;5;196m⚠ AUTH{esc}0m" if tc_state == "auth-failed"
                 else f"{esc}38;5;226m◌ connecting{esc}0m" if tc_state == "connecting"
                 else f"{esc}38;5;214m○ config{esc}0m" if tc_state == "config"
                 else f"{esc}2m○ idle{esc}0m")
-    right = CD.look_stack([
-        (min(len(usage) + 4, max(10, body_h // 3)), lambda w, h: frame(
-            "03", "USAGE", f"sorted by {CD.usage_sort()}" if CD.usage_sort() != "provider" else "allocation · spend",
-            "", CD.LOOK_ACCENT["usage"], w, h, CD.fit_column(usage, h - 4))),
-        (min(max(6, len(ws_body) + 4), max(8, body_h // 4)), lambda w, h: frame(
+    usage_tag = (f"sorted by {CD.usage_sort()}" if CD.usage_sort() != "provider"
+                 else "allocation · spend")
+    panels = [  # (natural rows or None to flex, maker), top to bottom
+        (len(usage) + 4, lambda w, h: frame(
+            "03", "USAGE", usage_tag, "", CD.LOOK_ACCENT["usage"], w, h, CD.fit_column(usage, h - 4))),
+        (len(ws_body) + 4, lambda w, h: frame(
             "06", "WORKSPACES", "hyprctl clients", "", 252, w, h, ws_body[:h - 4])),
-        (min(max(7, len(vit_body) + 4), max(9, body_h // 4)), lambda w, h: frame(
+        (len(vit_body) + 4, lambda w, h: frame(
             "07", "VITALS", "no swap: watch the spike", "", CD.LOOK_ACCENT["split"], w, h, vit_body[:h - 4])),
         (None, lambda w, h: frame(
-            "10", "COCKPIT-CHAT", "what the channel says", CHAT_TAG, 99, w, h, tc_body[:h - 4])),
-        (None, lambda w, h: frame(
+            "10", "COCKPIT-CHAT", "what the channel says", CHAT_TAG, 99, w, h, tc_body[-(h - 4):] if h > 4 else [])),
+        (len(nt_body) + 4, lambda w, h: frame(
             "08", "NAV-TIME", "are the two decks in step", "", 225, w, h, nt_body[:h - 4])),
-        (None, lambda w, h: frame(
+        (len(pulse_body) + 4, lambda w, h: frame(
             "09", "DECK PULSE", "how hard the notes flew", "", 141, w, h, pulse_body[:h - 4])),
-    ], rw, body_h)
+    ]
+    heights = share_rows([n for n, _ in panels], body_h)
+    right = CD.look_stack([(h, make) for h, (_, make) in zip(heights, panels) if h >= 3], rw, body_h)
 
     body = [fit(left[i], lw) + fit(centre[i], cw) + fit(right[i], rw) for i in range(body_h)]
     return (nav_header(width, records, status, info, hours, load, now)
@@ -1412,6 +1479,21 @@ def self_test():
     for _ in range(200):  # stars respawn forever and never leave the field
         HUD_STATE["last"] = None
         star_field(40, 14, 9.9)
+
+    # scaling (Y, 2026-11-26): the right column shares its rows so no panel
+    # is an empty frame, and a workspace row is cut by what you see, not bytes
+    rows = share_rows([15, 11, 9, None, 10, 7], 45)
+    assert sum(rows) == 45 and all(r >= 5 for r in rows), rows
+    assert rows[4] == 8 and rows[5] == 7, ("long panels trimmed to one level, short ones whole", rows)
+    assert share_rows([24, 7, 9, None, 8, 6], 47)[1] == 7, "a short panel stays whole beside a long one"
+    assert share_rows([4, 4, None], 30) == [5, 5, 20], "spare rows go to the flexible panel"
+    assert share_rows([20, 20, None], 12)[2] == 0, "too short for every floor: the last is left out"
+    wide = [{"class": f"window-number-{i}", "title": f"window-number-{i}", "workspace": {"name": "x"}}
+            for i in range(6)]
+    wsr = ws_row("special:magic", wide, 60, "nav-deck")
+    assert len(wsr) > 1, "chips wrap rather than run off the panel"
+    assert all(len(ANSI.sub("", r)) == 60 for r in wsr), [len(ANSI.sub("", r)) for r in wsr]
+    assert all(r.count("[") == r.count("]") for r in (ANSI.sub("", x) for x in wsr)), "no chip cut in half"
 
     # the cockpit dress draws with comms-deck's own look functions (claude's):
     # the import is load-bearing, so render each shared builder once here —
