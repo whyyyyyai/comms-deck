@@ -1,6 +1,6 @@
 //! 04 WARP CORE: a first-person starfield. Each star belongs to a seat and
 //! wears its colour; stars are dealt out in proportion to the context split
-//! (Y, 2026-11-26: "the stars in the warp core ... colored and distributed
+//! (the owner, 2026-11-26: "the stars in the warp core ... colored and distributed
 //! according to the context split"). Speed is the deck's traffic.
 
 use ratatui::buffer::Buffer;

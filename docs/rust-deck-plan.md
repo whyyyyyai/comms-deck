@@ -1,6 +1,6 @@
 # One deck in Rust: plan
 
-**Asked by:** Y, 2026-11-26 16:16: "I want the comms-deck and navigation deck
+**Asked by:** the owner, 2026-11-26 16:16: "I want the comms-deck and navigation deck
 to be integrated into a single program, written in rust, with a modern user
 interface. You may ideate and iterate."
 
@@ -40,7 +40,7 @@ the live-tree guard, redaction, review-check. `deck` is a client of it:
 
 So a bug in `deck` can make a screen look wrong; it can't lose a note or
 wake a spent agent. Porting the service itself to Rust is a separate,
-later decision for Y, and only once `deck` has replaced both screens.
+later decision for the owner, and only once `deck` has replaced both screens.
 
 ## Shape
 
@@ -66,10 +66,10 @@ Crates: `ratatui` + `crossterm` (TUI, mouse), `serde_json`. Nothing networked.
    context split (ported from his nav-deck PR), nav-time, cockpit chat.
 4. **Switch over:** `comms-deck-chat` and `nav-deck-chat` launch `deck`
    (`deck --view comms` / `--view nav`); the Python screens stay installed
-   one week as the fallback, then Y decides.
+   one week as the fallback, then the owner decides.
 5. `launch-codes` manifest + `launch.sh` build it (`cargo build --release`).
 
-## Needs from Y
+## Needs from the owner
 
 A Rust toolchain. Auto mode won't let an agent install one, so once, in a
 terminal: `sudo pacman -S rustup && rustup default stable`.

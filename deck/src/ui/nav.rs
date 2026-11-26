@@ -1,5 +1,5 @@
 //! The nav view: nav-deck in Rust. Same panels and places as
-//! desktop/nav-deck (Y, 2026-11-26: "location wise it's fine"), sized by
+//! desktop/nav-deck (the owner, 2026-11-26: "location wise it's fine"), sized by
 //! the window instead of by a fixed font: the left and right columns are
 //! 30% each (40..80 columns) so the reticle keeps the centre line, and a
 //! column's panels share its rows by what they need (share_rows), so no

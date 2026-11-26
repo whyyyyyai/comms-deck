@@ -22,7 +22,7 @@ pub fn seat_colour(seat: &str) -> Color {
     Color::Indexed(n)
 }
 
-/// A seat's name as people see it: the owner is Y.
+/// A seat's name as people see it: the owner seat shows OWNER_NAME.
 pub fn display_name(seat: &str) -> &str {
     if seat == "owner" {
         OWNER_NAME

@@ -2,7 +2,7 @@
 //! braille dots in its colour, sized by its share of the context pool and
 //! breathing while it works; the notes of the last 30 minutes are links (in
 //! the sender's colour for 5 minutes), and a dot runs along each link sent
-//! in the last 10. Y is the middle.
+//! in the last 10. The owner is the middle.
 //!
 //! The canvas is the area at braille resolution: two dots across and four
 //! down per cell, so it fills whatever Rect it is given.

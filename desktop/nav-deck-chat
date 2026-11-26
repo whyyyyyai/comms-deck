@@ -7,8 +7,10 @@
 #   nav-deck-chat        fullscreen on the nav deck
 #   nav-deck-chat half   tiled on the nav deck, half the screen
 # Written by: vibe (2026-11-26)
-# The full view runs the Rust deck (deck/, Y liked it 2026-11-26) when it has
+# The full view runs the Rust deck (deck/, the owner liked it 2026-11-26) when it has
 # been built; otherwise, or with NAV_DECK_PYTHON=1, the Python nav-deck as before.
+# The half view stays Python: deck has no half layout yet.
+# Nothing builds deck for you: after a pull, cd deck && cargo build --release.
 view=${1:-full}
 case "$view" in
     full)  class=nav-deck;      font=13; pad=14 ;;

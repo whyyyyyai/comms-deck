@@ -7,7 +7,7 @@
 //!   deck --once [--view nav] [--size WxH]   one frame as text, then exit
 //!   deck --self-test      render fake data, check the contracts, touch nothing real
 //!
-//! Written by: Claude (2026-11-26), at Y's ask.
+//! Written by: Claude (2026-11-26), at the owner's ask.
 
 mod data;
 mod navdata;
@@ -325,7 +325,7 @@ fn self_test() -> bool {
 
     let app = App::new(View::Comms, snap.clone());
     let comms = render_text(&app, 160, 48);
-    check("comms view shows the note, with Y as the sender", comms.contains("Y → claude") && comms.contains("make it one program"), &comms);
+    check("comms view shows the note, with the owner as the sender", comms.contains("Y → claude") && comms.contains("make it one program"), &comms);
     check("no escape character reaches the screen", !comms.contains('\u{1b}') && !comms.contains('\u{7}'), "escape found");
     check("the crew is in the service's ready order (grok before claude)",
         comms.find("grok").zip(comms.find("claude ")).is_some_and(|(g, c)| g < c), &comms);
@@ -339,7 +339,7 @@ fn self_test() -> bool {
         check(&format!("nav view at 160x48 shows {panel}"), nav.contains(panel), &nav);
     }
     let big = render_text(&app, 209, 50);
-    check("nav at Y's 209x50 shows every panel title",
+    check("nav at the owner's 209x50 shows every panel title",
         ["03 USAGE", "06 WORKSPACES", "07 VITALS", "10 COCKPIT", "08 NAV-TIME", "09 DECK PULSE"].iter().all(|p| big.contains(p)), &big);
     let total = app.stars.stars.len();
     let claude = app.stars.count_for("claude");
