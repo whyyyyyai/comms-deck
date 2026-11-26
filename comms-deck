@@ -472,8 +472,16 @@ def app_seat_state(seat):
         return state["state"]
     if APP_PROCESS.get(seat, "grok-bot") != "grok-bot":
         # Not a Grok Bot seat: it can only connect through its own app's MCP.
-        # Nothing tells us when its turn ends, so busy is time-based: it set
-        # a status in the last MCP_BUSY_FOR seconds. Otherwise idle.
+        # 'away' is the seat's own word (set_status, state='away') and stays
+        # until it sets another one: it is how a seat blocked on something the
+        # deck cannot see -- a sign-in pending, for one -- says so honestly
+        # (the owner, 02:58: mark her away while she is offline). Then busy is
+        # time-based: it set a status in the last MCP_BUSY_FOR seconds,
+        # otherwise idle. With no MCP process at all, the app is closed: an
+        # offline seat that was ever set up reads away, a never-touched one
+        # reads 'not set up'.
+        if state.get("state") == "away":
+            return "away"
         for d in Path("/proc").iterdir():
             try:
                 cmd = (d / "cmdline").read_bytes()
@@ -483,7 +491,8 @@ def app_seat_state(seat):
                     return "busy" if busy else "idle"
             except OSError:
                 continue
-        return "not set up"
+        ever = float(state.get("status_at") or state.get("polled_at") or 0)
+        return "away" if ever else "not set up"
     app_open = False
     for d in Path("/proc").iterdir():
         if not d.name.isdigit():
@@ -6583,9 +6592,14 @@ MCP_TOOLS = [
                      "properties": {"text": {"type": "string"}}}},
     {"name": "set_status",
      "description": "Say in a few words what you're working on (e.g. 'reviewing PR #12'). "
-                    "Shown in the activity log on the owner's chat screen until your turn ends.",
+                    "Shown in the activity log on the owner's chat screen until your turn ends. "
+                    "Pass state ('busy', 'idle' or 'away') to set the row itself: 'away' sticks "
+                    "-- it stays on the screen until you set_status again (use it when you are "
+                    "blocked, e.g. waiting on a sign-in, rather than working).",
      "inputSchema": {"type": "object", "required": ["text"],
-                     "properties": {"text": {"type": "string", "description": "Under 70 characters."}}}},
+                     "properties": {"text": {"type": "string", "description": "Under 70 characters."},
+                                    "state": {"type": "string", "enum": ["busy", "idle", "away"],
+                                              "description": "Optional: the word the row shows. Default busy."}}}},
     {"name": "team_status",
      "description": "Which agents are busy, idle or away, and how many notes wait for each.",
      "inputSchema": {"type": "object", "properties": {}}},
@@ -6699,7 +6713,9 @@ def mcp_tool(seat, name, args):
         add_note(seat, str(args.get("text", "")))
         return "Added to the commentary.", False
     if name == "set_status":
-        update_seat(seat, state="busy", doing=describe(args.get("text", "")))
+        wanted = str(args.get("state") or "").strip().lower()
+        update_seat(seat, state=wanted if wanted in ("busy", "idle", "away") else "busy",
+                    doing=describe(args.get("text", "")))
         return "Status set.", False
     if name == "team_status":
         return status_text(), False
@@ -8243,6 +8259,14 @@ def self_test():
         "assert x.load_seat('pollseat')['status_at'] == now + 301",
         "x.note_mcp_call('alice', 'read_messages', now)",
         "assert 'polled_at' not in x.load_seat('alice')",
+        "st = x.mcp_call('pollseat', 'set_status', {'text': 'still blocked at the sign-in', 'state': 'away'})",
+        "assert x.load_seat('pollseat')['state'] == 'away', st  # set_status can say away now",
+        "assert x.app_seat_state('pollseat') == 'away', 'the seat\\'s own away sticks, whatever runs'",
+        "x.update_seat('pollseat', state='not set up'); x.mcp_call('pollseat', 'set_status', {'text': 'back on it'})",
+        "assert x.load_seat('pollseat')['state'] == 'busy', 'no state argument still means busy'",
+        "assert x.app_seat_state('pollseat') == 'away', 'set up once (history exists) but its app is gone: away'",
+        "fa = x.APP_SEATS + ('freshapp',); x.APP_SEATS = fa; x.APP_PROCESS['freshapp'] = 'some-app'; (x.DATA / 'seats' / 'freshapp.json').unlink(missing_ok=True)",
+        "assert x.app_seat_state('freshapp') == 'not set up', 'never touched: still not set up'",
         "box = x.DATA / 'inbox' / 'scratch-seat'",
         "box.mkdir(parents=True, exist_ok=True)",
         "(box / '1.json').write_text(json.dumps({'from': 'owner', 'text': 'token: ghp_' + 'a' * 30, 'private': True}))",
