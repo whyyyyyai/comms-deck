@@ -122,7 +122,7 @@ fn main() {
         .add_systems(
             Update,
             (
-                (watch_mods, pace_frames, read_feed, layout_view, apply_rules, layout_seats, layout_tasks, layout_held_tasks, pointer, chat_input, keys).chain(),
+                (watch_mods, pace_frames, read_feed, layout_view, apply_rules, layout_seats, layout_tasks, layout_held_tasks, layout_note_electrons, pointer, chat_input, keys).chain(),
                 (
                     glow_seats,
                     draw_rings,
@@ -434,6 +434,10 @@ struct Deck {
     tasks_built: Vec<String>,
     /// The held task ids the electron orbits were last built from (t20).
     held_built: Vec<String>,
+    /// Each ring seat's waiting count the note electrons were last built
+    /// from (t50): rebuilt only when a backlog changes, so the orbits hold
+    /// steady while notes wait.
+    notes_built: Vec<(String, usize)>,
     problem: Option<String>,
     pending: Vec<NoteInfo>,
     shocks: Vec<Shock>,
@@ -1077,6 +1081,16 @@ struct TaskNode {
 #[derive(Component)]
 struct HeldTask {
     holder: String,
+    key: u32,
+}
+
+/// A seat's waiting note (t50, Y): an electron on its own fast orbit of the
+/// recipient's planet, dipping behind and in front of it while it waits.
+#[derive(Component)]
+struct NoteElectron {
+    seat: String,
+    /// Stable per (seat, slot): phase, pace and radius come off it, so the
+    /// same slot always flies the same way while the backlog is unchanged.
     key: u32,
 }
 
@@ -2078,6 +2092,93 @@ fn layout_held_tasks(
     }
 }
 
+/// One electron's place on its tipped orbit (t50, Y): `key` fixes the
+/// phase, pace, direction and radius, so the same slot always flies the
+/// same way while the backlog is unchanged. Returns the offset from the
+/// planet's centre and the z shift as a multiple of the planet's scale —
+/// negative is behind the planet's face. The numbers mirror the held-task
+/// electrons (t20): a fast, slightly varied orbit.
+fn electron_orbit(key: u32, t: f32, radius: f32) -> (Vec2, f32) {
+    let phase = (key % 4096) as f32 / 4096.0 * std::f32::consts::TAU;
+    let pace = (1.1 + ((key >> 12) % 2048) as f32 / 2048.0 * 1.9) * if (key >> 23) & 1 == 0 { 1.0 } else { -1.0 };
+    let rad = radius + (key >> 24) as f32 / 255.0 * 14.0;
+    let a = phase + pace * t;
+    (Vec2::new(a.cos() * rad, a.sin() * rad * 0.35), -0.55 * a.sin())
+}
+
+/// A seat's waiting notes orbit its planet like electrons (t50, Y): one
+/// electron per waiting note (up to [electrons] max), on its own fast
+/// tipped orbit — in front of the planet on the near side, behind it on
+/// the far side, where HeldTask's flat orbit only hinted. Rebuilt only
+/// when a seat's waiting count changes, so the orbits hold steady while
+/// notes wait. On the near side the orbit clears the planet; the seat's
+/// colour comes from its own electron, reddening as its oldest note ages
+/// (the [moons] palette).
+#[allow(clippy::too_many_arguments)]
+fn layout_note_electrons(
+    mut commands: Commands,
+    mut deck: ResMut<Deck>,
+    mods: Res<Mods>,
+    view: Res<View>,
+    assets: Res<Assets2d>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    time: Res<Time>,
+    seats: Query<(&SeatNode, &Transform), Without<NoteElectron>>,
+    mut nodes: Query<
+        (Entity, &mut NoteElectron, &mut Transform, &mut Visibility, &MeshMaterial2d<ColorMaterial>),
+        (Without<SeatNode>, Without<HeldTask>),
+    >,
+) {
+    let ec = &mods.cfg.electrons;
+    let mc = &mods.cfg.moons;
+    let shown = ec.show && view.moons;
+    let counts: Vec<(String, usize)> =
+        deck.seats.iter().map(|s| (s.name.clone(), (s.waiting as usize).min(ec.max))).collect();
+    if counts != deck.notes_built || !shown {
+        for (e, _, _, _, _) in &nodes {
+            commands.entity(e).despawn();
+        }
+        deck.notes_built = if shown { counts.clone() } else { Vec::new() };
+        if !shown {
+            return;
+        }
+        for (seat, waiting) in &counts {
+            for i in 0..*waiting {
+                commands.spawn((
+                    NoteElectron { seat: seat.clone(), key: task_key(&format!("note:{seat}:{i}")) },
+                    Mesh2d(assets.dot.clone()),
+                    MeshMaterial2d(materials.add(seat_colour(seat, ec.bright))),
+                    Transform::from_xyz(0.0, 0.0, 1.0).with_scale(Vec3::splat(ec.size)),
+                    Visibility::Inherited,
+                ));
+            }
+        }
+        return;
+    }
+    let t = time.elapsed_secs();
+    let places: HashMap<&str, (Vec3, f32)> =
+        seats.iter().map(|(n, tf)| (n.name.as_str(), (tf.translation, tf.scale.x))).collect();
+    for (_, node, mut tf, mut vis, mat) in &mut nodes {
+        let Some((place, s)) = places.get(node.seat.as_str()) else {
+            *vis = Visibility::Hidden;
+            continue;
+        };
+        *vis = Visibility::Inherited;
+        let s = s.max(0.1);
+        let (off, z) = electron_orbit(node.key, t, ec.radius * s);
+        tf.translation = Vec3::new(place.x + off.x, place.y + off.y, place.z + z * s);
+        // The backlog's age reddens the orbit, the moons' palette (one age
+        // scale for the deck), so a seat ignored for hours reads at a glance.
+        let age = match deck.seat(&node.seat) {
+            Some(seat) => (seat.oldest_waiting_s as f32 / 3600.0 / ec.old_hours.max(0.01)).clamp(0.0, 1.0),
+            None => 0.0,
+        };
+        if let Some(mut m) = materials.get_mut(&mat.0) {
+            m.color = lin(mix3(mc.fresh, mc.old, age), ec.bright);
+        }
+    }
+}
+
 /// The seat under the pointer, and clicks to focus one.
 #[allow(clippy::too_many_arguments)]
 fn pointer(
@@ -2518,7 +2619,9 @@ fn draw_moons_and_marks(
         let p = tf.translation.truncate();
         let s = tf.scale.x;
         let dim = if deck.focus.as_ref().is_some_and(|f| *f != node.name) { 0.25 } else { 1.0 };
-        if mc.show && view.moons && seat.waiting > 0 {
+        // The waiting backlog flies as electrons (t50) when they're on;
+        // these flat moons are the fallback (electrons.show = false).
+        if mc.show && view.moons && !mods.cfg.electrons.show && seat.waiting > 0 {
             let n = (seat.waiting as usize).min(mc.max.max(1));
             let age = (seat.oldest_waiting_s as f32 / 3600.0 / mc.old_hours.max(0.01)).clamp(0.0, 1.0);
             let c = mix3(mc.fresh, mc.old, age);
@@ -2529,7 +2632,11 @@ fn draw_moons_and_marks(
                 let r = (56.0 + band as f32 * 9.0) * s;
                 let a = t * mc.speed * if band % 2 == 0 { 1.0 } else { -0.8 } + (i % 12) as f32 / in_band as f32 * std::f32::consts::TAU;
                 let q = p + Vec2::new(a.cos() * r, a.sin() * r * 0.8);
-                gizmos.circle_2d(Isometry2d::from_translation(q), 1.6 * s, lin(c, dim));
+                // Y (06:20) saw GPU use climb as the deck fills: a backlog
+                // draws up to [moons] max circles per seat. These are a pixel
+                // or two wide, so 10 segments are indistinguishable from the
+                // default 32 — a third of the geometry for the same look.
+                gizmos.circle_2d(Isometry2d::from_translation(q), 1.6 * s, lin(c, dim)).resolution(10);
             }
         }
         if sc.show && view.moons {
@@ -2542,7 +2649,7 @@ fn draw_moons_and_marks(
                 let phase = (task_key(&sub.id) % 4096) as f32 / 4096.0 * std::f32::consts::TAU;
                 let a = t * sc.speed * (if band % 2 == 0 { 1.0 } else { -0.75 }) + phase;
                 let q = p + Vec2::new(a.cos() * r, a.sin() * r * 0.8);
-                gizmos.circle_2d(Isometry2d::from_translation(q), sc.size * s, seat_colour(&node.name, sc.bright * dim));
+                gizmos.circle_2d(Isometry2d::from_translation(q), sc.size * s, seat_colour(&node.name, sc.bright * dim)).resolution(10);
             }
         }
         if let Some((c, pulse)) = looks.0.get(&node.name).and_then(|l| l.beacon) {
@@ -2560,7 +2667,7 @@ fn draw_moons_and_marks(
         let Some((p, s)) = positions.get(sh.seat.as_str()) else { continue };
         let k = (t - sh.at) / 1.2;
         let r = (30.0 + k * 120.0 * sh.size) * s;
-        gizmos.circle_2d(Isometry2d::from_translation(*p), r, lin(sh.colour, 3.0 * (1.0 - k)));
+        gizmos.circle_2d(Isometry2d::from_translation(*p), r, lin(sh.colour, 3.0 * (1.0 - k))).resolution(20);
     }
 }
 
@@ -3568,6 +3675,7 @@ mod tests {
             s.initialize(&mut world);
         };
         init(Box::new(IntoSystem::into_system(layout_held_tasks)));
+        init(Box::new(IntoSystem::into_system(layout_note_electrons)));
         init(Box::new(IntoSystem::into_system(layout_tasks)));
         init(Box::new(IntoSystem::into_system(layout_seats)));
         init(Box::new(IntoSystem::into_system(drive_planets)));
@@ -3680,6 +3788,30 @@ mod tests {
         let mut f = far;
         resolve_contacts(&mut f, 100.0, 0.8);
         assert_eq!(f[1].pos, far[1].pos);
+    }
+
+    #[test]
+    fn note_electrons_orbit_in_front_and_behind() {
+        // t50 (Y): an electron passes behind the planet on the far side of
+        // its orbit and in front on the near side, and the same slot flies
+        // the same way however often it is asked.
+        let radius = 34.0;
+        let t = 7.3;
+        let (off, z) = electron_orbit(12345, t, radius);
+        let (again, z_again) = electron_orbit(12345, t, radius);
+        assert_eq!((off, z), (again, z_again), "stable per slot");
+        // The tipped orbit: |z| never exceeds 0.55, and its sign tracks the
+        // orbit angle — sin(a) < 0 is the far side, behind the planet.
+        assert!(z.abs() <= 0.55);
+        let a = (12345 % 4096) as f32 / 4096.0 * std::f32::consts::TAU
+            + (1.1 + ((12345 >> 12) % 2048) as f32 / 2048.0 * 1.9) * t;
+        assert_eq!(z < 0.0, a.sin() > 0.0, "behind on the far side, in front on the near side");
+        // The orbit is the tipped ellipse: x full radius, y squashed to 0.35.
+        let (ex, ey) = (off.x / radius, off.y / (radius * 0.35));
+        assert!((ex * ex + ey * ey - 1.0).abs() < 0.01, "on the ellipse, not inside it");
+        // Two slots differ: not a ring of clones.
+        let other = electron_orbit(12346, t, radius);
+        assert_ne!(off, other.0, "each note flies its own orbit");
     }
 
     #[test]

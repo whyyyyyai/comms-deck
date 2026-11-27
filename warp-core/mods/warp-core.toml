@@ -129,6 +129,20 @@ old = [2.5, 0.25, 0.1]
 old_hours = 6
 speed = 0.6
 
+# t50 (Y, 04:55 and 05:55): a seat's waiting notes orbit its planet like
+# electrons — each on its own fast, tipped orbit, passing in front of and
+# behind the planet while it waits (the flat moons above are the fallback
+# when this is off). They redden as the seat's oldest note ages, on the
+# moons' palette. `m` toggles them with the moons and the subagents.
+[electrons]
+show = true
+max = 16                       # the most drawn per seat; the rest wait unseen
+radius = 34.0                  # the innermost orbit, px at planet scale 1
+speed = 2.2                    # electrons are light: they fly the moons' pace times this
+size = 3.2
+bright = 1.15
+old_hours = 6
+
 # t30: subagents an agent spawns (hooks in comms-deck) orbit it as a closer
 # band, in the seat's colour. `m` toggles them with the backlog moons.
 [subagents]
