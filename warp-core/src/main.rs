@@ -77,6 +77,8 @@ struct Deck {
     arrivals: VecDeque<f32>,
     /// 0..1, the starfield's warp: kicked by broadcasts, decays on its own.
     warp: f32,
+    /// How far round the orbit the ring has turned (radians).
+    orbit: f32,
     problem: Option<String>,
     pending: Vec<NoteInfo>,
 }
@@ -105,6 +107,8 @@ struct SeatNode {
     name: String,
     /// The extra glow of a note just landed, fading to 0.
     flash: f32,
+    /// 0 at the back of the orbit (behind the core), 1 at the front.
+    depth: f32,
 }
 
 #[derive(Component)]
@@ -288,18 +292,28 @@ fn read_feed(feed: Res<Feed>, mut deck: ResMut<Deck>, time: Res<Time>) {
     deck.warp = (deck.warp - time.delta_secs() * 0.22).max(0.0);
 }
 
-/// Where each seat sits: an even ring, Y at the top, in the service's order.
-fn ring_positions(names: &[String], window: Vec2) -> HashMap<String, Vec2> {
-    let radius = Vec2::new(window.x * 0.36, window.y * 0.34);
+/// Where each seat sits on its orbit: evenly spaced in the service's order,
+/// the first at the top when `orbit` is 0, turning clockwise as it grows.
+/// The orbit is tilted towards the viewer, so the top of the ellipse is the
+/// far side: returns (position, depth), depth 0 at the back, 1 at the front.
+fn ring_positions(names: &[String], window: Vec2, orbit: f32) -> HashMap<String, (Vec2, f32)> {
+    let radius = Vec2::new(window.x * 0.38, window.y * 0.30);
     let n = names.len().max(1) as f32;
     names
         .iter()
         .enumerate()
         .map(|(i, name)| {
-            let a = std::f32::consts::FRAC_PI_2 - i as f32 / n * std::f32::consts::TAU;
-            (name.clone(), Vec2::new(a.cos() * radius.x, a.sin() * radius.y))
+            let a = std::f32::consts::FRAC_PI_2 - i as f32 / n * std::f32::consts::TAU - orbit;
+            let depth = 0.5 - 0.5 * a.sin();
+            (name.clone(), (Vec2::new(a.cos() * radius.x, a.sin() * radius.y), depth))
         })
         .collect()
+}
+
+/// The orbit's speed in radians a second: a slow drift when quiet, faster
+/// with traffic, and a hard swing in warp.
+fn orbit_speed(notes_10min: usize, warp: f32) -> f32 {
+    0.05 + (notes_10min.min(30) as f32) * 0.006 + warp * 1.2
 }
 
 fn window_size(windows: &Query<&Window>) -> Vec2 {
@@ -314,19 +328,23 @@ fn layout_seats(
     assets: Res<Assets2d>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     windows: Query<&Window>,
-    mut nodes: Query<(Entity, &SeatNode, &mut Transform)>,
+    time: Res<Time>,
+    mut nodes: Query<(Entity, &mut SeatNode, &mut Transform)>,
 ) {
+    let pace = deck.notes_last(time.elapsed_secs(), 600.0);
+    let warp = deck.warp;
+    deck.orbit = (deck.orbit + time.delta_secs() * orbit_speed(pace, warp)) % std::f32::consts::TAU;
     let names: Vec<String> = deck.seats.iter().filter(|s| s.online()).map(|s| s.name.clone()).collect();
-    let pos = ring_positions(&names, window_size(&windows));
+    let pos = ring_positions(&names, window_size(&windows), deck.orbit);
     if names != deck.built {
         for (e, _, _) in &nodes {
             commands.entity(e).despawn();
         }
         for name in &names {
-            let p = pos[name];
+            let (p, depth) = pos[name];
             commands
                 .spawn((
-                    SeatNode { name: name.clone(), flash: 0.0 },
+                    SeatNode { name: name.clone(), flash: 0.0, depth },
                     Mesh2d(assets.seat.clone()),
                     MeshMaterial2d(materials.add(seat_colour(name, 1.0))),
                     Transform::from_xyz(p.x, p.y, 2.0),
@@ -345,10 +363,13 @@ fn layout_seats(
         deck.built = names;
         return;
     }
-    for (_, node, mut tf) in &mut nodes {
-        if let Some(p) = pos.get(&node.name) {
+    for (_, mut node, mut tf) in &mut nodes {
+        if let Some((p, depth)) = pos.get(&node.name) {
             tf.translation.x = p.x;
             tf.translation.y = p.y;
+            // Behind the core on the far side, in front of it on the near side.
+            tf.translation.z = if *depth < 0.5 { 0.5 } else { 2.0 };
+            node.depth = *depth;
         }
     }
 }
@@ -368,11 +389,12 @@ fn glow_seats(
         if seat.shown == "busy" {
             b *= 0.85 + 0.15 * (t * 3.0 + node.name.len() as f32).sin();
         }
+        b *= 0.55 + 0.45 * node.depth; // the far side of the orbit is dimmer
         b += node.flash * 6.0;
         if let Some(mut m) = materials.get_mut(&mat.0) {
             m.color = seat_colour(&node.name, b);
         }
-        tf.scale = Vec3::splat(1.0 + node.flash * 0.35);
+        tf.scale = Vec3::splat((0.72 + 0.4 * node.depth) * (1.0 + node.flash * 0.35));
         for child in children.iter() {
             if let Ok(mut text) = labels.get_mut(child) {
                 let mut line = format!("{}\n{}", label_for(&node.name), seat.shown);
@@ -596,10 +618,21 @@ mod tests {
     #[test]
     fn the_ring_puts_the_first_seat_at_the_top() {
         let names: Vec<String> = ["owner", "claude", "grok", "vibe"].map(String::from).to_vec();
-        let pos = ring_positions(&names, Vec2::new(1000.0, 1000.0));
-        assert!(pos["owner"].x.abs() < 0.01 && pos["owner"].y > 0.0);
-        assert!(pos["claude"].x > 0.0, "clockwise from the top");
-        assert!(pos["grok"].y < 0.0);
+        let pos = ring_positions(&names, Vec2::new(1000.0, 1000.0), 0.0);
+        assert!(pos["owner"].0.x.abs() < 0.01 && pos["owner"].0.y > 0.0);
+        assert!(pos["owner"].1 < 0.01, "the top is the far side");
+        assert!(pos["claude"].0.x > 0.0, "clockwise from the top");
+        assert!(pos["grok"].0.y < 0.0 && pos["grok"].1 > 0.99, "the bottom is the near side");
+        // A quarter turn later, the first seat has moved to where the second was.
+        let later = ring_positions(&names, Vec2::new(1000.0, 1000.0), std::f32::consts::FRAC_PI_2);
+        assert!((later["owner"].0 - pos["claude"].0).length() < 0.01);
+    }
+
+    #[test]
+    fn the_orbit_drifts_when_quiet_and_swings_in_warp() {
+        assert!(orbit_speed(0, 0.0) > 0.0, "never quite still");
+        assert!(orbit_speed(20, 0.0) > orbit_speed(0, 0.0));
+        assert!(orbit_speed(0, 1.0) > 10.0 * orbit_speed(0, 0.0));
     }
 
     #[test]
