@@ -1,0 +1,34 @@
+# warp-core as a user service: kept alive, and kept ahead of the crowd.
+#
+# Installed by warp-core/install.sh. Start with
+#   systemctl --user enable --now warp-core
+# A crash restarts it after 20 s; quitting it on purpose (q, Ctrl+Q) does
+# not. At most 4 restarts in 15 minutes, then it stays down and says so in
+# `systemctl --user status warp-core`: a window that dies at start must not
+# be reopened in a loop (opening and closing the window was the suspect in
+# the GPU crashes of 2026-11-27, 02:53-03:02).
+#
+# Written by: claude
+
+[Unit]
+Description=warp-core: the comms-deck on the GPU
+After=graphical-session.target comms-deck.service
+PartOf=graphical-session.target
+StartLimitIntervalSec=900
+StartLimitBurst=4
+
+[Service]
+ExecStart=%h/.local/lib/warp-core/warp-core
+Environment=WARP_CORE_MODS=%h/.config/warp-core/mods
+Restart=on-failure
+RestartSec=20
+# Ahead of everything else in the session for CPU and disk, and its memory
+# is the last the kernel reclaims (the iMac runs with ~1 GB free). No
+# MemoryMax on purpose: a cap would make it the first thing killed.
+CPUWeight=400
+IOWeight=400
+MemoryLow=256M
+TimeoutStopSec=10
+
+[Install]
+WantedBy=graphical-session.target

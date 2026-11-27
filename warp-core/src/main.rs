@@ -65,9 +65,11 @@ const FUEL_D: [f32; 3] = [70.0, 82.0, 94.0];
 const HALO_D: f32 = 116.0;
 
 fn main() {
+    install_crash_log();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || feed::run(tx));
     App::new()
+        .insert_resource(Splash::default())
         .insert_resource(ClearColor(Color::srgb(0.01, 0.012, 0.03)))
         .insert_resource(Feed(Mutex::new(rx)))
         .insert_resource(Deck::default())
@@ -105,6 +107,7 @@ fn main() {
                     fly_comets,
                     move_stars,
                     colour_stars,
+                    draw_splash,
                     draw_links,
                     draw_moons_and_marks,
                     hud,
@@ -394,6 +397,97 @@ struct StarMats {
     key: String,
 }
 
+/// Light soaked into the scene's walls: four edges (top, right, bottom,
+/// left), each a row of cells holding linear RGB energy.
+#[derive(Resource, Default)]
+struct Splash {
+    edges: [Vec<Vec3>; 4],
+}
+
+impl Splash {
+    fn fit(&mut self, cells: usize) {
+        let cells = cells.clamp(4, 512);
+        for e in &mut self.edges {
+            if e.len() != cells {
+                *e = vec![Vec3::ZERO; cells];
+            }
+        }
+    }
+
+    /// A star of `colour` hits edge `edge` at `t` (0..1 along it).
+    fn hit(&mut self, edge: usize, t: f32, colour: Vec3, cfg: &mods::SplashCfg) {
+        let cells = self.edges[edge].len();
+        if cells == 0 {
+            return;
+        }
+        let at = ((t.clamp(0.0, 1.0) * cells as f32) as usize).min(cells - 1);
+        let add = colour * cfg.energy;
+        for k in 0..=cfg.spill.min(16) {
+            let w = 0.5f32.powi(k as i32);
+            if at + k < cells {
+                self.edges[edge][at + k] += add * w;
+            }
+            if k > 0 && at >= k {
+                self.edges[edge][at - k] += add * w;
+            }
+        }
+    }
+
+    /// The glow fades, and spreads a little along each wall.
+    fn settle(&mut self, dt: f32, cfg: &mods::SplashCfg) {
+        let keep = (-cfg.fade.max(0.0) * dt).exp();
+        let d = (cfg.spread.max(0.0) * dt).min(0.3);
+        for e in &mut self.edges {
+            let before = e.clone();
+            let n = before.len();
+            for i in 0..n {
+                let l = before[if i == 0 { 0 } else { i - 1 }];
+                let r = before[if i + 1 == n { i } else { i + 1 }];
+                e[i] = (before[i] * (1.0 - 2.0 * d) + (l + r) * d) * keep;
+                e[i] = e[i].min(Vec3::splat(8.0));
+            }
+        }
+    }
+}
+
+/// Where a ray from the core leaves the scene's rectangle (half-size
+/// `half`): which edge (0 top, 1 right, 2 bottom, 3 left) and how far along
+/// it (0..1, left to right / bottom to top).
+fn wall_hit(p: Vec2, half: Vec2) -> Option<(usize, f32)> {
+    if p.x.abs() <= half.x && p.y.abs() <= half.y {
+        return None;
+    }
+    // The edge it crossed first is the one it overshot by the larger ratio.
+    let rx = p.x.abs() / half.x.max(1.0);
+    let ry = p.y.abs() / half.y.max(1.0);
+    let along = |v: f32, h: f32| (v / h.max(1.0) * 0.5 + 0.5).clamp(0.0, 1.0);
+    Some(if ry >= rx {
+        let q = p * (half.y / p.y.abs());
+        (if p.y > 0.0 { 0 } else { 2 }, along(q.x, half.x))
+    } else {
+        let q = p * (half.x / p.x.abs());
+        (if p.x > 0.0 { 1 } else { 3 }, along(q.y, half.y))
+    })
+}
+
+/// Panics go to ~/.local/state/warp-core/crash.log as well as stderr, so a
+/// crash leaves a reason behind even when nobody saw the terminal.
+fn install_crash_log() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        let dir = std::path::Path::new(&home).join(".local/state/warp-core");
+        let _ = std::fs::create_dir_all(&dir);
+        let when = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let thread = std::thread::current().name().unwrap_or("?").to_string();
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("crash.log")) {
+            use std::io::Write;
+            let _ = writeln!(f, "{when} thread {thread}: {info}");
+        }
+        default(info);
+    }));
+}
+
 /// A tiny xorshift: the stars need scatter, not cryptography.
 #[derive(Resource)]
 struct Rng(u64);
@@ -445,6 +539,8 @@ struct Star {
     speed: f32,
     /// 0..1, fixed: which seat's share of the sky this star falls in.
     slot: f32,
+    /// Its colour (linear), for the light it leaves on the wall.
+    colour: Vec3,
 }
 
 #[derive(Component)]
@@ -690,7 +786,7 @@ fn setup(
         let a = rng.next() * std::f32::consts::TAU;
         let dir = Vec2::from_angle(a);
         commands.spawn((
-            Star { dir, dist: 40.0 + rng.next() * 1400.0, speed: 0.4 + rng.next() * 1.2, slot: rng.next() },
+            Star { dir, dist: 40.0 + rng.next() * 1400.0, speed: 0.4 + rng.next() * 1.2, slot: rng.next(), colour: Vec3::new(0.9, 0.95, 1.4) },
             Mesh2d(assets.star.clone()),
             MeshMaterial2d(star_mat.clone()),
             Transform::from_xyz(0.0, 0.0, 0.0),
@@ -805,9 +901,9 @@ fn watch_mods(
                 m.notice = Some((format!("warp-core.toml loaded ({n} rules)"), now));
                 let c = &m.cfg;
                 clear.0 = Color::linear_rgb(c.look.background[0], c.look.background[1], c.look.background[2]);
-                let frame = std::time::Duration::from_secs_f32(1.0 / c.look.fps.clamp(5.0, 120.0));
-                winit.focused_mode = UpdateMode::reactive(frame);
-                winit.unfocused_mode = UpdateMode::reactive(frame);
+                let frame = |fps: f32| std::time::Duration::from_secs_f32(1.0 / fps.clamp(5.0, 120.0));
+                winit.focused_mode = UpdateMode::reactive(frame(c.look.fps));
+                winit.unfocused_mode = UpdateMode::reactive(frame(c.look.fps_unfocused));
                 for mut b in &mut bloom {
                     b.intensity = c.look.bloom;
                 }
@@ -863,10 +959,46 @@ fn watch_mods(
 
 // ---------------------------------------------------------------- systems
 
-fn read_feed(feed: Res<Feed>, mut deck: ResMut<Deck>, mut chat: ResMut<Chat>, mods: Res<Mods>, time: Res<Time>) {
+fn read_feed(
+    mut feed: ResMut<Feed>,
+    mut deck: ResMut<Deck>,
+    mut chat: ResMut<Chat>,
+    mods: Res<Mods>,
+    time: Res<Time>,
+    real: Res<Time<Real>>,
+    mut last_restart: Local<f32>,
+) {
     let now = time.elapsed_secs();
-    let Ok(rx) = feed.0.lock() else { return };
-    while let Ok(msg) = rx.try_recv() {
+    let mut dead = false;
+    let msgs: Vec<Msg> = {
+        let Ok(rx) = feed.0.lock() else { return };
+        let mut v = Vec::new();
+        loop {
+            match rx.try_recv() {
+                Ok(m) => v.push(m),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    dead = true;
+                    break;
+                }
+            }
+        }
+        v
+    };
+    // The feed thread died (a panic, logged to crash.log): start a new one,
+    // at most every 10 s, and let it reload the panel's backlog.
+    if dead && real.elapsed_secs() - *last_restart > 10.0 {
+        *last_restart = real.elapsed_secs();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || feed::run(tx));
+        feed.0 = Mutex::new(rx);
+        chat.notes.clear();
+        chat.activity.clear();
+        chat.notices.clear();
+        chat.dirty = true;
+        deck.problem = Some("the feed stopped and was restarted (see ~/.local/state/warp-core/crash.log)".into());
+    }
+    for msg in msgs {
         match msg {
             Msg::Seats(seats) => {
                 deck.seats = seats;
@@ -1473,9 +1605,15 @@ fn move_stars(
     layout: Res<Layout>,
     windows: Query<&Window>,
     mut rng: ResMut<Rng>,
+    mut splash: ResMut<Splash>,
     mut stars: Query<(&mut Star, &mut Transform)>,
 ) {
     let sc = &mods.cfg.stars;
+    let spl = &mods.cfg.splash;
+    splash.fit(spl.cells);
+    // The walls stars splash on: the scene's edges, the panel's left edge
+    // included.
+    let walls = layout.half();
     // The sky fills the whole window (the panel covers its right side).
     let half = Vec2::new(layout.scene.x * 0.5 + layout.panel, window_size(&windows).y * 0.5);
     let reach = half.length() + 20.0;
@@ -1485,7 +1623,11 @@ fn move_stars(
     let dt = time.delta_secs();
     for (mut star, mut tf) in &mut stars {
         star.dist += speed * star.speed * dt * (0.3 + star.dist / reach);
-        if star.dist > reach {
+        let hit = if spl.show { wall_hit(star.dir * star.dist, walls) } else { None };
+        if let Some((edge, t)) = hit {
+            splash.hit(edge, t, star.colour, spl);
+        }
+        if hit.is_some() || star.dist > reach {
             star.dir = Vec2::from_angle(rng.next() * std::f32::consts::TAU);
             star.dist = 30.0 + rng.next() * 120.0;
         }
@@ -1495,6 +1637,40 @@ fn move_stars(
         tf.translation = Vec3::new(p.x, p.y, 0.0);
         tf.rotation = Quat::from_rotation_z(star.dir.to_angle());
         tf.scale = Vec3::new(stretch * (1.0 + near), 0.6 + near, 1.0);
+    }
+}
+
+/// The light the stars left on the walls: a thin glow just inside each
+/// edge, with a fainter halo a little further in.
+fn draw_splash(mut splash: ResMut<Splash>, mods: Res<Mods>, time: Res<Time>, layout: Res<Layout>, mut gizmos: Gizmos) {
+    let cfg = &mods.cfg.splash;
+    if !cfg.show {
+        return;
+    }
+    splash.settle(time.delta_secs(), cfg);
+    let h = layout.half();
+    for (edge, cells) in splash.edges.iter().enumerate() {
+        let n = cells.len();
+        for (i, e) in cells.iter().enumerate() {
+            if e.max_element() < 0.01 {
+                continue;
+            }
+            let (a, b) = (i as f32 / n as f32, (i + 1) as f32 / n as f32);
+            let seg = |inset: f32| -> (Vec2, Vec2) {
+                match edge {
+                    0 => (Vec2::new(-h.x + a * 2.0 * h.x, h.y - inset), Vec2::new(-h.x + b * 2.0 * h.x, h.y - inset)),
+                    2 => (Vec2::new(-h.x + a * 2.0 * h.x, -h.y + inset), Vec2::new(-h.x + b * 2.0 * h.x, -h.y + inset)),
+                    1 => (Vec2::new(h.x - inset, -h.y + a * 2.0 * h.y), Vec2::new(h.x - inset, -h.y + b * 2.0 * h.y)),
+                    _ => (Vec2::new(-h.x + inset, -h.y + a * 2.0 * h.y), Vec2::new(-h.x + inset, -h.y + b * 2.0 * h.y)),
+                }
+            };
+            let c = *e * cfg.glow;
+            let (p, q) = seg(1.5);
+            gizmos.line_2d(p, q, Color::linear_rgb(c.x, c.y, c.z));
+            let (p, q) = seg(5.0);
+            let c = c * 0.35;
+            gizmos.line_2d(p, q, Color::linear_rgb(c.x, c.y, c.z));
+        }
     }
 }
 
@@ -1767,13 +1943,14 @@ fn colour_stars(
     mods: Res<Mods>,
     mut mats: ResMut<StarMats>,
     mut materials: ResMut<Assets<ColorMaterial>>,
-    mut stars: Query<(&Star, &mut MeshMaterial2d<ColorMaterial>)>,
+    mut stars: Query<(&mut Star, &mut MeshMaterial2d<ColorMaterial>)>,
 ) {
     let sc = &mods.cfg.stars;
     let shares = if sc.by_context { context_shares(&deck.seats) } else { Vec::new() };
     let key = format!(
-        "{}|{:?}",
+        "{}|{:?}|{:?}",
         sc.context_bright,
+        sc.colour,
         shares.iter().map(|(n, s)| format!("{n}:{:.3}", s)).collect::<Vec<_>>()
     );
     if key == mats.key {
@@ -1794,11 +1971,13 @@ fn colour_stars(
             }
         }
     }
-    for (star, mut mat) in &mut stars {
-        let want = seat_for_slot(&shares, star.slot)
-            .and_then(|n| mats.seats.get(n))
-            .unwrap_or(&mats.default)
-            .clone();
+    for (mut star, mut mat) in &mut stars {
+        let seat = seat_for_slot(&shares, star.slot);
+        star.colour = match seat {
+            Some(n) => Vec3::from(seat_rgb(n)) * sc.context_bright,
+            None => Vec3::from(sc.colour),
+        };
+        let want = seat.and_then(|n| mats.seats.get(n)).unwrap_or(&mats.default).clone();
         if mat.0 != want {
             mat.0 = want;
         }
@@ -2457,6 +2636,38 @@ mod tests {
         notes.push_back(Notice { time: 40.0, text: "Note from claude \u{2014} done".into() });
         let text: String = notice_spans(&notes, 0, 50, 100.0).into_iter().map(|(t, _)| t).collect();
         assert_eq!(text, "     1m  Note from claude -- done");
+    }
+
+    #[test]
+    fn stars_splash_on_the_wall_they_reach() {
+        let half = Vec2::new(400.0, 300.0);
+        assert_eq!(wall_hit(Vec2::new(10.0, 10.0), half), None, "inside: no splash");
+        assert_eq!(wall_hit(Vec2::new(0.0, 310.0), half), Some((0, 0.5)), "straight up: the top, in the middle");
+        assert_eq!(wall_hit(Vec2::new(410.0, 0.0), half), Some((1, 0.5)));
+        assert_eq!(wall_hit(Vec2::new(0.0, -301.0), half).unwrap().0, 2);
+        let (edge, t) = wall_hit(Vec2::new(-420.0, -150.0), half).unwrap();
+        assert_eq!(edge, 3);
+        assert!(t < 0.5, "lower half of the left wall");
+    }
+
+    #[test]
+    fn splashed_light_spills_spreads_and_fades() {
+        let cfg = mods::SplashCfg::default();
+        let mut s = Splash::default();
+        s.fit(16);
+        s.hit(0, 0.5, Vec3::ONE, &cfg);
+        let mid = s.edges[0][8].x;
+        assert!(mid > 0.0 && s.edges[0][9].x > 0.0 && s.edges[0][9].x < mid, "spills to its neighbours, less");
+        assert_eq!(s.edges[1][8], Vec3::ZERO, "other walls untouched");
+        let total = |s: &Splash| s.edges[0].iter().map(|v| v.x).sum::<f32>();
+        let before = total(&s);
+        s.settle(0.1, &cfg);
+        assert!(total(&s) < before, "fades");
+        assert!(s.edges[0][5].x > 0.0, "spreads along the wall");
+        for _ in 0..600 {
+            s.settle(0.1, &cfg);
+        }
+        assert!(total(&s) < 0.01, "and is gone after a while");
     }
 
     #[test]

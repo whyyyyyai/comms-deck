@@ -10,6 +10,7 @@
 background = [0.01, 0.012, 0.03]
 bloom = 0.28
 fps = 30                      # frames a second; lower sips less power
+fps_unfocused = 20            # while another window has the focus
 
 [core]
 cool = [0.25, 0.9, 3.2]       # the core's colour when the crew has room
@@ -94,6 +95,17 @@ jump_on_send = true
 jump_per_char = 0.004         # warp per character sent: 250 characters = full warp
 jump_max = 2.0                # the biggest jump (a 500-character note); warp drains
                               # at [warp] decay a second, so longer notes coast longer
+
+# Stars that reach the edge splash against it: their light soaks into a
+# subtle glow along the border that spreads a little and fades.
+[splash]
+show = true
+energy = 0.12                 # light one star leaves on the wall
+fade = 0.7                    # glow lost per second (proportionally)
+spread = 1.5                  # how fast it spreads along the wall
+spill = 2                     # neighbouring cells a splash reaches at once
+cells = 64                    # cells per edge
+glow = 1.0                    # on-screen brightness; above 1 blooms
 
 # ---------------------------------------------------------------- rules
 #

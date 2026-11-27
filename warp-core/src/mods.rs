@@ -75,10 +75,37 @@ pub struct Look {
     pub background: [f32; 3],
     pub bloom: f32,
     pub fps: f32,
+    /// Frames a second while another window has the focus: less CPU.
+    pub fps_unfocused: f32,
 }
 impl Default for Look {
     fn default() -> Self {
-        Look { background: [0.01, 0.012, 0.03], bloom: 0.28, fps: 30.0 }
+        Look { background: [0.01, 0.012, 0.03], bloom: 0.28, fps: 30.0, fps_unfocused: 20.0 }
+    }
+}
+
+/// Stars that reach the edge of the scene splash against it: their light
+/// is absorbed into a glow along the border that spreads a little and fades.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SplashCfg {
+    pub show: bool,
+    /// How much light one star leaves on the wall.
+    pub energy: f32,
+    /// How fast the glow fades (per second).
+    pub fade: f32,
+    /// How fast it spreads along the wall (per second).
+    pub spread: f32,
+    /// Neighbouring cells a splash spills into at once.
+    pub spill: usize,
+    /// Cells per edge (more is finer, and costs a little more).
+    pub cells: usize,
+    /// Glow brightness on screen; above 1 blooms.
+    pub glow: f32,
+}
+impl Default for SplashCfg {
+    fn default() -> Self {
+        SplashCfg { show: true, energy: 0.12, fade: 0.7, spread: 1.5, spill: 2, cells: 64, glow: 1.0 }
     }
 }
 
@@ -322,6 +349,7 @@ pub struct Config {
     pub hud: HudCfg,
     pub chat: ChatCfg,
     pub typing: TypingCfg,
+    pub splash: SplashCfg,
     pub rule: Vec<RuleSpec>,
 }
 
