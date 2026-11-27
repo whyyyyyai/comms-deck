@@ -293,10 +293,12 @@ pub struct HudCfg {
     pub show: bool,
     /// The line of seats that aren't on the ring, with their queues.
     pub dock: bool,
+    /// The card under the pointer when it rests on a seat (off: Y, 2026-11-27).
+    pub hover_card: bool,
 }
 impl Default for HudCfg {
     fn default() -> Self {
-        HudCfg { show: true, dock: true }
+        HudCfg { show: true, dock: true, hover_card: false }
     }
 }
 

@@ -107,6 +107,89 @@ pub fn wake(seat: &str) -> Result<String, String> {
     }
 }
 
+/// The program or window class that holds a seat, as scratchpad-layout
+/// finds it: terminal agents by their process, app seats by class.
+fn seat_holder(seat: &str) -> Option<(&'static str, bool)> {
+    Some(match seat {
+        "claude" => ("claude", true),
+        "grok" => ("grok", true),
+        "gravity" => ("agy", true),
+        "devin" => ("devin", true),
+        "vibe" => ("vibe-rs", true),
+        "codex" => ("codex", true),
+        "lumo" => ("lumo-desktop", false),
+        "alice" => ("grok-bot", false),
+        _ => return None,
+    })
+}
+
+/// {pid: (parent, comm)} for every process.
+fn proc_tree() -> std::collections::HashMap<u32, (u32, String)> {
+    let mut tree = std::collections::HashMap::new();
+    let Ok(dir) = std::fs::read_dir("/proc") else { return tree };
+    for d in dir.flatten() {
+        let Ok(pid) = d.file_name().to_string_lossy().parse::<u32>() else { continue };
+        let (Ok(stat), Ok(comm)) =
+            (std::fs::read_to_string(d.path().join("stat")), std::fs::read_to_string(d.path().join("comm")))
+        else {
+            continue;
+        };
+        let Some(after) = stat.rsplit_once(')') else { continue };
+        let Some(ppid) = after.1.split_whitespace().nth(1).and_then(|p| p.parse().ok()) else { continue };
+        tree.insert(pid, (ppid, comm.trim().to_string()));
+    }
+    tree
+}
+
+/// Takes Y to a seat's own window, on whatever desktop it's on, and closes
+/// the scratchpad (where the warp core lives) so the window is in view.
+/// Hyprland focus only: nothing is typed and nobody is woken (the deck's
+/// focus_seat). Blocking.
+pub fn focus_window(seat: &str) -> Result<String, String> {
+    let (holder, by_process) = seat_holder(seat).ok_or_else(|| format!("{seat} has no window here"))?;
+    let out = Command::new("hyprctl").args(["clients", "-j"]).output().map_err(|e| format!("couldn't run hyprctl: {e}"))?;
+    let clients: Vec<serde_json::Value> =
+        serde_json::from_slice(&out.stdout).map_err(|_| "hyprctl clients unreadable".to_string())?;
+    let class = |c: &serde_json::Value| c["class"].as_str().unwrap_or("").to_string();
+    let address = if by_process {
+        let kitties: std::collections::HashMap<u32, String> = clients
+            .iter()
+            .filter(|c| class(c) == "kitty")
+            .filter_map(|c| Some((c["pid"].as_u64()? as u32, c["address"].as_str()?.to_string())))
+            .collect();
+        let tree = proc_tree();
+        tree.iter().filter(|(_, (_, name))| name == holder).find_map(|(&pid, _)| {
+            let mut p = pid;
+            while p > 1 {
+                if let Some(a) = kitties.get(&p) {
+                    return Some(a.clone());
+                }
+                p = tree.get(&p).map_or(0, |t| t.0);
+            }
+            None
+        })
+    } else {
+        clients.iter().find(|c| class(c) == holder).and_then(|c| c["address"].as_str().map(String::from))
+    };
+    let address = address.ok_or_else(|| format!("{seat}'s window isn't open"))?;
+    if !address.chars().all(|c| c.is_ascii_hexdigit() || c == 'x') {
+        return Err("odd window address".into());
+    }
+    // Close the scratchpad first if it's showing, so the window isn't behind it.
+    let mons = Command::new("hyprctl").args(["monitors", "-j"]).output().ok();
+    let special_open = mons
+        .and_then(|o| serde_json::from_slice::<Vec<serde_json::Value>>(&o.stdout).ok())
+        .is_some_and(|ms| {
+            ms.iter().any(|m| m["focused"].as_bool() == Some(true) && m["specialWorkspace"]["name"].as_str() == Some("special:magic"))
+        });
+    if special_open {
+        let _ = Command::new("hyprctl").args(["dispatch", "hl.dsp.workspace.toggle_special(\"magic\")"]).output();
+    }
+    let expr = format!("hl.dsp.focus({{ window = \"address:{address}\" }})");
+    Command::new("hyprctl").args(["dispatch", &expr]).output().map_err(|e| format!("couldn't run hyprctl: {e}"))?;
+    Ok(format!("showing {seat}'s window"))
+}
+
 /// The clipboard's text, for a paste; newlines become spaces so a paste
 /// never sends itself.
 pub fn paste() -> String {
@@ -126,14 +209,6 @@ pub fn drop_word(s: &str) -> String {
         Some(i) => t[..=i].to_string(),
         None => String::new(),
     }
-}
-
-/// Adds `@seat ` to the line unless it already names that seat.
-pub fn address(line: &str, seat: &str) -> String {
-    if words_with_prefix(line, '@').iter().any(|w| w == seat) {
-        return line.to_string();
-    }
-    format!("@{seat} {}", line.trim_start())
 }
 
 #[cfg(test)]
@@ -157,11 +232,12 @@ mod tests {
     }
 
     #[test]
-    fn clicking_a_seat_addresses_it_once() {
-        assert_eq!(address("", "vibe"), "@vibe ");
-        assert_eq!(address("hi there", "vibe"), "@vibe hi there");
-        assert_eq!(address("@vibe hi", "vibe"), "@vibe hi");
-        assert_eq!(address("@vibe hi", "devin"), "@devin @vibe hi");
+    fn every_agent_seat_has_a_window_to_find() {
+        for seat in ["claude", "grok", "gravity", "devin", "vibe", "lumo", "alice"] {
+            assert!(seat_holder(seat).is_some(), "{seat}");
+        }
+        assert!(seat_holder("owner").is_none(), "Y has no agent window");
+        assert!(focus_window("nobody").is_err());
     }
 
     #[test]

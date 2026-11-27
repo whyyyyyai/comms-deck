@@ -1368,15 +1368,17 @@ fn pointer(
             .map(|(n, _, _)| n.name.clone())
     });
     if mouse.just_pressed(MouseButton::Left) {
-        deck.focus = match (&deck.hover, &deck.focus) {
-            (Some(h), Some(f)) if h == f => None,
-            (Some(h), _) => Some(h.clone()),
-            (None, _) => None,
-        };
-        // Clicking a seat also addresses the chat box to it.
+        // Clicking an agent takes Y to its own window (Y, 2026-11-27).
         if let Some(h) = deck.hover.clone().filter(|h| h != "owner") {
-            chat.input = chat::address(&chat.input, &h);
-            chat.focus = true;
+            chat.sending += 1;
+            chat.status = Some((format!("going to {}...", label_for(&h)), false, f32::MAX));
+            let tx = chat.tx.clone();
+            std::thread::spawn(move || {
+                let r = chat::focus_window(&h);
+                let _ = tx.send((None, r));
+            });
+        } else if deck.hover.is_none() {
+            deck.focus = None;
         }
     }
     // Right-click wakes a seat, through comms-deck wake and its rules.
@@ -1429,7 +1431,7 @@ fn glow_seats(
         if let Some(mut m) = materials.get_mut(&mat.0) {
             m.color = lin(look.tint.unwrap_or_else(|| seat_rgb(&node.name)), b);
         }
-        let hovered = deck.hover.as_ref() == Some(&node.name);
+        let hovered = cfg.hud.hover_card && deck.hover.as_ref() == Some(&node.name);
         tf.scale = Vec3::splat(
             cfg.seats.size * (0.72 + 0.4 * node.depth) * (1.0 + node.flash * 0.35) * if hovered { 1.12 } else { 1.0 },
         );
@@ -1896,7 +1898,7 @@ fn hud(
     let dock_line = if show {
         // Three to a line, so it fits a half-width window.
         let rows: Vec<String> = off.chunks(3).map(|c| c.join("   |   ")).collect();
-        format!("off the ring: {}\nhover a seat | click: focus + address | right-click: wake | 1-9 | h c m f r | space: test", rows.join("\n              "))
+        format!("off the ring: {}\nclick a seat: its window | right-click: wake | 1-9 | h c m f r | space: test", rows.join("\n              "))
     } else {
         String::new()
     };
@@ -1952,12 +1954,17 @@ fn hover_card(deck: &Deck, name: &str, now: f32) -> Option<String> {
 
 fn tooltip(
     deck: Res<Deck>,
+    mods: Res<Mods>,
     time: Res<Time>,
     layout: Res<Layout>,
     mut tip: Query<(&mut Text2d, &mut Transform, &mut Visibility, &mut Anchor), With<Tooltip>>,
 ) {
     let half = layout.half();
-    let card = deck.hover.as_deref().and_then(|h| hover_card(&deck, h, time.elapsed_secs()));
+    let card = if mods.cfg.hud.hover_card {
+        deck.hover.as_deref().and_then(|h| hover_card(&deck, h, time.elapsed_secs()))
+    } else {
+        None
+    };
     for (mut text, mut tf, mut vis, mut anchor) in &mut tip {
         let (Some(card), Some(at)) = (card.as_ref(), deck.cursor) else {
             *vis = Visibility::Hidden;
@@ -2266,7 +2273,7 @@ fn chat_results(mut chat: ResMut<Chat>, real: Res<Time<Real>>) {
             // A wake's answer.
             chat.status = Some(match r {
                 Ok(say) => (feed::scrub(&say), false, now),
-                Err(e) => (format!("not woken: {}", feed::scrub(&e)), true, now),
+                Err(e) => (feed::scrub(&e), true, now),
             });
             continue;
         };
