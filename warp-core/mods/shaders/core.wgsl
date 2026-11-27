@@ -1,10 +1,12 @@
-// The reactor core. Save this file and the running warp core swaps it in;
-// a broken edit is refused and the HUD says why.
+// The core as a black hole seen from straight above: a round shadow, a thin
+// photon ring at its edge, and the accretion disk face-on around it, its gas
+// spiralling inward and heating up as it falls. Save this file and the
+// running warp core swaps it in; a broken edit is refused and the HUD says why.
 //
-// cool / hot: the shell's colour, blended by how full the crew's meters are
+// cool / hot: the disk's colour, blended by how full the crew's meters are
 // params: x = time in seconds
 //         y = heat (0 = everyone has room, 1 = everyone near a limit)
-//         z = warp (0..1, kicked by broadcasts)
+//         z = warp (0..1+, kicked by broadcasts and sent notes)
 //         w = traffic (0..1, notes in the last 10 minutes)
 
 struct Core {
@@ -46,18 +48,33 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let heat = clamp(core.params.y, 0.0, 1.0);
     let warp = core.params.z;
     let traffic = core.params.w;
+    let horizon = 0.26;
 
-    // Plasma swirling round the centre, faster with traffic.
+    // Gas orbits faster near the hole (Kepler: angular speed ~ r^-1.5) and
+    // the arms wind into a spiral: angle shifted by log(r).
     let ang = atan2(p.y, p.x);
-    let spin = t * (0.4 + traffic * 1.5);
-    let swirl = noise(vec2<f32>(ang * 2.5 + spin, r * 5.0 - t * (1.0 + traffic * 2.0)))
-              * 0.6 + noise(vec2<f32>(ang * 6.0 - spin * 1.7, r * 11.0)) * 0.4;
+    let orbit = t * (0.35 + traffic * 1.2 + warp * 1.5) / pow(max(r, 0.2), 1.5);
+    let arm = ang + orbit + 2.2 * log(max(r, 0.05));
+    let streaks = noise(vec2<f32>(arm * 3.0, r * 6.0)) * 0.6 + noise(vec2<f32>(arm * 8.0, r * 18.0)) * 0.4;
+    let arms = 0.55 + 0.45 * sin(arm * 2.0);
 
-    let shell = 1.0 - smoothstep(0.25, 1.0, r);
-    let centre = 1.0 - smoothstep(0.0, 0.32, r);
-    let base = mix(core.cool.rgb, core.hot.rgb, heat);
-    let colour = base * shell * (0.55 + 0.9 * swirl)
-               + vec3<f32>(6.0, 6.0, 7.0) * centre * (1.0 + warp * 1.5);
-    let alpha = clamp(shell * 1.4 + centre, 0.0, 1.0);
+    // The disk: from just outside the photon ring out to the edge, hottest
+    // at its inner edge.
+    let disk = smoothstep(horizon + 0.02, horizon + 0.08, r) * (1.0 - smoothstep(0.55, 1.0, r));
+    let inner_heat = clamp(1.0 - (r - horizon) / 0.5, 0.0, 1.0);
+    let base = mix(core.cool.rgb, core.hot.rgb, max(heat, inner_heat * 0.6));
+    let gas = base * disk * streaks * arms * (0.7 + 1.6 * inner_heat);
+
+    // The photon ring and the lensed glow just outside the shadow.
+    let photon = exp(-pow((r - horizon - 0.012) / 0.01, 2.0)) * (3.0 + warp * 3.0);
+    let lensed = exp(-pow((r - horizon - 0.05) / 0.04, 2.0)) * 0.8;
+
+    var colour = gas + base * lensed + vec3<f32>(1.0, 0.96, 0.9) * photon;
+    var alpha = clamp(length(gas) * 0.8 + lensed + photon * 0.5, 0.0, 1.0);
+    if (r < horizon) {
+        // The shadow: nothing comes back out.
+        colour = vec3<f32>(0.0);
+        alpha = 1.0;
+    }
     return vec4<f32>(colour, alpha);
 }
