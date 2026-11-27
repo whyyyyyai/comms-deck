@@ -1,0 +1,271 @@
+# warp-core live mods. Save this file and the running warp core picks it up
+# within half a second: no rebuild, no restart. If something here doesn't
+# parse, the warp core keeps the last good version and says why in the HUD.
+#
+# Colours are linear [r, g, b]; values above 1 bloom. In rules a colour can
+# also be a name: white red amber gold green cyan blue violet pink, or "seat"
+# for the seat's own colour.
+
+[look]
+background = [0.01, 0.012, 0.03]
+bloom = 0.28
+fps = 60                      # frames a second while shown: 60 at least (Y, 05:26)
+fps_unfocused = 60            # the same with another window focused (Y, 05:26)
+msaa = 1                      # multisampling 1 (off), 2 or 4: off is far lighter on the GPU at 4480x2520
+fps_hidden = 24               # while hidden in the scratchpad: low, but tabbing back is snappy (Y, 06:18)
+
+[core]
+cool = [0.25, 0.9, 3.2]       # the core's colour when the crew has room
+hot = [5.0, 2.2, 0.8]         # ... and as their meters fill up
+size = 1.0
+breath = 0.07                 # how far it swells each breath
+# t29 (Y): the core's size and oscillation are governed by what it takes
+# in. Each packet that reaches it adds energy and kicks it outward; it rings
+# down like a spring. Energy, busy agents, note traffic and heat set how big
+# it rests and how fast and deep it breathes.
+per_packet = 0.35             # energy a packet brings
+energy_decay = 0.08           # energy lost per second (fraction)
+max_energy = 3.0
+grow_per_energy = 0.08        # resting size per unit of energy
+grow_busy = 0.12              # resting size with the whole crew busy
+breath_rate = 0.8             # radians a second at rest
+rate_per_energy = 0.9
+rate_per_note = 0.25          # per note in the last 10 minutes (up to 30)
+rate_per_heat = 0.6           # as the crew's context meters fill
+depth_per_energy = 0.5        # each breath deeper with energy
+kick = 1.6                    # outward kick per packet (the gulp)
+ring_freq = 1.4               # the gulp rings down at this many Hz
+ring_damping = 0.25           # 1 = settles without overshoot
+settle = 3.0                  # seconds to ease to a new size; the core never swells in and out (Y, 06:19).
+                              # A packet's kick now flares the photon ring instead of the size.
+
+# The ring's spin comes from the agents' notes to each other: each one
+# kicks it on clockwise, the way the core's disk turns (a note never
+# reverses it), and it slows to a stop without them. The drift keeps the
+# planets slowly circling even when nobody has spoken for a while — in the
+# physics sim (t13) this is the turning their tangential speed steers onto.
+[orbit]
+drift = 0.1                   # a steady turn on top (radians a second)
+traffic = 0.0                 # (old) per note in the last 10 minutes
+warp_swing = 1.2              # added at full warp
+spin_kick = 0.08              # spin one note between agents adds
+friction = 0.12               # spin lost per second, proportionally
+max_spin = 1.5
+
+# The planets' motion is a simplified physics sim (t13, vibe): gravity pulls
+# each one towards the singularity (acceleration falls off as 1/r², so inner
+# orbits run faster); an agent at work has thrust enough to climb to a
+# higher orbit away from the warp core; an agent with nothing to do keeps a
+# fairly stable orbit; the planets pull on each other, each weighing its
+# share of the crew's context pool, and no planet is ever lost over the
+# screen's edge — it is reflected back in, keeping some of its speed.
+[physics]
+gravity = 530000.0            # the core's pull, px³/s² (a = gravity / r²)
+thrust = 1.6                  # outward push while busy, as a multiple of the local pull (fades near the edge)
+drift = 0.0                   # inward sink while not busy, px/s² (0 = fairly stable orbits, Y t18)
+mutual = 60000.0              # the planets' pull on each other, px³/s²
+soften = 60.0                 # close pairs pull at this distance, px
+size_span = 0.5               # how far context share stretches a body's drawn size
+turn_share = 0.3              # the ring's turning on top of each orbit's circular speed
+steering = 2.0                # how fast tangential speed settles onto its target
+max_steer = 120.0             # the hardest the steering may push, px/s²
+min_radius = 90.0             # nothing falls closer to the core than this, px
+bounce = 0.5                  # speed kept on a bounce off the screen's edge
+edge_margin = 90.0            # the gap kept from the screen's edge, px
+contact = 100.0               # planets closer than this touch: they bounce apart and don't pull, px
+restitution = 0.8             # closing speed kept when two planets bounce off each other
+
+# The stars' speed comes from the agents: still when nobody is working,
+# slow with a few at it, a boost when an agent writes to Y.
+[stars]
+speed = 0                     # with nobody working
+per_busy = 7                  # added per agent at work
+boost_per_note = 0.4          # an agent's note to Y
+boost_speed = 160             # speed at a boost of 1
+boost_decay = 0.3             # boost lost per second
+warp_speed = 900
+stretch = 40
+colour = [0.9, 0.95, 1.4]       # used when by_context is off, or nobody reports context
+by_context = true               # each seat gets its share of the stars, in its colour
+context_bright = 1.6
+
+[comets]
+seconds = 1.8
+trail = 28
+brightness = 5
+size = 1.0
+
+[warp]
+decay = 0.22                  # warp lost per second
+on_broadcast = 1.0            # warp a note to `all` kicks in (0 turns it off)
+
+[seats]
+size = 1.0
+other = 0.22                  # away, not set up, paused
+[seats.brightness]
+busy = 3.2
+stuck = 2.0
+ready = 1.1
+idle = 1.1
+spent = 0.35
+
+# Fuel rings: context (inner), 5-hour (middle), week (outer), from the
+# seats' usage files. A seat with no usage file has none.
+[fuel]
+show = false                  # off (Y, 2026-11-27): no rings for the meters
+warn = 70
+danger = 90
+ok_colour = [0.2, 1.3, 0.55]
+warn_colour = [1.8, 1.0, 0.1]
+danger_colour = [3.0, 0.25, 0.15]
+empty = 0.08
+
+# Backlog moons: one per waiting note, white when fresh, red by old_hours.
+[moons]
+show = true
+max = 24
+fresh = [1.2, 1.2, 1.3]
+old = [2.5, 0.25, 0.1]
+old_hours = 6
+speed = 0.6
+
+# t30: subagents an agent spawns (hooks in comms-deck) orbit it as a closer
+# band, in the seat's colour. `m` toggles them with the backlog moons.
+[subagents]
+show = true
+speed = 1.6
+radius = 34
+spacing = 7
+size = 2.0
+bright = 1.2
+max = 8
+
+[hud]
+show = true
+dock = true                   # the line of seats that aren't on the ring
+hover_card = false            # the seat card under the pointer (off for now)
+
+# The load balancer's task board, read live from ~/.local/share/comms-deck/.
+# Open tasks orbit the core on their own ring, passing behind and in front
+# of it; a held task is an electron on a fast own orbit of its holder's
+# planet, in front of and behind it (Y, t20). Both are coloured by the seat
+# that assigned the task (Y's tasks burn gold), and t toggles the whole
+# thing.
+[tasks]
+show = true
+speed = 0.22                  # radians a second the task ring turns
+radius = 0.42                 # the ring's radius, as a share of the seat ring's
+size = 0.5
+bright = 1.1
+shooting = true               # a task that leaves the board leaves the sky as a shooting star (t50)
+shooting_secs = 2.2           # how long a shooting star flies before it burns out
+
+# The chat panel on the right: the notes, and a chat box that sends as Y.
+# The terminal chat screen keeps working alongside it.
+[chat]
+show = true
+width = 0.32                  # share of the window (300..600 px)
+font = 14
+keep = 200                    # notes kept for scrolling back
+
+# Typing in the chat box builds thrust: the longer the note, the faster the
+# stars stream. It drains away when you stop; sending jumps to warp.
+[typing]
+kick = 0.02                   # thrust per key (thrust runs 0..1)
+decay = 0.05                  # thrust lost per second
+star_speed = 420              # added star speed at full thrust
+stretch = 14                  # added streaking at full thrust
+jump_on_send = true
+jump_per_char = 0.004         # warp per character sent: 250 characters = full warp
+jump_max = 3.0                # the biggest jump; warp drains at [warp] decay a
+                              # second, so bigger jumps coast longer
+per_recipient = 1.0           # each extra agent reached adds the jump again
+
+# Stars that reach the edge splash against it: their light soaks into a
+# subtle glow along the border that spreads a little and fades.
+[splash]
+show = true
+energy = 0.12                 # light one star leaves on the wall
+fade = 0.7                    # glow lost per second (proportionally)
+spread = 1.5                  # how fast it spreads along the wall
+spill = 2                     # neighbouring cells a splash reaches at once
+cells = 64                    # cells per edge
+glow = 1.0                    # on-screen brightness; above 1 blooms
+
+# Conduits from the planets to the core bend with the ring's spin, and send a
+# packet of light only when a job is finished.
+[conduits]
+bend = 2.2                    # bend per radian a second of spin
+max_bend = 1.4
+packet_seconds = 1.4
+
+# Inside each planet (mods/shaders/planet.wgsl): calm idle, churning busy,
+# more the longer it has been working.
+[planets]
+show = true
+full_minutes = 20
+
+# ---------------------------------------------------------------- rules
+#
+# on = "seat": `when` is checked every frame for each seat on the ring.
+#   effects: halo (a ring around it: colour, pulse, size, bright)
+#            tint (its colour: colour, bright)
+#            glow (brightness times `bright`)
+#            beacon (a flashing marker above it: colour, pulse)
+#            label (adds `text` under its name)
+#   fields:  name state shown online busy idle ready stuck spent waiting
+#            waiting_normal oldest_waiting_s oldest_waiting_h since_s
+#            held_by_draft paused ctx five_hour week fullest has_usage focused
+#            (ctx / five_hour / week / fullest are percentages, -1 if unknown)
+#
+# on = "note": checked once for each note as it flies.
+#   effects: comet (colour, size, bright, seconds)
+#            warp (kicks the starfield by `strength`)
+#            shockwave (a ring bursts from the receiver: colour, size)
+#   fields:  from to all to_owner to_count quiet len
+#            (`to` is a comma list: to contains 'vibe')
+#
+# The language: numbers, 'strings', true/false, + - * /,
+# == != < <= > >=, && || ! (or and/or/not), and ( ).
+
+# No "drafting..." label under a seat: no text on the planets (Y, 05:21).
+
+# Stuck, and something other than quiet notes is waiting: the deck calls a
+# seat stuck for a quiet FYI too, which isn't meant to wake it.
+[[rule]]
+on = "seat"
+when = "stuck && waiting_normal > 0"
+effect = "halo"
+colour = "red"
+pulse = 1.5
+size = 0.62
+
+# The ring round a planet says one thing (Y, 2026-11-27): red is stuck,
+# green is ready. Busy shows inside the planet instead (planet.wgsl).
+[[rule]]
+on = "seat"
+when = "(ready || idle) && !(stuck && waiting_normal > 0)"
+effect = "halo"
+colour = "green"
+size = 0.62
+
+
+[[rule]]
+on = "note"
+when = "to_owner"
+effect = "comet"
+colour = "gold"
+size = 1.8
+bright = 1.5
+
+[[rule]]
+on = "note"
+when = "to_owner"
+effect = "shockwave"
+colour = "gold"
+
+[[rule]]
+on = "note"
+when = "len > 1500"
+effect = "comet"
+size = 1.6
