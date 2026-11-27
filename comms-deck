@@ -11,7 +11,7 @@
   comms-deck chat [--hide-private]                       full-screen live view of the notes
   comms-deck serve                                       the background service
   comms-deck mcp                                         MCP server (send, read, status as tools)
-  comms-deck hook --source <claude|grok|agy>             called by the agents' hooks
+  comms-deck hook --source <claude|grok|agy|codex>       called by the agents' hooks
   comms-deck statusline --source <claude|grok|agy>       status line (feeds the usage panel; agy has none)
   comms-deck install [--yes]                             set this machine up
   comms-deck self-test                                   run the tests in a temp folder
@@ -971,8 +971,10 @@ def render(records, seat):
 
 
 def event_prompt_id(data):
-    """The turn id on a hook payload, or None. Grok's field is promptId."""
+    """The turn id on a hook payload, or None. Grok's field is promptId, Codex's turn_id."""
     value = data.get("promptId")
+    if value is None or value == "":
+        value = data.get("turn_id")
     if value is None or value == "":
         return None
     return str(value)
@@ -1002,7 +1004,13 @@ def paused_for_background(data):
 # Devin's hooks use Claude Code's event names and replies (additionalContext
 # on SessionStart and UserPromptSubmit, {"decision": "block"} on Stop), so it
 # takes Claude's path through hook(). It has no idle_prompt notification.
-CLAUDE_LIKE = ("claude", "devin")
+# Codex (0.172+, ~/.codex/hooks.json) uses the same names and replies too,
+# with turn_id for the turn; its Stop is the idle signal, as on Devin.
+CLAUDE_LIKE = ("claude", "devin", "codex")
+# Seats whose UserPromptSubmit reply can carry notes as additionalContext.
+# Codex documents that reply only for SessionStart, so its notes wait for
+# its Stop hook (block + reason) rather than being taken and maybe dropped.
+PROMPT_CONTEXT = ("claude", "devin")
 
 
 def hook(source, event):
@@ -1013,10 +1021,12 @@ def hook(source, event):
         return vibe_hook(event)
     # Grok and Devin both also read ~/.claude/settings.json, so Claude's hooks
     # fire inside them too. Each agent marks its own hook runs: Grok sets
-    # GROK_HOOK_EVENT, Devin sets DEVIN_PROJECT_DIR. Only the hook installed
+    # GROK_HOOK_EVENT, Devin sets DEVIN_PROJECT_DIR. Codex sets nothing, so
+    # it is known by the agent process above the hook. Only the hook installed
     # for the agent we're running in acts.
     running_in = ("grok" if os.environ.get("GROK_HOOK_EVENT")
-                  else "devin" if os.environ.get("DEVIN_PROJECT_DIR") else "claude")
+                  else "devin" if os.environ.get("DEVIN_PROJECT_DIR")
+                  else "codex" if find_agent()[0] == "codex" else "claude")
     if source != running_in:
         return  # e.g. Grok reading Claude's settings file: not our hook here
     try:
@@ -1066,7 +1076,7 @@ def hook(source, event):
         if prompt_id:
             changes["prompt_id"] = prompt_id
         update_seat(seat, **changes)
-        if source in CLAUDE_LIKE and owner_typed:
+        if source in PROMPT_CONTEXT and owner_typed:
             notes = take(seat, limit_chars=HANDOVER_MAX)
             if notes:
                 reply({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
@@ -3122,7 +3132,7 @@ def availability(seat, state, now=None, snap=None):
             "shade": shade, "waiting": waiting, "usage": usage}
 
 
-ROUTABLE = ("claude", "grok", "gravity")  # agents a task can be handed to (not codex or app seats)
+ROUTABLE = ("claude", "grok", "gravity", "codex")  # agents an @deck task can be handed to (not app seats); codex back 2026-11-27
 
 
 def most_available(seats=ROUTABLE, now=None):
@@ -6852,6 +6862,27 @@ def devin_config(config, cmd):
     return config
 
 
+CODEX_HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd")
+
+
+def codex_hooks(config, cmd):
+    """`config` (~/.codex/hooks.json, as a dict) with the deck's hooks added.
+
+    Other hooks are kept and an earlier comms-deck entry is replaced, so
+    running it twice is once. Codex runs a new or changed hook only after
+    someone trusts it in Codex (/hooks, or the review Codex shows at start):
+    that review is the owner's step, so install never marks them trusted.
+    Codex caps SessionEnd at 3 s.
+    """
+    config = json.loads(json.dumps(config or {}))
+    hooks = config.setdefault("hooks", {})
+    for event in CODEX_HOOK_EVENTS:
+        kept = [e for e in hooks.get(event, []) if "comms-deck hook" not in json.dumps(e)]
+        hooks[event] = kept + [{"hooks": [{"type": "command", "timeout": 3 if event == "SessionEnd" else 10,
+                                           "command": f"{cmd} hook --source codex --event {event}"}]}]
+    return config
+
+
 def devin_mcp_config(config, cmd):
     """`config` (~/.config/devin/mcp_config.json) with the comms-deck server set."""
     config = json.loads(json.dumps(config or {}))
@@ -7095,6 +7126,22 @@ def install(yes):
          devin_files)
     step("register the MCP server with Codex, if installed (~/.codex/config.toml)",
          lambda: mcp_toml(HOME / ".codex/config.toml", "[mcp_servers.comms-deck]"))
+
+    def codex_hook_file():
+        path = HOME / ".codex/hooks.json"
+        if not path.parent.exists():
+            return
+        current = {}
+        if path.exists():
+            try:
+                current = json.loads(path.read_text() or "{}")
+            except ValueError:
+                print(f"     skipped {path}: it isn't plain JSON; add the comms-deck hooks by hand")
+                return
+            shutil.copy(path, path.with_suffix(".json.comms-deck-backup"))
+        path.write_text(json.dumps(codex_hooks(current, cmd), indent=2) + "\n")
+        print("     Codex runs them once they're trusted: in Codex, type /hooks and trust the comms-deck ones")
+    step("add comms-deck hooks to ~/.codex/hooks.json, if Codex is installed (backup kept)", codex_hook_file)
 
     def kitty_conf():
         path = HOME / ".config/kitty/kitty.conf"
@@ -7525,6 +7572,42 @@ def self_test():
     check("devin's MCP config names the seat and keeps other servers",
           mcp["mcpServers"]["comms-deck"]["env"] == {"COMMS_DECK_SEAT": "devin"}
           and "other" in mcp["mcpServers"], json.dumps(mcp))
+    # Codex: Claude-style hooks from ~/.codex/hooks.json, turn_id for the turn.
+    codex_file = Path(tmp) / "data/seats/codex.json"
+    run(["send", "codex", "hello codex"], "claude")
+    r = run(["hook", "--source", "codex", "--event", "SessionStart"], "codex",
+            '{"hook_event_name": "SessionStart", "source": "startup", "session_id": "s1"}')
+    ctx = (json.loads(r.stdout or "{}").get("hookSpecificOutput") or {}).get("additionalContext", "")
+    check("codex's SessionStart says how many notes wait and marks it idle",
+          "1 note(s) are waiting" in ctx and (read_json(codex_file, {}) or {}).get("state") == "idle",
+          r.stdout + r.stderr)
+    r = run(["hook", "--source", "codex", "--event", "Stop"], "claude", "{}")
+    check("the codex hook does nothing outside Codex", not r.stdout.strip(), r.stdout)
+    r = run(["hook", "--source", "claude", "--event", "Stop"], "codex", "{}")
+    check("Claude's hooks do nothing inside Codex", not r.stdout.strip(), r.stdout)
+    r = run(["hook", "--source", "codex", "--event", "UserPromptSubmit"], "codex",
+            '{"prompt": "look at the warp core", "turn_id": "t1"}')
+    state = read_json(codex_file, {}) or {}
+    check("codex is busy on a typed prompt; its notes stay for the Stop (no context reply)",
+          state.get("state") == "busy" and state.get("prompt_id") == "t1" and not r.stdout.strip()
+          and len(list((Path(tmp) / "data/inbox/codex").glob("*.json"))) == 1, r.stdout + json.dumps(state))
+    r = run(["hook", "--source", "codex", "--event", "Stop"], "codex", '{"turn_id": "t0", "stop_hook_active": false}')
+    check("an older turn's Stop leaves codex alone", not r.stdout.strip(), r.stdout)
+    r = run(["hook", "--source", "codex", "--event", "Stop"], "codex", '{"turn_id": "t1", "stop_hook_active": false}')
+    out = json.loads(r.stdout or "{}")
+    check("codex's Stop hands the waiting note over as block + reason",
+          out.get("decision") == "block" and "hello codex" in out.get("reason", ""), r.stdout + r.stderr)
+    run(["hook", "--source", "codex", "--event", "Stop"], "codex", '{"turn_id": "t1", "stop_hook_active": true}')
+    check("codex is idle after a Stop with nothing waiting", (read_json(codex_file, {}) or {}).get("state") == "idle")
+    run(["hook", "--source", "codex", "--event", "SessionEnd"], "codex", '{"reason": "other"}')
+    check("codex is away after SessionEnd", (read_json(codex_file, {}) or {}).get("state") == "away")
+    mine = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "my-own-check"}]}]}}
+    once = codex_hooks(mine, "/x/comms-deck")
+    check("codex's hooks.json: four deck hooks, the owner's own kept, twice is once, SessionEnd within 3 s",
+          once == codex_hooks(once, "/x/comms-deck") and len(once["hooks"]["Stop"]) == 2
+          and once["hooks"]["Stop"][0]["hooks"][0]["command"] == "my-own-check"
+          and set(once["hooks"]) == set(CODEX_HOOK_EVENTS)
+          and once["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"] <= 3, json.dumps(once))
     r = run(["mcp-call"], "grok", json.dumps({"seat": "grok", "name": "team_status", "arguments": {}}))
     reply = json.loads(r.stdout or "{}")
     check("an MCP server on old code hands a call to the program on disk (mcp-call)",
@@ -8739,7 +8822,7 @@ def main():
     sub.add_parser("mcp")
     sub.add_parser("mcp-call")  # internal: one tool call for an MCP server running old code
     p = sub.add_parser("hook")
-    p.add_argument("--source", required=True, choices=("claude", "grok", "agy", "vibe", "devin"))
+    p.add_argument("--source", required=True, choices=("claude", "grok", "agy", "vibe", "devin", "codex"))
     p.add_argument("--event", default="")
     p = sub.add_parser("statusline")
     p.add_argument("--source", required=True, choices=("claude", "grok", "agy"))
