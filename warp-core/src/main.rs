@@ -29,8 +29,8 @@
 //! to leave the box), Ctrl+U/W/V clear, delete a word, paste; Tab or Esc on
 //! an empty line hands the keys to the ring: 1-9 focus a seat, 0 clears, h
 //! HUD, c fuel rings, m moons, t tasks, f freeze, r reload mods, Space a test
-//! broadcast, PgUp/PgDn scroll, Enter or Tab back to the box, q quits.
-//! Ctrl+Q quits from either.
+//! broadcast, PgUp/PgDn scroll, Enter or Tab back to the box. No key
+//! quits: it runs as a service (`systemctl --user stop warp-core`).
 //!
 //! Written by: claude
 
@@ -245,6 +245,8 @@ struct Deck {
     seats: Vec<SeatInfo>,
     /// The seat list the ring was last built from (names only).
     built: Vec<String>,
+    /// Every seat's fixed slot on the ring, online or not.
+    roster: Vec<String>,
     /// When notes arrived (seconds of app time), for the core's pace.
     arrivals: VecDeque<f32>,
     /// The last notes seen, newest first, for the hover card.
@@ -1162,6 +1164,18 @@ fn ring_positions(names: &[String], window: Vec2, orbit: f32) -> HashMap<String,
         .collect()
 }
 
+/// The fixed order of the ring: Y, then the agents in their desktop order
+/// (Super+1..7), then any other seat by name. Never the service's
+/// availability ranking, which reshuffles as seats change state.
+const SEAT_ORDER: [&str; 10] = ["owner", "claude", "grok", "vibe", "devin", "gravity", "lumo", "alice", "codex", "mystra"];
+
+fn seat_roster<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut all: Vec<String> = names.map(String::from).collect();
+    all.sort_by_key(|n| (SEAT_ORDER.iter().position(|s| s == n).unwrap_or(SEAT_ORDER.len()), n.clone()));
+    all.dedup();
+    all
+}
+
 /// The orbit's speed in radians a second: a slow drift when quiet, faster
 /// with traffic, and a hard swing in warp.
 fn orbit_speed(cfg: &mods::OrbitCfg, notes_10min: usize, warp: f32, spin: f32) -> f32 {
@@ -1273,8 +1287,14 @@ fn layout_seats(
     let turning = orbit_speed(oc, pace, warp, deck.spin);
     deck.turning = turning;
     deck.orbit = (deck.orbit + dt * turning).rem_euclid(std::f32::consts::TAU);
-    let names: Vec<String> = deck.seats.iter().filter(|s| s.online()).map(|s| s.name.clone()).collect();
-    let pos = ring_positions(&names, layout.scene, deck.orbit);
+    // Every seat keeps one fixed slot on the ring, in a fixed order, so the
+    // planets never change places relative to each other (Y, t8): offline
+    // seats leave their slot empty rather than the others closing up.
+    let roster = seat_roster(deck.seats.iter().map(|s| s.name.as_str()));
+    let names: Vec<String> = roster.iter().filter(|n| deck.seat(n).is_some_and(|s| s.online())).cloned().collect();
+    let pos: HashMap<String, (Vec2, f32)> =
+        ring_positions(&roster, layout.scene, deck.orbit).into_iter().filter(|(n, _)| names.contains(n)).collect();
+    deck.roster = roster;
     if names != deck.built {
         for (e, _, _) in &nodes {
             commands.entity(e).despawn();
@@ -1840,7 +1860,7 @@ fn fly_comets(
                 deck.boost += mods.cfg.stars.boost_per_note;
             }
             if !note.all && note.from != "owner" {
-                let ring = deck.built.clone();
+                let ring = deck.roster.clone();
                 for to in note.to.iter().filter(|t| *t != "owner") {
                     deck.spin += spin_kick(&ring, &note.from, to, mods.cfg.orbit.spin_kick);
                 }
@@ -2182,17 +2202,12 @@ fn keys(
     mut vtime: ResMut<Time<Virtual>>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
-    if ctrl && keys.just_pressed(KeyCode::KeyQ) {
-        exit.write(AppExit::Success);
-    }
+    // No key quits (Y, 2026-11-27: survival first; a stray q took it down at
+    // 04:22). It runs as a service: `systemctl --user stop warp-core` stops it.
+    let _ = &mut exit;
     // While the chat box has the keys, letters are typing, not commands.
-    // (Esc no longer quits: it clears the chat box.)
     if chat.focus {
         return;
-    }
-    if keys.just_pressed(KeyCode::KeyQ) {
-        exit.write(AppExit::Success);
     }
     if keys.just_pressed(KeyCode::Space) {
         // A test broadcast from Y: nothing is sent, it only flies here.
@@ -2366,10 +2381,12 @@ fn chat_input(
             Key::Enter if !ev.repeat => {
                 let before = chat.sending;
                 let len = chat.input.trim().chars().count();
+                let seats: Vec<String> = deck.seats.iter().map(|s| s.name.clone()).collect();
+                let reach = chat::route(chat.input.trim(), &seats).map(|to| recipients(&to, &seats)).unwrap_or(1);
                 send_line(&mut chat, &deck, real.elapsed_secs());
                 // A note went out: jump to warp in proportion to its length.
                 if chat.sending > before && mods.cfg.typing.jump_on_send {
-                    deck.warp = deck.warp.max(send_jump(len, &mods.cfg.typing));
+                    deck.warp = deck.warp.max(send_jump(len, reach, &mods.cfg.typing));
                     deck.thrust = 0.0;
                 }
             }
@@ -2413,8 +2430,22 @@ fn chat_input(
 
 /// The warp a sent note jumps to: proportional to its length, capped.
 /// Warp drains at a steady rate, so the coast is proportional too.
-fn send_jump(len: usize, cfg: &mods::TypingCfg) -> f32 {
-    (len as f32 * cfg.jump_per_char).clamp(0.0, cfg.jump_max.max(0.0))
+fn send_jump(len: usize, reach: usize, cfg: &mods::TypingCfg) -> f32 {
+    // The more agents a note reaches, the bigger the jump (Y, t9).
+    let more = 1.0 + cfg.per_recipient * (reach.max(1) - 1) as f32;
+    (len as f32 * cfg.jump_per_char * more).clamp(0.0, cfg.jump_max.max(0.0))
+}
+
+/// How many agents a routed note reaches: its named seats, or for `all`
+/// every agent seat (not Y) less the ones dropped with -seat.
+fn recipients(to: &str, seats: &[String]) -> usize {
+    let parts: Vec<&str> = to.split([',', ' ']).filter(|p| !p.is_empty()).collect();
+    let drops = parts.iter().filter(|p| p.starts_with('-')).count();
+    if parts.first() == Some(&"all") {
+        seats.iter().filter(|s| s.as_str() != "owner").count().saturating_sub(drops).max(1)
+    } else {
+        parts.iter().filter(|p| !p.starts_with('-')).count().max(1)
+    }
 }
 
 /// Thrust after typing `keys` characters: each adds `kick`, up to full.
@@ -2926,11 +2957,11 @@ mod tests {
     #[test]
     fn a_longer_note_jumps_further_and_coasts_longer() {
         let cfg = mods::TypingCfg::default();
-        let short = send_jump(50, &cfg);
-        let long = send_jump(200, &cfg);
+        let short = send_jump(50, 1, &cfg);
+        let long = send_jump(200, 1, &cfg);
         assert!((long - 4.0 * short).abs() < 1e-5, "proportional to length");
-        assert_eq!(send_jump(10_000, &cfg), cfg.jump_max, "capped");
-        assert_eq!(send_jump(0, &cfg), 0.0);
+        assert_eq!(send_jump(10_000, 1, &cfg), cfg.jump_max, "capped");
+        assert_eq!(send_jump(0, 1, &cfg), 0.0);
         // Steady drain: the coast time is the jump over the decay rate.
         let decay = mods::WarpCfg::default().decay;
         assert!((long / decay - 4.0 * short / decay).abs() < 1e-4);
@@ -3041,6 +3072,30 @@ mod tests {
         assert_eq!(planet_work(0.0, 20.0), 0.0);
         assert!(planet_work(600.0, 20.0) > 0.3 && planet_work(600.0, 20.0) < planet_work(3600.0, 20.0));
         assert!(planet_work(1e9, 20.0) <= 1.0);
+    }
+
+    #[test]
+    fn the_ring_keeps_a_fixed_order_whatever_the_ranking() {
+        let ranked = ["devin", "claude", "owner", "zeta", "vibe"];
+        assert_eq!(seat_roster(ranked.into_iter()), ["owner", "claude", "vibe", "devin", "zeta"]);
+        let reshuffled = ["vibe", "zeta", "owner", "devin", "claude"];
+        assert_eq!(seat_roster(reshuffled.into_iter()), seat_roster(ranked.into_iter()), "ranking changes nothing");
+        // Each seat's slot ignores who else is online.
+        let roster = seat_roster(ranked.into_iter());
+        let a = ring_positions(&roster, Vec2::new(1000.0, 1000.0), 0.3);
+        let b = ring_positions(&roster, Vec2::new(1000.0, 1000.0), 0.3);
+        assert_eq!(a["vibe"].0, b["vibe"].0);
+    }
+
+    #[test]
+    fn a_note_to_more_agents_jumps_further() {
+        let cfg = mods::TypingCfg::default();
+        let seats: Vec<String> = ["owner", "claude", "grok", "vibe", "devin"].map(String::from).to_vec();
+        assert_eq!(recipients("vibe", &seats), 1);
+        assert_eq!(recipients("vibe, devin", &seats), 2);
+        assert_eq!(recipients("all", &seats), 4, "every agent, not Y");
+        assert_eq!(recipients("all -grok", &seats), 3);
+        assert!(send_jump(100, 3, &cfg) > send_jump(100, 1, &cfg) * 2.5);
     }
 
     #[test]

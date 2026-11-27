@@ -67,7 +67,7 @@ spent = 0.35
 # Fuel rings: context (inner), 5-hour (middle), week (outer), from the
 # seats' usage files. A seat with no usage file has none.
 [fuel]
-show = true
+show = false                  # off (Y, 2026-11-27): no rings for the meters
 warn = 70
 danger = 90
 ok_colour = [0.2, 1.3, 0.55]
@@ -118,8 +118,9 @@ star_speed = 420              # added star speed at full thrust
 stretch = 14                  # added streaking at full thrust
 jump_on_send = true
 jump_per_char = 0.004         # warp per character sent: 250 characters = full warp
-jump_max = 2.0                # the biggest jump (a 500-character note); warp drains
-                              # at [warp] decay a second, so longer notes coast longer
+jump_max = 3.0                # the biggest jump; warp drains at [warp] decay a
+                              # second, so bigger jumps coast longer
+per_recipient = 1.0           # each extra agent reached adds the jump again
 
 # Stars that reach the edge splash against it: their light soaks into a
 # subtle glow along the border that spreads a little and fades.
@@ -170,20 +171,6 @@ full_minutes = 20
 
 [[rule]]
 on = "seat"
-when = "oldest_waiting_h >= 1"
-effect = "halo"
-colour = "amber"
-pulse = 1.0
-
-[[rule]]
-on = "seat"
-when = "fullest >= 90"
-effect = "beacon"
-colour = "red"
-pulse = 2.0
-
-[[rule]]
-on = "seat"
 when = "held_by_draft"
 effect = "label"
 text = "drafting..."
@@ -195,8 +182,18 @@ on = "seat"
 when = "stuck && waiting_normal > 0"
 effect = "halo"
 colour = "red"
-pulse = 2.5
-size = 1.15
+pulse = 1.5
+size = 0.62
+
+# The ring round a planet says one thing (Y, 2026-11-27): red is stuck,
+# green is ready. Busy shows inside the planet instead (planet.wgsl).
+[[rule]]
+on = "seat"
+when = "(ready || idle) && !(stuck && waiting_normal > 0)"
+effect = "halo"
+colour = "green"
+size = 0.62
+
 
 [[rule]]
 on = "note"

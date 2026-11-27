@@ -193,10 +193,13 @@ pub struct TypingCfg {
     pub jump_on_send: bool,
     pub jump_per_char: f32,
     pub jump_max: f32,
+    /// Each agent past the first a note reaches adds this much of the jump
+    /// again (1 = proportional to the recipients).
+    pub per_recipient: f32,
 }
 impl Default for TypingCfg {
     fn default() -> Self {
-        TypingCfg { kick: 0.02, decay: 0.05, star_speed: 420.0, stretch: 14.0, jump_on_send: true, jump_per_char: 0.004, jump_max: 2.0 }
+        TypingCfg { kick: 0.02, decay: 0.05, star_speed: 420.0, stretch: 14.0, jump_on_send: true, jump_per_char: 0.004, jump_max: 3.0, per_recipient: 1.0 }
     }
 }
 
