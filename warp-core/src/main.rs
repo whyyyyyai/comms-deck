@@ -18,6 +18,7 @@ use bevy::{
     post_process::bloom::Bloom,
     prelude::*,
     sprite::Anchor,
+    winit::{UpdateMode, WinitSettings},
 };
 use feed::{Msg, NoteInfo, SeatInfo};
 use std::collections::{HashMap, VecDeque};
@@ -35,6 +36,12 @@ fn main() {
         .insert_resource(Feed(Mutex::new(rx)))
         .insert_resource(Deck::default())
         .insert_resource(Rng(0x9E37_79B9_7F4A_7C15))
+        // 30 fps is smooth for drifting seats and comets, and half the CPU of
+        // drawing at the screen's refresh rate; it is a display, not a game.
+        .insert_resource(WinitSettings {
+            focused_mode: UpdateMode::reactive(std::time::Duration::from_millis(33)),
+            unfocused_mode: UpdateMode::reactive(std::time::Duration::from_millis(33)),
+        })
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "warp core".into(),
