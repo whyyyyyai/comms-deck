@@ -912,6 +912,64 @@ struct Body {
     vel: Vec2,
 }
 
+/// What the planets' gravity on each other adds to each one (t18): the
+/// pull between two is `mutual * mass / dist²`, softened under `soften`
+/// and switched off for a pair that touches (t46), so it can't glue them.
+fn mutual_pulls(bodies: &[Body], masses: &[f32], pc: &mods::PhysicsCfg) -> Vec<Vec2> {
+    let mut pull = vec![Vec2::ZERO; bodies.len()];
+    for i in 0..bodies.len() {
+        for j in (i + 1)..bodies.len() {
+            let d = bodies[j].pos - bodies[i].pos;
+            if d.length_squared() < pc.contact * pc.contact {
+                continue;
+            }
+            let d2 = d.length_squared().max(pc.soften * pc.soften);
+            let a = pc.mutual / d2 / d2.sqrt();
+            pull[i] += d * (a * masses[j]);
+            pull[j] -= d * (a * masses[i]);
+        }
+    }
+    pull
+}
+
+/// Planets touch (t46): any two whose centres are closer than `contact`
+/// are pushed apart until they just touch, and if they were closing they
+/// bounce, keeping `restitution` of the closing speed. Without this the
+/// mutual pull drew a pair together and the steering matched their speeds,
+/// so they rode round the ring stuck to each other. Equal masses: a contact
+/// is about the drawn planets, not their context weight. A pair sitting
+/// exactly on top of each other is split along a fixed direction per pair,
+/// so the result never depends on a random draw.
+fn resolve_contacts(bodies: &mut [Body], contact: f32, restitution: f32) {
+    if contact <= 0.0 {
+        return;
+    }
+    for i in 0..bodies.len() {
+        for j in (i + 1)..bodies.len() {
+            let d = bodies[j].pos - bodies[i].pos;
+            let dist = d.length();
+            if dist >= contact {
+                continue;
+            }
+            let n = if dist > 1e-3 {
+                d / dist
+            } else {
+                let a = (i * 7 + j * 13) as f32;
+                Vec2::new(a.cos(), a.sin())
+            };
+            let push = n * ((contact - dist) * 0.5);
+            bodies[i].pos -= push;
+            bodies[j].pos += push;
+            let closing = (bodies[j].vel - bodies[i].vel).dot(n);
+            if closing < 0.0 {
+                let kick = n * (closing * (1.0 + restitution) * 0.5);
+                bodies[i].vel += kick;
+                bodies[j].vel -= kick;
+            }
+        }
+    }
+}
+
 /// One planet's mass (t18): its share of the crew's context pool, scaled so
 /// an even split weighs 1 a head. A seat on the ring that reports no
 /// context weighs the average; with no figures at all everyone weighs 1.
@@ -1830,23 +1888,19 @@ fn layout_seats(
             (node.body, busy, body_mass(&shares, &node.name))
         })
         .collect();
-    let mut pull = vec![Vec2::ZERO; gathered.len()];
-    for i in 0..gathered.len() {
-        for j in (i + 1)..gathered.len() {
-            let d = gathered[j].0.pos - gathered[i].0.pos;
-            let d2 = d.length_squared().max(pc.soften * pc.soften);
-            let a = pc.mutual / d2 / d2.sqrt();
-            pull[i] += d * (a * gathered[j].2);
-            pull[j] -= d * (a * gathered[i].2);
-        }
-    }
+    let masses: Vec<f32> = gathered.iter().map(|g| g.2).collect();
+    let pull = mutual_pulls(&gathered.iter().map(|g| g.0).collect::<Vec<_>>(), &masses, pc);
     // Depth follows the sim too: the higher a planet stands on the screen
     // (the far side of the tilted orbit), the further behind the core it
     // slides.
     let ry = layout.scene.y * 0.30;
+    let mut bodies: Vec<Body> = gathered.iter().map(|g| g.0).collect();
+    for (i, body) in bodies.iter_mut().enumerate() {
+        step_body(body, gathered[i].1, turning, layout.scene, dt, pc, pull[i]);
+    }
+    resolve_contacts(&mut bodies, pc.contact, pc.restitution);
     for (i, (_, mut node, mut tf)) in nodes.iter_mut().enumerate() {
-        let (_, busy, _) = gathered[i];
-        step_body(&mut node.body, busy, turning, layout.scene, dt, pc, pull[i]);
+        node.body = bodies[i];
         let p = node.body.pos;
         node.depth = (0.5 - 0.5 * (p.y / ry)).clamp(0.0, 1.0);
         tf.translation.x = p.x;
@@ -3594,6 +3648,71 @@ mod tests {
         }
         assert!(lo > 250.0 && hi < 360.0, "the orbit breathes between {lo} and {hi}, it doesn't decay or escape");
         assert!(went_down && went_left, "it really went round, not just wobbled in place");
+    }
+
+    #[test]
+    fn touching_planets_bounce_apart() {
+        // Head on, overlapping: pushed out to the contact distance and the
+        // closing speed turned round (t46).
+        let mut b = [
+            Body { pos: Vec2::new(-20.0, 0.0), vel: Vec2::new(30.0, 0.0) },
+            Body { pos: Vec2::new(20.0, 0.0), vel: Vec2::new(-30.0, 0.0) },
+        ];
+        resolve_contacts(&mut b, 100.0, 0.8);
+        assert!(((b[1].pos - b[0].pos).length() - 100.0).abs() < 0.01, "pushed out to touching");
+        assert!(b[0].vel.x < 0.0 && b[1].vel.x > 0.0, "they bounce: {:?} {:?}", b[0].vel, b[1].vel);
+        assert!((b[1].vel.x - 24.0).abs() < 0.01, "keeping restitution of the speed: {}", b[1].vel.x);
+        // Exactly on top of each other: still split, the same way every time.
+        let mut c = [Body::default(), Body::default()];
+        resolve_contacts(&mut c, 100.0, 0.8);
+        assert!(((c[1].pos - c[0].pos).length() - 100.0).abs() < 0.01);
+        let mut again = [Body::default(), Body::default()];
+        resolve_contacts(&mut again, 100.0, 0.8);
+        assert_eq!(c[0].pos, again[0].pos);
+        // Separating pairs keep their speed; far pairs aren't touched.
+        let mut d = [
+            Body { pos: Vec2::new(0.0, 0.0), vel: Vec2::new(-5.0, 0.0) },
+            Body { pos: Vec2::new(50.0, 0.0), vel: Vec2::new(5.0, 0.0) },
+        ];
+        resolve_contacts(&mut d, 100.0, 0.8);
+        assert_eq!((d[0].vel.x, d[1].vel.x), (-5.0, 5.0));
+        let far = [Body { pos: Vec2::new(0.0, 0.0), vel: Vec2::ZERO }, Body { pos: Vec2::new(300.0, 0.0), vel: Vec2::ZERO }];
+        let mut f = far;
+        resolve_contacts(&mut f, 100.0, 0.8);
+        assert_eq!(f[1].pos, far[1].pos);
+    }
+
+    #[test]
+    fn planets_dont_stick_together() {
+        // Y, t46: two planets meeting on nearly the same orbit used to
+        // clump into one and ride round together for good. Run the sim the
+        // way the deck does (mutual pull, step, contacts) for two minutes.
+        let cfg = mods::PhysicsCfg::default();
+        let scene = Vec2::new(1280.0, 800.0);
+        for busy in [false, true] {
+            let mut b = vec![
+                Body { pos: Vec2::new(0.0, 250.0), vel: Vec2::new(46.0, 0.0) },
+                Body { pos: Vec2::new(30.0, 255.0), vel: Vec2::new(40.0, 0.0) },
+                Body { pos: Vec2::new(-260.0, 0.0), vel: Vec2::new(0.0, 45.0) },
+            ];
+            let masses = [1.0, 1.0, 1.0];
+            let mut min_gap = f32::MAX;
+            for _ in 0..(120 * 60) {
+                let pull = mutual_pulls(&b, &masses, &cfg);
+                for (i, body) in b.iter_mut().enumerate() {
+                    step_body(body, busy, 0.1, scene, 1.0 / 60.0, &cfg, pull[i]);
+                }
+                resolve_contacts(&mut b, cfg.contact, cfg.restitution);
+                for i in 0..b.len() {
+                    for j in (i + 1)..b.len() {
+                        min_gap = min_gap.min((b[j].pos - b[i].pos).length());
+                    }
+                }
+            }
+            // A third planet can squeeze a pair a little within one frame.
+            assert!(min_gap > cfg.contact * 0.9, "busy={busy}: planets overlapped, closest {min_gap}");
+            assert!(b.iter().all(|x| x.pos.is_finite() && x.vel.is_finite()));
+        }
     }
 
     #[test]
