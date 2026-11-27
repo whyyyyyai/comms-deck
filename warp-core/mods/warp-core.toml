@@ -146,6 +146,7 @@ max = 8
 show = true
 dock = true                   # the line of seats that aren't on the ring
 hover_card = false            # the seat card under the pointer (off for now)
+stats = true                  # system stats down the left: gpu frames, ram, swap, load, power, context (t53)
 
 # The load balancer's task board, read live from ~/.local/share/comms-deck/.
 # Open tasks orbit the core on their own ring, passing behind and in front

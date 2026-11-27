@@ -499,10 +499,13 @@ pub struct HudCfg {
     pub dock: bool,
     /// The card under the pointer when it rests on a seat (off: Y, 2026-11-27).
     pub hover_card: bool,
+    /// The system stats down the scene's left side: GPU frames, RAM, swap,
+    /// load, power and each seat's context (t53).
+    pub stats: bool,
 }
 impl Default for HudCfg {
     fn default() -> Self {
-        HudCfg { show: true, dock: true, hover_card: false }
+        HudCfg { show: true, dock: true, hover_card: false, stats: true }
     }
 }
 

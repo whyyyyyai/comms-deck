@@ -37,6 +37,7 @@
 mod chat;
 mod feed;
 mod mods;
+mod sys;
 
 use bevy::{
     asset::uuid_handle,
@@ -135,6 +136,7 @@ fn main() {
                     drive_planets,
                     draw_moons_and_marks,
                     hud,
+                    sys_panel,
                     tooltip,
                     chat_results,
                     draw_chat,
@@ -1108,6 +1110,10 @@ struct Core;
 #[derive(Component)]
 struct Hud;
 
+/// The system stats down the scene's left side (t53).
+#[derive(Component)]
+struct SysPanel;
+
 #[derive(Component)]
 struct Dock;
 
@@ -1387,6 +1393,14 @@ fn setup(
         TextBounds::new_horizontal(800.0),
         TextColor(Color::srgb(0.55, 0.65, 0.8)),
         Anchor::TOP_LEFT,
+        Transform::from_xyz(0.0, 0.0, 5.0),
+    ));
+    commands.spawn((
+        SysPanel,
+        Text2d::new(""),
+        TextFont { font_size: FontSize::Px(14.0), ..default() },
+        TextColor(Color::srgb(0.5, 0.6, 0.75)),
+        Anchor::CENTER_LEFT,
         Transform::from_xyz(0.0, 0.0, 5.0),
     ));
     commands.spawn((
@@ -2775,6 +2789,47 @@ fn draw_splash(mut splash: ResMut<Splash>, mods: Res<Mods>, time: Res<Time>, lay
 }
 
 #[allow(clippy::type_complexity)]
+/// The system stats down the left of the scene (t53, Y: "system stats,
+/// like gpu, memory, ram, context, on the left side"). The machine is read
+/// every 2 s (a few /proc and hwmon files); the frame record every frame.
+/// It turns amber when a figure is where trouble starts.
+fn sys_panel(
+    deck: Res<Deck>,
+    mods: Res<Mods>,
+    view: Res<View>,
+    real: Res<Time<Real>>,
+    layout: Res<Layout>,
+    mut panel: Query<(&mut Text2d, &mut Transform, &mut TextColor, &mut Visibility), With<SysPanel>>,
+    mut state: Local<(sys::Frames, sys::Machine, f32)>,
+) {
+    let now = real.elapsed_secs();
+    state.0.frame(now, real.delta_secs());
+    if state.2 <= 0.0 || now - state.2 >= 2.0 {
+        state.1 = sys::read_machine();
+        state.2 = now.max(1e-3);
+    }
+    let show = mods.cfg.hud.show && mods.cfg.hud.stats && view.hud;
+    let context: Vec<(String, f64)> =
+        deck.seats.iter().filter(|s| s.online()).filter_map(|s| s.ctx.map(|c| (label_for(&s.name), c))).collect();
+    let text = sys::panel_text(&state.1, &state.0, &context);
+    let warn = sys::warning(&state.1, state.0.stalls());
+    let colour = if warn { Color::srgb(1.0, 0.7, 0.3) } else { Color::srgb(0.5, 0.6, 0.75) };
+    for (mut t, mut tf, mut c, mut vis) in &mut panel {
+        let want = if show { Visibility::Inherited } else { Visibility::Hidden };
+        if *vis != want {
+            *vis = want;
+        }
+        if t.0 != text {
+            t.0 = text.clone();
+        }
+        if c.0 != colour {
+            c.0 = colour;
+        }
+        tf.translation.x = -layout.half().x + 18.0;
+        tf.translation.y = 0.0;
+    }
+}
+
 fn hud(
     deck: Res<Deck>,
     mods: Res<Mods>,
