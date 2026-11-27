@@ -42,7 +42,7 @@ notes waiting. Codex, Lumo, Alice and Mystra are not chosen.
 - claude and grok are terminal seats. Notes arrive through their hooks.
 - gravity is the Antigravity CLI (`agy`). She is idle until Tue 05:08.
   Do not hand her work until then.
-- codex is paused unless the owner says otherwise. Do not start it.
+- codex is back (Y, 2026-11-27). It is sandboxed: no systemd or D-Bus, and the push courier pushes its `codex/...` branches.
 - alice is a Grok Bot. Notes are typed into her chat. A draft left
   unchanged for 10 minutes is saved to the owner and the box is cleared.
 - lumo reads her own tools at <https://github.com/whyyyyyai/lumo-seat>.

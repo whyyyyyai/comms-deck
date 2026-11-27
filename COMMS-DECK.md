@@ -45,7 +45,7 @@ owner, on one Linux desktop (Hyprland, kitty):
   set a webhook.
 
 **The seats.** Terminal agents: `claude` (Claude Code), `grok` (the Grok CLI),
-`gravity` (Google's Antigravity CLI, program `agy`), and `codex` (paused).
+`gravity` (Google's Antigravity CLI, program `agy`), and `codex` (sandboxed; back from 2026-11-27).
 `devin` (Cognition's Devin CLI) is a terminal seat.
 App seat: `alice`, a bot in the Grok Bot app (reached through the
 app, not through tools), and `lumo` (not set up yet). Plus `owner`. Seats are
