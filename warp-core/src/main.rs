@@ -1456,7 +1456,7 @@ fn hud(
             deck.notes_last(now, 3600.0),
         );
         if deck.warp > 0.05 {
-            line.push_str("    >> WARP");
+            line.push_str(&format!("    >> WARP {:.1}", deck.warp));
         } else if deck.thrust > 0.05 {
             line.push_str(&format!("    thrust {:.0}%", deck.thrust * 100.0));
         }
@@ -1777,10 +1777,11 @@ fn chat_input(
         match &ev.logical_key {
             Key::Enter if !ev.repeat => {
                 let before = chat.sending;
+                let len = chat.input.trim().chars().count();
                 send_line(&mut chat, &deck, real.elapsed_secs());
-                // A note went out: the thrust built while typing it jumps to warp.
+                // A note went out: jump to warp in proportion to its length.
                 if chat.sending > before && mods.cfg.typing.jump_on_send {
-                    deck.warp = deck.warp.max(deck.thrust);
+                    deck.warp = deck.warp.max(send_jump(len, &mods.cfg.typing));
                     deck.thrust = 0.0;
                 }
             }
@@ -1820,6 +1821,12 @@ fn chat_input(
             }
         }
     }
+}
+
+/// The warp a sent note jumps to: proportional to its length, capped.
+/// Warp drains at a steady rate, so the coast is proportional too.
+fn send_jump(len: usize, cfg: &mods::TypingCfg) -> f32 {
+    (len as f32 * cfg.jump_per_char).clamp(0.0, cfg.jump_max.max(0.0))
 }
 
 /// Thrust after typing `keys` characters: each adds `kick`, up to full.
@@ -2261,6 +2268,19 @@ mod tests {
         assert_eq!(chat.input, "@nobody hi");
         assert!(chat.status.as_ref().is_some_and(|(m, err, _)| *err && m.contains("@nobody")));
         assert_eq!(chat.sending, 0, "nothing went out");
+    }
+
+    #[test]
+    fn a_longer_note_jumps_further_and_coasts_longer() {
+        let cfg = mods::TypingCfg::default();
+        let short = send_jump(50, &cfg);
+        let long = send_jump(200, &cfg);
+        assert!((long - 4.0 * short).abs() < 1e-5, "proportional to length");
+        assert_eq!(send_jump(10_000, &cfg), cfg.jump_max, "capped");
+        assert_eq!(send_jump(0, &cfg), 0.0);
+        // Steady drain: the coast time is the jump over the decay rate.
+        let decay = mods::WarpCfg::default().decay;
+        assert!((long / decay - 4.0 * short / decay).abs() < 1e-4);
     }
 
     #[test]

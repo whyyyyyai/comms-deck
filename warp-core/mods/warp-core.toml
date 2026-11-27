@@ -91,6 +91,9 @@ decay = 0.05                  # thrust lost per second
 star_speed = 420              # added star speed at full thrust
 stretch = 14                  # added streaking at full thrust
 jump_on_send = true
+jump_per_char = 0.004         # warp per character sent: 250 characters = full warp
+jump_max = 2.0                # the biggest jump (a 500-character note); warp drains
+                              # at [warp] decay a second, so longer notes coast longer
 
 # ---------------------------------------------------------------- rules
 #
