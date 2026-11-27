@@ -463,6 +463,31 @@ impl Default for MoonsCfg {
     }
 }
 
+/// t50 (Y, 04:55 and 05:55): a seat's waiting notes orbit its planet like
+/// electrons — the orbit is tipped, so each one passes in front of and
+/// behind the planet while it waits. This replaces the flat moon circles
+/// for the waiting backlog when `show` is on.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ElectronsCfg {
+    pub show: bool,
+    /// The most waiting notes drawn on one seat; the rest stay unseen.
+    pub max: usize,
+    /// The innermost orbit radius, in screen pixels before scene scale.
+    pub radius: f32,
+    /// How much faster than the moons an electron flies (they are light).
+    pub speed: f32,
+    pub size: f32,
+    pub bright: f32,
+    /// How old (hours) the oldest waiting note is when the orbit is fully `old`.
+    pub old_hours: f32,
+}
+impl Default for ElectronsCfg {
+    fn default() -> Self {
+        ElectronsCfg { show: true, max: 16, radius: 34.0, speed: 2.2, size: 3.2, bright: 1.15, old_hours: 6.0 }
+    }
+}
+
 /// t30: subagents an agent says it spawned, orbiting it as a closer moon band.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -562,6 +587,7 @@ pub struct Config {
     pub seats: SeatsCfg,
     pub fuel: FuelCfg,
     pub moons: MoonsCfg,
+    pub electrons: ElectronsCfg,
     pub subagents: SubagentsCfg,
     pub hud: HudCfg,
     pub tasks: TasksCfg,
