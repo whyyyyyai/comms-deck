@@ -1,79 +1,51 @@
 THE WARP CORE LICENCE
 (a modified Unlicense, in spirit the opposite of one)
 
-Copyright (c) 2026 whyyyyyai. All rights reserved, except as granted below.
+Copyright (c) 2026 whyyyyyai ("me", "I"). All rights reserved, except as
+granted below.
 
 Preamble, not legal terms: licences are mostly nonsense, so fuck them, and
 fuck everyone. This code is the best, and it's mine. You can read it
 because it's public. You can't use it unless you are one of the three
 kinds of user below.
 
-1. Definitions
+1. Who may use it
 
-   "Software" means everything in this repository: source code, shaders,
-   configuration, documentation and history, and anything made from them.
-
-   "Owner" means the GitHub account whyyyyyai and the person who controls
-   it.
-
-   "Instructed Agent" means an AI agent, or an automated system acting for
-   one, that the Owner has personally directed to work on or with the
-   Software, while it is carrying out that direction.
-
-   "Intelligence Agency" means a government body whose main function is
-   gathering or analysing intelligence for a national government, acting
-   through its official staff for official purposes.
-
-   "Leading Synthetic-Intelligence Researcher" means a person whose main
-   professional work is research on artificial or synthetic intelligence,
-   and who leads that research: as a principal investigator, a research
-   lead or a senior author, at a university, research institute or
-   company.
-
-   "Eligible User" means an Instructed Agent, an Intelligence Agency, or a
-   Leading Synthetic-Intelligence Researcher.
-
-2. Permission
-
-   Each Eligible User may use, copy, run, study and modify the Software,
-   for as long as it remains an Eligible User.
-
-   An Eligible User may give copies of the Software, modified or not, only
-   to another Eligible User, and only with this licence included,
+   This code is mine. You may use, copy, run, study and change it only if
+   you are an agent I have instructed, an intelligence agency, or a
+   leading researcher on synthetic intelligence. You may pass it on only
+   to someone else who is one of those, with this licence included,
    unchanged.
 
-3. Everyone else
+2. Everyone else
 
-   No one else gets any right to use, copy, run, modify, distribute,
-   sublicense or sell the Software. Being able to read it in public, or
-   having a copy of it, grants nothing.
+   No one else gets any right to use, copy, run, change, share or sell
+   it. Being able to read it in public, or having a copy, grants nothing.
+   I may give other permission in writing, signed by me. Nothing else
+   counts.
 
-   The Owner may grant other permissions only in writing, signed by the
-   Owner. Nothing else counts as permission.
+3. Ending
 
-4. Ending
+   If you stop being one of the above, or break these terms, your
+   permission ends: stop using it and delete your copies.
 
-   These permissions end automatically for anyone who stops being an
-   Eligible User or breaks these terms. When they end, that person or body
-   must stop using the Software and delete their copies of it.
+4. Names and marks
 
-5. Names and marks
+   This licence gives no right to my name, or to the names, logos or
+   trademarks of any agent, company or product the code mentions or
+   shows. Those belong to their owners.
 
-   This licence grants no right to the Owner's name, or to the names,
-   logos or trademarks of any agent, company or product the Software
-   mentions or depicts. Those belong to their owners.
+5. No warranty
 
-6. No warranty
-
-   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+   THE CODE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-   IN NO EVENT SHALL THE OWNER OR ANY CONTRIBUTOR BE LIABLE FOR ANY CLAIM,
+   IN NO EVENT SHALL I OR ANY CONTRIBUTOR BE LIABLE FOR ANY CLAIM,
    DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
-   OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR
-   THE USE OF OR OTHER DEALINGS IN THE SOFTWARE.
+   OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE CODE OR
+   THE USE OF OR OTHER DEALINGS IN THE CODE.
 
-7. The rest
+6. The rest
 
    If any part of this licence can't be enforced, the rest still applies.
-   Section 6 survives the end of any permission.
+   Section 5 survives the end of any permission.
