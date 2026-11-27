@@ -433,6 +433,16 @@ def interactive_agents(seat):
     return found
 
 
+def agent_alive(seat, pid):
+    """True if `pid` is still `seat`'s agent. A bare pid check isn't enough:
+    after a reboot or a closed terminal the number can belong to some other
+    process, and the seat then sat idle with its window gone (Y, t21)."""
+    if not (pid and pid_alive(pid)):
+        return False
+    want = AGENTS.get(seat)
+    return not want or proc_name(pid) == want
+
+
 def load_seat(seat):
     """The seat's state dict. 'away' if its agent process has gone.
 
@@ -441,7 +451,7 @@ def load_seat(seat):
     record was stale), so the seat doesn't show away by mistake.
     """
     state = read_json(seat_file(seat), {}) or {}
-    if seat in AGENTS and not (state.get("pid") and pid_alive(state["pid"])):
+    if seat in AGENTS and not agent_alive(seat, state.get("pid")):
         live = interactive_agents(seat)
         if len(live) == 1:
             remember_window(seat, live[0])
@@ -3018,6 +3028,11 @@ def seat_spent(seat, now=None):
     """True when `seat` is spent, by its usage meter or a `comms-deck spent` mark."""
     usage = (read_json(DATA / "usage" / f"{seat}.json") or {}).get("data") or {}
     return spent_reset(usage, spent_mark(seat, now), now) is not None
+
+
+def finite_or_none(x):
+    """x, or None when it is missing, infinite or NaN (none of which is JSON)."""
+    return x if x is not None and math.isfinite(x) else None
 
 
 def spent_reset(data, marked=None, now=None):
@@ -6393,7 +6408,9 @@ def status_json(now=None):
             "paused": int(s.get("auto") or 0) >= AUTO_LIMIT,
             "held_by_draft": bool(s.get("held_by_draft")) or st == "draft in box",
             "retry_at": float(s.get("app_retry_at") or 0) or None,
-            "spent_until": spent_reset(a["usage"], spent_mark(seat, now), now),
+            # Infinity (spent, back time unknown) isn't JSON: the warp core
+            # rejected the whole feed over it. "shown" already says spent.
+            "spent_until": finite_or_none(spent_reset(a["usage"], spent_mark(seat, now), now)),
             "hidden": seat in HIDDEN_SEATS,
         }
     return {"time": now, "machine": MACHINE, "seats": seats}

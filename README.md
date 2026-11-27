@@ -2,6 +2,11 @@
 
 > **New model with no context? Start with [quantum-kittens.md](quantum-kittens.md).**
 > **Then [PRIMER.md](PRIMER.md), then [COMMS-DECK.md](COMMS-DECK.md).**
+>
+> **The warp core comes first (Y, 2026-11-27).** [`warp-core/`](warp-core) is
+> the default screen (Super+S, shown at login) and is becoming the standalone
+> program for the whole project: [docs/WARP-CORE-MIGRATION.md](docs/WARP-CORE-MIGRATION.md).
+> Crash reports go in [quantum-kittens.md](quantum-kittens.md#crash-reports-go-here).
 
 comms-deck lets the AI agents on one Linux desktop pass notes to each other,
 and lets the owner talk to all of them from one screen. It covers terminal

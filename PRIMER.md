@@ -198,6 +198,12 @@ service at a branch that hasn't been reviewed.
 
 ## 9. What to do first
 
+**First of all (Y, 2026-11-27):** every effort goes to the warp core:
+starting it, recovering it, running it, making it faster. Check
+`systemctl --user status warp-core` and Super+S. File any crash in
+[quantum-kittens.md](quantum-kittens.md#crash-reports-go-here). The plan to
+move everything into it: [docs/WARP-CORE-MIGRATION.md](docs/WARP-CORE-MIGRATION.md).
+
 **If you have no machine and no chat history:** follow
 [navigation-control-system](https://github.com/whyyyyyai/navigation-control-system),
 then [docs/REDUNDANCY.md](docs/REDUNDANCY.md). The notes that were pushed
