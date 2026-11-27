@@ -17,7 +17,6 @@ cool = [0.25, 0.9, 3.2]       # the core's colour when the crew has room
 hot = [5.0, 2.2, 0.8]         # ... and as their meters fill up
 size = 1.0
 breath = 0.07                 # how far it swells each breath
-ring_spin = 1.0               # containment ring speed
 
 # The ring's spin comes from the agents' notes to each other: each one
 # kicks it on clockwise, the way the core's disk turns (a note never

@@ -1766,7 +1766,6 @@ fn pulse_core(
     time: Res<Time>,
     mut core: Query<(&mut Transform, &MeshMaterial2d<CoreMaterial>), With<Core>>,
     mut core_materials: ResMut<Assets<CoreMaterial>>,
-    mut gizmos: Gizmos,
 ) {
     let c = &mods.cfg.core;
     let t = time.elapsed_secs();
@@ -1784,17 +1783,9 @@ fn pulse_core(
             };
         }
     }
-    // Two containment rings, coloured by heat. Both turn clockwise with the
-    // disk and the planets, the inner one faster (Kepler: angular speed
-    // ~ r^-1.5). They used to turn against each other (Y, t11).
-    let shell = mix3(c.cool, c.hot, heat);
-    for (r, k) in [(78.0f32, 0.6), (96.0f32, 0.35)] {
-        let spin = -t * (0.4 + rate * 0.2) * c.ring_spin * (r / 78.0).powf(-1.5);
-        for i in 0..3 {
-            let start = spin + i as f32 * std::f32::consts::TAU / 3.0;
-            gizmos.arc_2d(Isometry2d::from_rotation(Rot2::radians(start)), 1.4, r * s, lin(shell, k * 0.75));
-        }
-    }
+    // No containment rings round the core: Y found the two arc patterns
+    // spinning round it unnecessary (2026-11-27) — the black hole alone
+    // marks the centre, the planets and their orbits do the rest.
 }
 
 /// 0..1: the mean of the online seats' fullest meters (seats without

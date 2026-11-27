@@ -117,11 +117,10 @@ pub struct CoreCfg {
     pub hot: [f32; 3],
     pub size: f32,
     pub breath: f32,
-    pub ring_spin: f32,
 }
 impl Default for CoreCfg {
     fn default() -> Self {
-        CoreCfg { cool: [0.25, 0.9, 3.2], hot: [5.0, 2.2, 0.8], size: 1.0, breath: 0.07, ring_spin: 1.0 }
+        CoreCfg { cool: [0.25, 0.9, 3.2], hot: [5.0, 2.2, 0.8], size: 1.0, breath: 0.07 }
     }
 }
 
