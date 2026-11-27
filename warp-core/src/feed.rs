@@ -12,7 +12,7 @@
 use serde_json::Value;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
@@ -100,6 +100,16 @@ pub struct TaskInfo {
     pub open: bool,
 }
 
+/// A subagent an agent says it spawned (t30), from comms-deck's hooks.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SubagentInfo {
+    pub id: String,
+    pub parent: String,
+    pub kind: String,
+    pub active: bool,
+    pub since: f64,
+}
+
 pub enum Msg {
     Seats(Vec<SeatInfo>),
     /// `true` when it just happened (it ripples the ring), false from the backlog.
@@ -108,6 +118,8 @@ pub enum Msg {
     Note(NoteInfo),
     Chat(ChatNote),
     Tasks(Vec<TaskInfo>),
+    /// The subagents seats have spawned (t30), from data_dir()/subagents.json.
+    Subagents(Vec<SubagentInfo>),
     Problem(String),
 }
 
@@ -370,6 +382,47 @@ fn nat_id(id: &str) -> (String, u64) {
     (id.trim_end_matches(|c: char| c.is_ascii_digit()).to_string(), digits.parse().unwrap_or(0))
 }
 
+fn parse_subagent(v: &Value) -> Option<SubagentInfo> {
+    let id = v.get("id").and_then(Value::as_str).unwrap_or("").trim();
+    if id.is_empty() {
+        return None;
+    }
+    let parent = seat_id(&scrub(v.get("parent").or_else(|| v.get("seat")).and_then(Value::as_str).unwrap_or("")));
+    if parent.is_empty() {
+        return None;
+    }
+    let state = v.get("state").or_else(|| v.get("status")).and_then(Value::as_str).unwrap_or("busy");
+    let active = !matches!(state, "done" | "stopped" | "complete" | "completed" | "exit" | "exited");
+    Some(SubagentInfo {
+        id: id.to_string(),
+        parent,
+        kind: v.get("kind").or_else(|| v.get("type")).and_then(Value::as_str).unwrap_or("").to_string(),
+        active,
+        since: v.get("since").or_else(|| v.get("time")).or_else(|| v.get("last")).and_then(Value::as_f64).unwrap_or(0.0),
+    })
+}
+
+pub fn parse_subagents(v: &Value) -> Vec<SubagentInfo> {
+    let items = if let Some(a) = v.as_array() {
+        a.clone()
+    } else if let Some(a) = v.get("subagents").and_then(Value::as_array) {
+        a.clone()
+    } else if let Some(o) = v.get("subagents").and_then(Value::as_object) {
+        o.values().cloned().collect()
+    } else {
+        Vec::new()
+    };
+    let mut out: Vec<SubagentInfo> = items.iter().filter_map(parse_subagent).collect();
+    out.retain(|s| !s.parent.is_empty());
+    out.sort_by(|a, b| a.parent.cmp(&b.parent).then(nat_id(&a.id).cmp(&nat_id(&b.id))));
+    out
+}
+
+pub fn read_subagents(path: &Path) -> Vec<SubagentInfo> {
+    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
+    serde_json::from_str::<Value>(&json_safe(&text)).map(|v| parse_subagents(&v)).unwrap_or_default()
+}
+
 /// The seats: from the service's snapshot (status.json, rewritten every
 /// 2 s) while it is fresh, which costs a file read; otherwise from
 /// `comms-deck status --json`, which starts Python (about 0.35 s of CPU).
@@ -498,7 +551,9 @@ pub fn run(tx: Sender<Msg>) {
     let mut note_tail = LogTail::new(note_path);
     let mut last_status = Instant::now() - Duration::from_secs(10);
     let tasks_dir = data_dir().join("tasks");
+    let subagents_path = data_dir().join("subagents.json");
     let mut last_tasks = Vec::new();
+    let mut last_subagents = Vec::new();
     loop {
         if last_status.elapsed() >= Duration::from_secs(2) {
             last_status = Instant::now();
@@ -519,6 +574,11 @@ pub fn run(tx: Sender<Msg>) {
                 return;
             }
             last_tasks = tasks;
+            let subs = read_subagents(&subagents_path);
+            if subs != last_subagents && tx.send(Msg::Subagents(subs.clone())).is_err() {
+                return;
+            }
+            last_subagents = subs;
         }
         for v in tail.read_new() {
             if let Some(chat) = parse_chat(&v) {
@@ -690,6 +750,21 @@ mod tests {
         assert_eq!(got, ["t2", "t10"], "the board's numeric order, done and junk left out");
         std::fs::remove_dir_all(&dir).ok();
         assert!(read_tasks(&dir.join("missing")).is_empty());
+    }
+
+    #[test]
+    fn subagents_keep_their_parent_and_active_flag() {
+        let v = json!({"subagents": [
+            {"id": "s1", "parent": "Y", "kind": "Explore", "state": "busy", "since": 10.0},
+            {"id": "s2", "seat": "claude", "type": "general-purpose", "status": "done"}
+        ]});
+        let got = parse_subagents(&v);
+        assert_eq!(got.len(), 2);
+        let owner = got.iter().find(|s| s.parent == "owner").expect("Y is the owner seat");
+        assert!(owner.active);
+        let claude = got.iter().find(|s| s.parent == "claude").expect("claude's subagent");
+        assert!(!claude.active);
+        assert!(parse_subagents(&json!({"subagents": {"a": {"id": "a", "parent": "vibe"}}})).len() == 1);
     }
 
     #[test]

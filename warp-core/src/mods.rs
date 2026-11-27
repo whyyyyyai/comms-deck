@@ -450,6 +450,26 @@ impl Default for MoonsCfg {
     }
 }
 
+/// t30: subagents an agent says it spawned, orbiting it as a closer moon band.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SubagentsCfg {
+    pub show: bool,
+    pub speed: f32,
+    /// The innermost orbit radius, in screen pixels before scene scale.
+    pub radius: f32,
+    /// Extra radius per band of eight.
+    pub spacing: f32,
+    pub size: f32,
+    pub bright: f32,
+    pub max: usize,
+}
+impl Default for SubagentsCfg {
+    fn default() -> Self {
+        SubagentsCfg { show: true, speed: 1.6, radius: 34.0, spacing: 7.0, size: 2.0, bright: 1.2, max: 8 }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HudCfg {
@@ -529,6 +549,7 @@ pub struct Config {
     pub seats: SeatsCfg,
     pub fuel: FuelCfg,
     pub moons: MoonsCfg,
+    pub subagents: SubagentsCfg,
     pub hud: HudCfg,
     pub tasks: TasksCfg,
     pub chat: ChatCfg,
