@@ -199,17 +199,6 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     lines_panel(f, r[5], "09 DECK PULSE · how hard the notes flew", pulse_lines(app, inner_w));
 }
 
-fn usage_line_count(app: &App) -> u16 {
-    app.snap
-        .usage
-        .values()
-        .map(|u| {
-            let rows = [u.context_pct, u.five_hour_pct, u.week_pct].iter().filter(|p| p.is_some()).count();
-            if rows == 0 { 0 } else { rows + 1 }
-        })
-        .sum::<usize>() as u16
-}
-
 fn lines_panel(f: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'static>>) {
     if area.height < 3 {
         return;
