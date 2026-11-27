@@ -6413,15 +6413,24 @@ def status_json(now=None):
     for seat in tuple(AGENTS) + APP_SEATS:
         s = load_seat(seat)
         st = app_seat_state(seat) if seat in APP_SEATS else s["state"]
-        a = availability(seat, st, now)
-        notes = pending(seat)
-        oldest = min((path.stat().st_mtime for path, _ in notes), default=None)
+        waiting = []
+        waiting_normal = 0
+        oldest = None
+        for path, record in pending(seat):
+            try:
+                mtime = path.stat().st_mtime
+            except FileNotFoundError:
+                continue  # another reader took the note after the scan
+            waiting.append((path, record))
+            waiting_normal += not record.get("quiet")
+            oldest = mtime if oldest is None else min(oldest, mtime)
+        a = availability(seat, st, now, snap={"waiting": {seat: waiting}})
         seats[seat] = {
             "kind": "app" if seat in APP_SEATS else "agent",
             "state": st, "shown": a["word"], "rank": list(a["rank"]),
-            "waiting": len(notes),
-            "waiting_normal": sum(1 for _, r in notes if not r.get("quiet")),
-            "oldest_waiting_s": round(now - oldest) if oldest else 0,
+            "waiting": len(waiting),
+            "waiting_normal": waiting_normal,
+            "oldest_waiting_s": round(now - oldest) if oldest is not None else 0,
             "since_s": round(now - float(s.get("since") or now)),
             "file_age_s": round(now - float(s.get("updated") or now)),
             "can_wake": bool(s.get("kitty_socket") and s.get("kitty_window")) if seat in AGENTS else None,
@@ -7940,6 +7949,27 @@ def self_test():
         "assert x.task_summary('', [('p', {'text': 'token stuff', 'private': True})]) == 'private note'",
         "assert x.task_summary('', []) == ''",
         "j = x.status_json(); assert set(j['seats']) >= {'claude', 'grok'} and 'shown' in j['seats']['claude']",
+        "box = x.DATA / 'inbox' / 'claude'",
+        "gone, quiet, normal = (box / name for name in ('race-gone.json', 'race-quiet.json', 'race-normal.json'))",
+        "for path, age in ((gone, 90), (quiet, 60), (normal, 30)):",
+        "    x.write_json(path, {'quiet': path == quiet})",
+        "    x.os.utime(path, (now - age, now - age))",
+        "class TakenNote:",
+        "    def stat(self):",
+        "        gone.unlink()",
+        "        return gone.stat()",
+        "scan = x.pending",
+        "def race_scan(seat):",
+        "    notes = scan(seat)",
+        "    if seat != 'claude': return notes",
+        "    return [(TakenNote() if path == gone else path, record) for path, record in notes",
+        "            if path in (gone, quiet, normal)]",
+        "x.pending = race_scan",
+        "snapshot = x.status_json(now)['seats']['claude']",
+        "assert (snapshot['waiting'], snapshot['waiting_normal'], snapshot['oldest_waiting_s']) == (2, 1, 60)",
+        "assert snapshot['rank'][1] == 2",
+        "x.pending = scan",
+        "quiet.unlink(); normal.unlink()",
         "assert x.wake_seat('alice')[0] is False",
         "assert x.task_summary('<system-reminder> fixing the chat layout now', []) == 'fixing the chat layout now'",
         "assert x.task_summary('<system-reminder>', [('p', {'text': 'merge the PR', 'private': False})]) == 'merge the PR'",
