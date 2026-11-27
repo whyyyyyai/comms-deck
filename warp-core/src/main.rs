@@ -95,6 +95,12 @@ fn main() {
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: "warp core".into(),
+                        // WARP_CORE_SCALE=1 draws at 1x on the 2x display: a
+                        // quarter of the pixels for the GPU (a test, 06:31).
+                        resolution: match std::env::var("WARP_CORE_SCALE").ok().and_then(|v| v.parse::<f32>().ok()) {
+                            Some(x) => bevy::window::WindowResolution::default().with_scale_factor_override(x.clamp(0.5, 4.0)),
+                            None => default(),
+                        },
                         // The Wayland app id: the scratchpad keeper places windows by it.
                         name: Some("warp-core".into()),
                         ..default()
@@ -155,6 +161,10 @@ fn health_log(
     acc.1 += dt;
     acc.2 = acc.2.max(dt);
     acc.3 += dt;
+    if dt > 0.25 && real.elapsed_secs() > 5.0 {
+        let shown = VISIBLE.load(std::sync::atomic::Ordering::Relaxed);
+        eprintln!("warp-core hitch: {:.0} ms frame, {}", dt * 1000.0, if shown { "shown" } else { "hidden" });
+    }
     if acc.3 < 60.0 {
         return;
     }
