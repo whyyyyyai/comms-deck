@@ -70,6 +70,7 @@ const HALO_D: f32 = 116.0;
 
 fn main() {
     install_crash_log();
+    watch_visibility();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || feed::run(tx));
     App::new()
@@ -89,15 +90,22 @@ fn main() {
             focused_mode: UpdateMode::reactive(std::time::Duration::from_millis(33)),
             unfocused_mode: UpdateMode::reactive(std::time::Duration::from_millis(33)),
         })
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "warp core".into(),
-                // The Wayland app id: the scratchpad keeper places windows by it.
-                name: Some("warp-core".into()),
-                ..default()
-            }),
-            ..default()
-        }))
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "warp core".into(),
+                        // The Wayland app id: the scratchpad keeper places windows by it.
+                        name: Some("warp-core".into()),
+                        ..default()
+                    }),
+                    ..default()
+                })
+                // t28: a few small systems at 30 fps don't need a thread per
+                // core; the idle workers' waking and parking cost more CPU
+                // than they saved. WARP_CORE_THREADS overrides.
+                .set(TaskPoolPlugin { task_pool_options: TaskPoolOptions::with_num_threads(worker_threads()) }),
+        )
         .add_plugins((
             Material2dPlugin::<RingMaterial>::default(),
             Material2dPlugin::<CoreMaterial>::default(),
@@ -107,7 +115,7 @@ fn main() {
         .add_systems(
             Update,
             (
-                (watch_mods, read_feed, layout_view, apply_rules, layout_seats, layout_tasks, pointer, chat_input, keys).chain(),
+                (watch_mods, pace_frames, read_feed, layout_view, apply_rules, layout_seats, layout_tasks, pointer, chat_input, keys).chain(),
                 (
                     glow_seats,
                     draw_rings,
@@ -602,6 +610,69 @@ fn version() -> &'static str {
             .and_then(|t| t.trim().parse::<u32>().ok());
         n.map_or_else(|| "1.?".to_string(), |n| format!("1.{n}"))
     })
+}
+
+/// Is the warp core's window on a workspace someone can see? Written by
+/// `watch_visibility` once a second; true until it knows otherwise.
+static VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// t28: Hyprland, asked once a second, says whether the warp-core window is
+/// on a shown workspace (its scratchpad open, or its workspace active on a
+/// monitor). Hidden, the warp core draws at 1 fps instead of 30.
+fn watch_visibility() {
+    std::thread::Builder::new()
+        .name("visibility".into())
+        .spawn(|| loop {
+            if let Some(v) = window_visible() {
+                VISIBLE.store(v, std::sync::atomic::Ordering::Relaxed);
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        })
+        .ok();
+}
+
+fn hyprctl_json(what: &str) -> Option<serde_json::Value> {
+    let out = std::process::Command::new("hyprctl").args([what, "-j"]).output().ok()?;
+    out.status.success().then(|| serde_json::from_slice(&out.stdout).ok()).flatten()
+}
+
+/// None when Hyprland can't say (then nothing changes).
+fn window_visible() -> Option<bool> {
+    let clients = hyprctl_json("clients")?;
+    let monitors = hyprctl_json("monitors")?;
+    Some(shown(&clients, &monitors))
+}
+
+fn shown(clients: &serde_json::Value, monitors: &serde_json::Value) -> bool {
+    let Some(ws) = clients
+        .as_array()
+        .and_then(|cs| cs.iter().find(|c| c["class"] == "warp-core"))
+        .and_then(|c| c["workspace"]["name"].as_str())
+    else {
+        return true; // no window found: don't starve it
+    };
+    monitors.as_array().is_some_and(|ms| {
+        ms.iter().any(|m| m["specialWorkspace"]["name"] == ws || m["activeWorkspace"]["name"] == ws)
+    })
+}
+
+/// Sets the frame rate each frame: the mods' fps while shown, 1 fps hidden.
+fn pace_frames(mods: Res<Mods>, mut winit: ResMut<WinitSettings>) {
+    let frame = |fps: f32| std::time::Duration::from_secs_f32(1.0 / fps.clamp(1.0, 120.0));
+    let (focused, unfocused) = if VISIBLE.load(std::sync::atomic::Ordering::Relaxed) {
+        (frame(mods.cfg.look.fps), frame(mods.cfg.look.fps_unfocused))
+    } else {
+        (frame(1.0), frame(1.0))
+    };
+    let want = (UpdateMode::reactive(focused), UpdateMode::reactive(unfocused));
+    if winit.focused_mode != want.0 || winit.unfocused_mode != want.1 {
+        winit.focused_mode = want.0;
+        winit.unfocused_mode = want.1;
+    }
+}
+
+fn worker_threads() -> usize {
+    std::env::var("WARP_CORE_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(2).clamp(1, 16)
 }
 
 fn install_crash_log() {
@@ -3239,6 +3310,17 @@ mod tests {
             sizes.push(shape.size);
         }
         (st, sizes)
+    }
+
+    #[test]
+    fn the_core_knows_when_its_window_is_hidden() {
+        let clients = serde_json::json!([{"class": "kitty", "workspace": {"name": "2"}},
+                                          {"class": "warp-core", "workspace": {"name": "special:magic"}}]);
+        let open = serde_json::json!([{"activeWorkspace": {"name": "2"}, "specialWorkspace": {"name": "special:magic"}}]);
+        let closed = serde_json::json!([{"activeWorkspace": {"name": "2"}, "specialWorkspace": {"name": ""}}]);
+        assert!(shown(&clients, &open));
+        assert!(!shown(&clients, &closed));
+        assert!(shown(&serde_json::json!([]), &closed), "no window found: keep drawing");
     }
 
     #[test]
