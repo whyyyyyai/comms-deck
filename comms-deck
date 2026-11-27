@@ -2764,6 +2764,71 @@ def guard_live_tree(state):
     send("comms-deck", "all", text, quiet=True)
 
 
+# The "bots help bots come online" pass (the owner, 2026-11-27): once a seat
+# can read and answer notes, it gets one note naming the seats that are
+# down, so it can spend a turn helping them back. The service watches the
+# roster every WELCOME_CHECK seconds; a seat already online when the service
+# started isn't greeted, and a seat is greeted at most once per
+# WELCOME_EVERY.
+
+# States that mean a seat can take a note and answer it: a live agent
+# process, or an app seat whose connector is up (a draft in its box still
+# counts - its own tools answer notes even while the deck's are held).
+ONLINE_STATES = {"idle", "busy", "connected", "draft in box"}
+WELCOME_EVERY = int(setting("WELCOME_EVERY", "21600"))  # seconds between greetings
+WELCOME_CHECK = 15                                     # seconds between passes
+
+
+def seat_live_state(seat):
+    """The seat's current state, or None for the owner."""
+    if seat in AGENTS:
+        return load_seat(seat).get("state")
+    if seat in APP_SEATS:
+        return app_seat_state(seat)
+    return None
+
+
+def welcome_pass(seen, greeted, now_ts=None):
+    """One pass of the online-watch: greet the seats that just came online.
+
+    `seen` maps seat -> was-online as of the last pass; `greeted` maps seat
+    -> when it was last told who's down. The first pass only fills `seen`,
+    so a service restart doesn't re-greet the whole roster.
+    """
+    now_ts = time.time() if now_ts is None else now_ts
+    states = {seat: seat_live_state(seat) for seat in tuple(AGENTS) + APP_SEATS}
+    was_online = dict(seen)
+    first = not seen
+    online = {seat: state in ONLINE_STATES and not seat_spent(seat)
+              for seat, state in states.items()}
+    seen.clear()
+    seen.update(online)
+    if first:
+        return
+    # Down and worth mentioning: not online, not spent (nobody can hurry a
+    # limit reset), and not remote (nothing on this desktop reaches it).
+    down = [seat for seat, state in states.items()
+            if not online[seat] and not seat_spent(seat)
+            and APP_PROCESS.get(seat) != "remote"]
+    if not down:
+        return
+    who = ", ".join(f"{shown_name(seat)} ({states[seat]})" for seat in down)
+    for seat, is_online in online.items():
+        # Only a seat that was down last pass and can answer now: one that
+        # was already online at the seed pass never "came online" at all.
+        if not is_online or was_online.get(seat):
+            continue
+        last = greeted.get(seat)
+        if last is not None and now_ts - last < WELCOME_EVERY:
+            continue
+        greeted[seat] = now_ts
+        send("deck", seat,
+             f"You're online and can answer notes. These seats are down: {who}. "
+             "If you can help bring them back - reopen their window or app - do it, "
+             "then send the deck a note saying what you tried.")
+        log(f"welcomed {seat} online; down: {', '.join(down)}")
+
+
 def serve():
     """Run forever: wake agents, drive Grok Bot seats, refresh usage, copy records, mirror to Discord."""
     log(f"comms-deck serving on {MACHINE}; data in {DATA}")
@@ -2771,6 +2836,7 @@ def serve():
     last_sync, discord_wait_until, last_usage = 0.0, 0.0, 0.0
     notify_pos = 0
     live_guard, last_live_check = {}, 0.0
+    welcome_seen, welcome_greeted, last_welcome = {}, {}, 0.0
     while True:
         if time.time() - last_live_check >= LIVE_GUARD_EVERY:
             last_live_check = time.time()
@@ -2798,6 +2864,12 @@ def serve():
             do_actions()
         except Exception as error:  # an action must never stop the service
             log(f"desktop actions failed: {error}")
+        if time.time() - last_welcome >= WELCOME_CHECK:
+            last_welcome = time.time()
+            try:
+                welcome_pass(welcome_seen, welcome_greeted)
+            except Exception as error:  # the welcome pass must never stop the service
+                log(f"welcome pass failed: {error}")
         if time.time() - last_usage >= 30:
             last_usage = time.time()
             try:
@@ -7689,6 +7761,48 @@ def self_test():
           "(0s ago)" in team and "Team at " in team and "more than one agent" in team, team)
     check("Grok's Notification hook matches idle_prompt only",
           grok_hooks("comms-deck")["hooks"]["Notification"][0].get("matcher") == "idle_prompt")
+    # A seat that comes online is told which seats are down, once per greeting
+    # (the owner's t64). Seat states are patched, so no real process matters.
+    Path(f"{tmp}/welcome-config").mkdir(parents=True, exist_ok=True)
+    Path(f"{tmp}/welcome-config/app-seats").write_text("alice\nmystra:remote\n")
+    code = "\n".join([
+        "import importlib.machinery as m, importlib.util as u, json, glob",
+        f"l = m.SourceFileLoader('cd', {me!r}); s = u.spec_from_loader('cd', l)",
+        "x = u.module_from_spec(s); l.exec_module(x)",
+        "states = {'claude': 'idle', 'grok': 'away', 'codex': 'away', 'gravity': 'away',"
+        " 'vibe': 'away', 'devin': 'away', 'alice': 'not set up', 'mystra': 'away'}",
+        "x.load_seat = lambda seat: {'state': states[seat]}",
+        "x.app_seat_state = lambda seat: states[seat]",
+        "x.seat_spent = lambda seat: seat == 'codex'",
+        "seen, greeted = {}, {}",
+        "x.welcome_pass(seen, greeted, 1000.0)",
+        "assert not glob.glob(str(x.DATA / 'inbox' / '*' / '*.json')), 'the first pass only seeds'",
+        "states['grok'] = 'idle'",
+        "x.welcome_pass(seen, greeted, 1010.0)",
+        "deck = [json.load(open(f)) for f in glob.glob(str(x.DATA / 'inbox' / 'grok' / '*.json'))]",
+        "deck = [n for n in deck if n['from'] == 'deck']",
+        "assert len(deck) == 1, deck",
+        "text = deck[0]['text']",
+        "assert 'Alice' in text and 'not set up' in text, text",
+        "assert 'Vibe' in text and 'Devin' in text, text",
+        "assert 'Codex' not in text and 'Mystra' not in text, text",
+        "assert not glob.glob(str(x.DATA / 'inbox' / 'claude' / '*.json')),"
+        " 'a seat online since the seed pass is not greeted'",
+        "x.welcome_pass(seen, greeted, 1020.0)",
+        "assert len(glob.glob(str(x.DATA / 'inbox' / 'grok' / '*.json'))) == 1, 'no re-greet while online'",
+        "states['grok'] = 'away'; x.welcome_pass(seen, greeted, 1030.0)",
+        "states['grok'] = 'idle'",
+        "x.welcome_pass(seen, greeted, 1040.0 + x.WELCOME_EVERY)",
+        "assert len(glob.glob(str(x.DATA / 'inbox' / 'grok' / '*.json'))) == 2,"
+        " 'a later coming-online greets again'",
+        "print('ok')",
+    ])
+    r = subprocess.run([sys.executable, "-c", code],
+                       env=dict(env, COMMS_DECK_HOME=f"{tmp}/welcome-data",
+                                COMMS_DECK_CONFIG=f"{tmp}/welcome-config"),
+                       capture_output=True, text=True, timeout=30)
+    check("a seat that comes online is told which seats are down, once per greeting",
+          r.returncode == 0 and r.stdout.splitlines()[-1].strip() == "ok", r.stdout + r.stderr)
     code = "\n".join([
         "import importlib.machinery as m, importlib.util as u, json",
         f"l = m.SourceFileLoader('cd', {me!r}); s = u.spec_from_loader('cd', l)",

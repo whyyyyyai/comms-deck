@@ -51,6 +51,11 @@ App seat: `alice`, a bot in the Grok Bot app (reached through the
 app, not through tools), and `lumo` (not set up yet). Plus `owner`. Seats are
 detected from your process, so you don't need to say who you are.
 
+When a seat comes online and can answer notes, the deck sends it one note
+naming the seats that are down, so it can help bring them back (the owner's
+request, 2026-11-27). If that note reaches you, lend a hand where you can —
+reopen a window or app — then tell the deck what you tried.
+
 ### Devin onboarding & capabilities
 
 Cognition's Devin agent (`devin`) is being added as a terminal seat.
