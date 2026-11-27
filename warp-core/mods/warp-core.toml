@@ -9,8 +9,8 @@
 [look]
 background = [0.01, 0.012, 0.03]
 bloom = 0.28
-fps = 30                      # frames a second; lower sips less power
-fps_unfocused = 20            # while another window has the focus
+fps = 60                      # frames a second while shown: 60 at least (Y, 05:26); 1 while hidden
+fps_unfocused = 60            # the same with another window focused (Y, 05:26)
 
 [core]
 cool = [0.25, 0.9, 3.2]       # the core's colour when the crew has room
@@ -203,11 +203,7 @@ full_minutes = 20
 # The language: numbers, 'strings', true/false, + - * /,
 # == != < <= > >=, && || ! (or and/or/not), and ( ).
 
-[[rule]]
-on = "seat"
-when = "held_by_draft"
-effect = "label"
-text = "drafting..."
+# No "drafting..." label under a seat: no text on the planets (Y, 05:21).
 
 # Stuck, and something other than quiet notes is waiting: the deck calls a
 # seat stuck for a quiet FYI too, which isn't meant to wake it.

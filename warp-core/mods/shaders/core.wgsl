@@ -4,7 +4,9 @@
 // running warp core swaps it in; a broken edit is refused and the HUD says why.
 //
 // cool / hot: the disk's colour, blended by how full the crew's meters are
-// params: x = time in seconds
+// params: x = the disk's angle in radians, carried on by the warp core so a
+//             change of pace bends the turning and never jumps the swirl;
+//             it turns clockwise, with the ring and the stars
 //         y = heat (0 = everyone has room, 1 = everyone near a limit)
 //         z = warp (0..1+, kicked by broadcasts and sent notes)
 //         w = traffic (0..1, notes in the last 10 minutes)
@@ -44,7 +46,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     if (r >= 1.0) {
         discard;
     }
-    let t = core.params.x;
+    let spin = core.params.x;
     let heat = clamp(core.params.y, 0.0, 1.0);
     let warp = core.params.z;
     let traffic = core.params.w;
@@ -53,7 +55,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // Gas orbits faster near the hole (Kepler: angular speed ~ r^-1.5) and
     // the arms wind into a spiral: angle shifted by log(r).
     let ang = atan2(p.y, p.x);
-    let orbit = t * (0.35 + traffic * 1.2 + warp * 1.5) / pow(max(r, 0.2), 1.5);
+    let orbit = spin / pow(max(r, 0.2), 1.5);
     let arm = ang + orbit + 2.2 * log(max(r, 0.05));
     let streaks = noise(vec2<f32>(arm * 3.0, r * 6.0)) * 0.6 + noise(vec2<f32>(arm * 8.0, r * 18.0)) * 0.4;
     let arms = 0.55 + 0.45 * sin(arm * 2.0);
@@ -69,8 +71,23 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let photon = exp(-pow((r - horizon - 0.012) / 0.01, 2.0)) * (3.0 + warp * 3.0);
     let lensed = exp(-pow((r - horizon - 0.05) / 0.04, 2.0)) * 0.8;
 
-    var colour = gas + base * lensed + vec3<f32>(1.0, 0.96, 0.9) * photon;
-    var alpha = clamp(length(gas) * 0.8 + lensed + photon * 0.5, 0.0, 1.0);
+    // Hawking radiation (Y, 05:23): faint sparks born at the photon ring,
+    // drifting out on the disk's own turn and fading as they go, the start
+    // of the stars that stream away from the core.
+    var rad = 0.0;
+    for (var i = 0; i < 14; i = i + 1) {
+        let k = f32(i);
+        let life = fract(spin * 0.11 + hash(vec2<f32>(k, 3.7)));
+        let rr = horizon + 0.02 + life * (1.0 - horizon);
+        let a = hash(vec2<f32>(k, 9.1)) * 6.2831853 - spin * 0.6 / (1.0 + rr * 2.0) - life * 1.4;
+        let q = vec2<f32>(cos(a), sin(a)) * rr;
+        let dq = p - q;
+        rad = rad + exp(-dot(dq, dq) / 0.00035) * (1.0 - life) * (1.0 - life);
+    }
+    let radiation = mix(core.cool.rgb, vec3<f32>(1.0, 0.97, 0.92), 0.5) * rad * (0.8 + heat);
+
+    var colour = gas + base * lensed + vec3<f32>(1.0, 0.96, 0.9) * photon + radiation;
+    var alpha = clamp(length(gas) * 0.8 + lensed + photon * 0.5 + rad * 0.6, 0.0, 1.0);
     if (r < horizon) {
         // The shadow: nothing comes back out.
         colour = vec3<f32>(0.0);

@@ -24,6 +24,7 @@ lib="$HOME/.local/lib/warp-core"
 [ -x "$lib/warp-core" ] && cp "$lib/warp-core" "$lib/warp-core.prev"
 prev_mods=$(readlink "$HOME/.config/warp-core/mods" 2>/dev/null || true)
 prev_it=$n
+cp "$here/gpu-ok.sh" "$lib/gpu-ok.sh"
 cp "$bin" "$HOME/.local/lib/warp-core/warp-core.new"
 mv -f "$HOME/.local/lib/warp-core/warp-core.new" "$HOME/.local/lib/warp-core/warp-core"
 # The mods are copied with each version, not linked to the checkout: a
@@ -37,6 +38,18 @@ cp "$here/warp-core.service" "$HOME/.config/systemd/user/warp-core.service"
 systemctl --user daemon-reload
 # Live at once (Y, 2026-11-27: every improvement goes live when it's done;
 # a restart with each one is fine).
+# A restart opens a new GPU window: never on a GPU that has just faulted
+# (2026-11-27 05:19-05:31), and never more than once a minute.
+if ! "$here/gpu-ok.sh"; then
+    echo "installed warp core 1.$(cat "$it") but did not restart it: the GPU is unwell (see above)" >&2
+    exit 1
+fi
+since=$(systemctl --user show warp-core -p ActiveEnterTimestampMonotonic --value 2>/dev/null || echo 0)
+now=$(cut -d' ' -f1 /proc/uptime | cut -d. -f1)
+if [ "${since:-0}" -gt 0 ] && [ $((now - since / 1000000)) -lt 60 ]; then
+    echo "installed warp core 1.$(cat "$it"); it restarted under a minute ago, so this one goes live on its next start" >&2
+    exit 0
+fi
 if systemctl --user is-active --quiet warp-core; then
     systemctl --user restart warp-core
     # Survival first: if the new one won't stay up, put the old one back.
@@ -45,8 +58,9 @@ if systemctl --user is-active --quiet warp-core; then
         mv -f "$lib/warp-core.prev" "$lib/warp-core"
         [ -n "$prev_mods" ] && ln -sfn "$prev_mods" "$HOME/.config/warp-core/mods"
         echo "$prev_it" > "$it"
-        systemctl --user reset-failed warp-core
-        systemctl --user restart warp-core
+        # One try with the old one, and only on a healthy GPU; no
+        # reset-failed, so systemd's start limit still holds.
+        "$here/gpu-ok.sh" && systemctl --user restart warp-core
         echo "warp core 1.$((prev_it + 1)) would not stay up: rolled back to 1.$prev_it" >&2
         exit 1
     fi

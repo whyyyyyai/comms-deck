@@ -330,6 +330,11 @@ struct Deck {
     core_swell: f32,
     core_swell_v: f32,
     core_phase: f32,
+    /// The accretion disk's angle (radians), carried on frame to frame so a
+    /// change of pace bends its turning instead of jumping the swirl, and
+    /// how fast it turns now. The stars leave the core on the same turn.
+    disk_angle: f32,
+    disk_rate: f32,
     /// Each seat's last state from activity, to see a job finish.
     last_state: HashMap<String, String>,
     /// The load balancer's board: open tasks orbit, held ones are bolts.
@@ -1937,6 +1942,8 @@ fn pulse_core(
     }
     let warp = deck.warp;
     let d = &mut *deck;
+    d.disk_rate = disk_rate(pace, warp);
+    d.disk_angle = (d.disk_angle + d.disk_rate * dt).rem_euclid(std::f32::consts::TAU * 1024.0);
     let shape = core_step(
         &c,
         CoreState { energy: d.core_energy, swell: d.core_swell, swell_v: d.core_swell_v, phase: d.core_phase },
@@ -1954,7 +1961,8 @@ fn pulse_core(
                 cool: v4(c.cool, 1.0),
                 hot: v4(c.hot, 1.0),
                 // The shader's churn runs on the core's own energy too.
-                params: Vec4::new(t, heat, warp, (pace.min(30.0) / 30.0).max(shape.state.energy.min(1.0))),
+                // x is the disk's carried angle, not the clock (t29/Y 05:23).
+                params: Vec4::new(d.disk_angle, heat, warp, (pace.min(30.0) / 30.0).max(shape.state.energy.min(1.0))),
             };
         }
     }
@@ -2013,6 +2021,12 @@ fn core_step(c: &mods::CoreCfg, s: CoreState, i: CoreInputs, dt: f32) -> CoreSha
     let rest = 1.0 + c.grow_per_energy * energy + c.grow_busy * busy_share;
     let size = c.size * rest * (1.0 + depth * phase.sin() + swell + i.warp * 0.25);
     CoreShape { state: CoreState { energy, swell, swell_v, phase }, size: size.max(0.05) }
+}
+
+/// How fast the core's disk turns (radians a second at its edge): slow
+/// when quiet, faster with traffic and in warp.
+fn disk_rate(pace: f32, warp: f32) -> f32 {
+    0.35 + (pace.min(30.0) / 30.0) * 1.2 + warp * 1.5
 }
 
 fn crew_heat(seats: &[SeatInfo]) -> f32 {
@@ -2301,6 +2315,11 @@ fn move_stars(
     let dt = time.delta_secs();
     for (mut star, mut tf) in &mut stars {
         star.dist += speed * star.speed * dt * (0.3 + star.dist / reach);
+        // The stars are the core's radiation (Y, 05:23): they leave it on
+        // the disk's turn, curving the way it spins, straightening as they
+        // get away from it.
+        let curl = deck.disk_rate * 0.6 / (1.0 + star.dist / 160.0);
+        star.dir = Vec2::from_angle(star.dir.to_angle() - curl * dt);
         let hit = if spl.show { wall_hit(star.dir * star.dist, walls) } else { None };
         if let Some((edge, t)) = hit {
             splash.hit(edge, t, star.colour, spl);
@@ -2363,9 +2382,18 @@ fn hud(
     layout: Res<Layout>,
     mut hud: Query<(&mut Text2d, &mut Transform, &mut TextBounds), (With<Hud>, Without<Dock>)>,
     mut dock: Query<(&mut Text2d, &mut Transform, &mut Visibility, &mut TextBounds), (With<Dock>, Without<Hud>)>,
+    mut fps: Local<(u32, f32, f32)>,
 ) {
     let half = layout.half();
     let now = time.elapsed_secs();
+    // Frames drawn in the last whole second, from the real clock (Y wants 60
+    // at least while shown; t28).
+    fps.0 += 1;
+    fps.1 += real.delta_secs();
+    if fps.1 >= 1.0 {
+        fps.2 = fps.0 as f32 / fps.1;
+        *fps = (0, 0.0, fps.2);
+    }
     let online: Vec<_> = deck.seats.iter().filter(|s| s.online()).collect();
     let busy = online.iter().filter(|s| s.shown == "busy").count();
     // Every seat's queue, on the ring or not (Vibe's review of #150).
@@ -2373,8 +2401,9 @@ fn hud(
     let mut line = String::new();
     if mods.cfg.hud.show && view.hud {
         line = format!(
-            "WARP CORE {}    {} online | {} busy | {} waiting | {} notes in the last hour",
+            "WARP CORE {}  {:.0} fps    {} online | {} busy | {} waiting | {} notes in the last hour",
             version(),
+            fps.2,
             online.len(),
             busy,
             waiting,
@@ -2596,9 +2625,11 @@ fn keys(
 
 /// Each seat's share of the crew's context tokens, in the service's order;
 /// seats without a figure are left out (as in the deck's split).
+/// Each seat's share of the context pool, among the seats that are online:
+/// an agent that is away holds no stars (Y, 05:20).
 fn context_shares(seats: &[SeatInfo]) -> Vec<(String, f32)> {
     let have: Vec<(&str, f64)> =
-        seats.iter().filter_map(|s| s.ctx_tokens.filter(|t| *t > 0.0).map(|t| (s.name.as_str(), t))).collect();
+        seats.iter().filter(|s| s.online()).filter_map(|s| s.ctx_tokens.filter(|t| *t > 0.0).map(|t| (s.name.as_str(), t))).collect();
     let total: f64 = have.iter().map(|(_, t)| t).sum();
     if total <= 0.0 {
         return Vec::new();
@@ -3389,11 +3420,12 @@ mod tests {
 
     #[test]
     fn stars_split_the_way_the_context_does() {
-        let seat = |n: &str, t: Option<f64>| SeatInfo { name: n.into(), ctx_tokens: t, ..Default::default() };
-        let seats = [seat("claude", Some(60000.0)), seat("vibe", Some(20000.0)), seat("devin", Some(20000.0)), seat("grok", None)];
+        let seat = |n: &str, t: Option<f64>| SeatInfo { name: n.into(), state: "idle".into(), ctx_tokens: t, ..Default::default() };
+        let away = SeatInfo { name: "codex".into(), state: "away".into(), ctx_tokens: Some(500000.0), ..Default::default() };
+        let seats = [seat("claude", Some(60000.0)), seat("vibe", Some(20000.0)), seat("devin", Some(20000.0)), seat("grok", None), away];
         let shares = context_shares(&seats);
         assert_eq!(shares.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["claude", "vibe", "devin"]);
-        assert!((shares[0].1 - 0.6).abs() < 1e-6);
+        assert!((shares[0].1 - 0.6).abs() < 1e-6, "an away seat's context counts for nothing");
         assert_eq!(seat_for_slot(&shares, 0.1), Some("claude"));
         assert_eq!(seat_for_slot(&shares, 0.7), Some("vibe"));
         assert_eq!(seat_for_slot(&shares, 0.95), Some("devin"));

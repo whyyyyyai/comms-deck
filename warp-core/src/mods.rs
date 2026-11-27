@@ -81,7 +81,7 @@ pub struct Look {
 }
 impl Default for Look {
     fn default() -> Self {
-        Look { background: [0.01, 0.012, 0.03], bloom: 0.28, fps: 30.0, fps_unfocused: 20.0 }
+        Look { background: [0.01, 0.012, 0.03], bloom: 0.28, fps: 60.0, fps_unfocused: 60.0 }
     }
 }
 
@@ -924,7 +924,7 @@ mod tests {
     fn the_shipped_mods_load_and_validate() {
         let (cfg, rules) = load_config(DEFAULT_CONFIG).expect("the default toml loads");
         assert!(!rules.is_empty(), "it ships with example rules");
-        assert_eq!(cfg.look.fps, 30.0);
+        assert_eq!(cfg.look.fps, 60.0);
         check_wgsl(DEFAULT_CORE_SHADER).expect("core.wgsl validates");
         check_wgsl(DEFAULT_RING_SHADER).expect("ring.wgsl validates");
         check_wgsl(DEFAULT_PLANET_SHADER).expect("planet.wgsl validates");
