@@ -14,7 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use super::comms::{draw_crew_titled, draw_usage, wrap};
+use super::comms::{draw_crew_titled, draw_input, draw_log, draw_usage, wrap};
 use super::crew::Crew;
 use super::theme::{bar, dim, display_name, meter_colour, panel, seat_colour};
 use super::warp::{WarpCore, WarpLink};
@@ -27,6 +27,65 @@ const BLOCKS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇',
 pub fn nav_widths(cols: u16) -> (u16, u16, u16) {
     let side = ((cols as f64 * 0.30) as u16).clamp(40.min(cols / 3), 80);
     (side, cols.saturating_sub(2 * side), side)
+}
+
+/// The half view: the nav deck in two columns, for the tiled half-window
+/// (`nav-deck-chat half`). Same ten panels, same keys — only the places
+/// change. The eye keeps its order: the warp core top-left, the crew under
+/// it, the readings down the right column in the full view's order.
+pub fn draw_half(f: &mut Frame, area: Rect, app: &App) {
+    let [left, right] = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(area);
+
+    // left: 04 WARP CORE over 05 EVENT TAIL over 01 CREW. Below 18 rows
+    // there's no room for the tail, so it is dropped and the core and crew
+    // share the column.
+    // 05 COMMS is the deck's chat now (the owner, 2026-11-26 23:55), so it
+    // gets real room: about two fifths of the column.
+    let tail_h = if area.height >= 18 { (area.height * 2 / 5).clamp(8, 24) } else { 0 };
+    let core_h = (area.height.saturating_sub(tail_h) * 3 / 5).max(6.min(area.height));
+    let [core, tail, crew] = Layout::vertical([
+        Constraint::Length(core_h),
+        Constraint::Length(tail_h),
+        Constraint::Min(3),
+    ])
+    .areas(left);
+    draw_core(f, core, app);
+    if tail_h > 0 {
+        draw_comms(f, tail, app);
+    }
+    draw_crew_map(f, crew, app);
+
+    // right: 02 ACTIVITY on top, then the six readings sharing what's left
+    let act_h = (area.height * 3 / 10).max(8.min(area.height));
+    let [activity, rest] = Layout::vertical([Constraint::Length(act_h), Constraint::Min(0)]).areas(right);
+    draw_crew_titled(f, activity, app, "02 ACTIVITY · ready order");
+
+    let inner_w = right.width.saturating_sub(2) as usize;
+    let ws_lines = workspace_lines(app, inner_w).len() as u16;
+    let vit_lines = vitals_lines(app, inner_w).len() as u16;
+    let nt_lines = nav_time_lines(app, inner_w).len() as u16;
+    let pulse_n = pulse_lines(app, inner_w).len() as u16;
+    let split_n = split_lines(app, inner_w).len() as u16;
+    // 10 CONTEXT SPLIT is sized by its box and legend; 03 USAGE (None) is
+    // the longest list, so it takes whatever rows are left.
+    let needs = [
+        None,
+        Some(ws_lines + 2),
+        Some(vit_lines + 2),
+        Some(split_n + 2),
+        Some(nt_lines + 2),
+        Some(pulse_n + 2),
+    ];
+    let heights = share_rows(&needs, rest.height, 3);
+    let r = stack(rest, &heights);
+    if r[0].height >= 3 {
+        draw_usage(f, r[0], app);
+    }
+    lines_panel(f, r[1], "06 WORKSPACES · hyprctl clients", workspace_lines(app, inner_w));
+    lines_panel(f, r[2], "07 VITALS", vitals_lines(app, inner_w));
+    lines_panel(f, r[3], "10 CONTEXT SPLIT · the shared pool", split_lines(app, inner_w));
+    lines_panel(f, r[4], "08 NAV-TIME · are the two decks in step", nav_time_lines(app, inner_w));
+    lines_panel(f, r[5], "09 DECK PULSE · how hard the notes flew", pulse_lines(app, inner_w));
 }
 
 /// Rows for stacked panels (nav-deck's share_rows): a floor for every panel
@@ -104,24 +163,27 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     draw_crew_map(f, crew, app);
     draw_crew_titled(f, activity, app, "02 ACTIVITY · ready order");
 
-    // centre: 04 WARP CORE with 05 EVENT TAIL under it (a fifth, 6..12 rows)
-    let tail_h = (centre.height / 5).clamp(6.min(centre.height), 12);
+    // centre: 04 WARP CORE with 05 COMMS under it. The chat replaced the
+    // event tail (the owner, 2026-11-26 23:55), so it takes two fifths.
+    let tail_h = (centre.height * 2 / 5).clamp(8.min(centre.height), 30);
     let [core, tail] = Layout::vertical([Constraint::Min(3), Constraint::Length(tail_h)]).areas(centre);
     draw_core(f, core, app);
-    draw_tail(f, tail, app);
+    draw_comms(f, tail, app);
 
-    // right: 03 USAGE, 06 WORKSPACES, 07 VITALS, 10 COCKPIT-CHAT, 08 NAV-TIME, 09 DECK PULSE
+    // right: 03 USAGE, 06 WORKSPACES, 07 VITALS, 10 CONTEXT SPLIT, 08 NAV-TIME, 09 DECK PULSE
     let inner_w = rw.saturating_sub(2) as usize;
-    let usage_lines = usage_line_count(app);
     let ws_lines = workspace_lines(app, inner_w).len() as u16;
     let vit_lines = vitals_lines(app, inner_w).len() as u16;
     let nt_lines = nav_time_lines(app, inner_w).len() as u16;
     let pulse_n = pulse_lines(app, inner_w).len() as u16;
+    let split_n = split_lines(app, inner_w).len() as u16;
+    // 10 CONTEXT SPLIT is sized by its box and legend; 03 USAGE (None) is
+    // the longest list, so it takes whatever rows are left.
     let needs = [
-        Some(usage_lines + 2),
+        None,
         Some(ws_lines + 2),
         Some(vit_lines + 2),
-        None,
+        Some(split_n + 2),
         Some(nt_lines + 2),
         Some(pulse_n + 2),
     ];
@@ -132,20 +194,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     }
     lines_panel(f, r[1], "06 WORKSPACES · hyprctl clients", workspace_lines(app, inner_w));
     lines_panel(f, r[2], "07 VITALS", vitals_lines(app, inner_w));
-    draw_chat(f, r[3], app);
+    lines_panel(f, r[3], "10 CONTEXT SPLIT · the shared pool", split_lines(app, inner_w));
     lines_panel(f, r[4], "08 NAV-TIME · are the two decks in step", nav_time_lines(app, inner_w));
     lines_panel(f, r[5], "09 DECK PULSE · how hard the notes flew", pulse_lines(app, inner_w));
-}
-
-fn usage_line_count(app: &App) -> u16 {
-    app.snap
-        .usage
-        .values()
-        .map(|u| {
-            let rows = [u.context_pct, u.five_hour_pct, u.week_pct].iter().filter(|p| p.is_some()).count();
-            if rows == 0 { 0 } else { rows + 1 }
-        })
-        .sum::<usize>() as u16
 }
 
 fn lines_panel(f: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'static>>) {
@@ -259,6 +310,78 @@ fn draw_core(f: &mut Frame, area: Rect, app: &App) {
 }
 
 /// 05 EVENT TAIL: who changed state and who said what, newest last.
+/// 05 COMMS: the conversation and the chat box, so nav is the whole deck
+/// (the owner, 2026-11-26 23:55: "chat on nav 05, replacing event tail").
+fn draw_comms(f: &mut Frame, area: Rect, app: &App) {
+    app.chat_area.set(area);
+    if area.height < 5 {
+        draw_log(f, area, app, "05 COMMS · Enter to write");
+        return;
+    }
+    let [log, input] = Layout::vertical([Constraint::Min(2), Constraint::Length(3)]).areas(area);
+    let title = if app.typing { "05 COMMS · writing (Esc stops)" } else { "05 COMMS · Enter to write" };
+    draw_log(f, log, app, title);
+    draw_input(f, input, app, app.typing);
+}
+
+/// The 10 CONTEXT SPLIT box: every dot an equal slice of the context pool,
+/// seats filling in order (biggest first) in their colour, a busy seat's
+/// dots breathing. The comms screen's 06 CONTEXT SPLIT, moved here in
+/// place of 10 COCKPIT-CHAT (the owner, 2026-11-26 23:55).
+pub fn split_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+    let split = app.snap.context_split();
+    let total: f64 = split.iter().map(|(_, t)| t).sum();
+    if split.is_empty() || total <= 0.0 {
+        return vec![Line::from(Span::styled(" no seat reports its context yet", dim()))];
+    }
+    let mut order = split.clone();
+    order.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let cols = width.saturating_sub(2).clamp(10, 80);
+    let rows = 4;
+    let counts = super::warp::star_counts(&order, cols * rows);
+    let owners: Vec<&str> = counts.iter().flat_map(|(s, n)| std::iter::repeat(s.as_str()).take(*n)).collect();
+    let busy: Vec<&str> = app.snap.seats.iter().filter(|s| s.shown == "busy").map(|s| s.name.as_str()).collect();
+    let mut out = Vec::new();
+    for r in 0..rows {
+        let mut spans = vec![Span::raw(" ")];
+        for c in 0..cols {
+            let Some(&seat) = owners.get(r * cols + c) else { break };
+            let mut style = Style::default().fg(seat_colour(seat));
+            if busy.contains(&seat) {
+                // a wave runs through the box, dot by dot, while the seat works
+                let phase = (app.now * 1.5 - (r * cols + c) as f64 * 0.08).rem_euclid(1.0);
+                style = style.add_modifier(if phase < 0.5 { Modifier::BOLD } else { Modifier::DIM });
+            }
+            spans.push(Span::styled("●", style));
+        }
+        out.push(Line::from(spans));
+    }
+    for (seat, used) in &order {
+        out.push(Line::from(vec![
+            Span::styled(" ■ ", Style::default().fg(seat_colour(seat))),
+            Span::raw(format!("{:8} {:4.1}%  ", display_name(seat), 100.0 * used / total)),
+            Span::styled(short_tokens(*used), dim()),
+        ]));
+    }
+    out.push(Line::from(vec![
+        Span::styled(" Total ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(short_tokens(total)),
+        Span::styled(format!(" across {} seats", order.len()), dim()),
+    ]));
+    out
+}
+
+fn short_tokens(t: f64) -> String {
+    if t >= 1e6 {
+        format!("{:.1}M", t / 1e6)
+    } else if t >= 1e3 {
+        format!("{:.0}k", t / 1e3)
+    } else {
+        format!("{t:.0}")
+    }
+}
+
+#[allow(dead_code)] // kept for a later home: the event tail before 05 became the chat
 fn draw_tail(f: &mut Frame, area: Rect, app: &App) {
     let block = panel("05 EVENT TAIL · the cockpit's log");
     let inner = block.inner(area);
@@ -408,6 +531,7 @@ fn vitals_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     out
 }
 
+#[allow(dead_code)] // 10 is the context split now; twitch chat waits for a new home
 fn draw_chat(f: &mut Frame, area: Rect, app: &App) {
     if area.height < 3 {
         return;

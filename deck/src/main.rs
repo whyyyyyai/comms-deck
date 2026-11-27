@@ -4,6 +4,7 @@
 //!
 //!   deck                  live, full screen (Tab switches views)
 //!   deck --view nav       start on the nav view
+//!   deck --view nav --half   the nav view in two columns (the half window)
 //!   deck --once [--view nav] [--size WxH]   one frame as text, then exit
 //!   deck --self-test      render fake data, check the contracts, touch nothing real
 //!
@@ -26,7 +27,7 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScree
 use ratatui::backend::{CrosstermBackend, TestBackend};
 use ratatui::Terminal;
 
-use ui::{App, View};
+use ui::{App, View, JUMP_SECS};
 
 enum Msg {
     Snap(data::Snapshot),
@@ -41,8 +42,10 @@ fn main() {
         Some("nav") => View::Nav,
         _ => View::Comms,
     };
+    // --half: the nav view in two columns, for the tiled half-window
+    let half = flag("--half");
     if flag("--help") || flag("-h") {
-        println!("deck [--view comms|nav] [--once [--size WxH]] [--self-test]");
+        println!("deck [--view comms|nav] [--half] [--once [--size WxH]] [--self-test]");
         return;
     }
     if flag("--self-test") {
@@ -53,10 +56,12 @@ fn main() {
             .and_then(|s| s.split_once('x').map(|(a, b)| (a.parse().ok(), b.parse().ok())))
             .and_then(|(a, b)| Some((a?, b?)))
             .unwrap_or((160, 48));
-        print!("{}", render_text(&App::new(view, data::load()), w, h));
+        let mut app = App::new(view, data::load());
+        app.half = half;
+        print!("{}", render_text(&app, w, h));
         return;
     }
-    if let Err(e) = run(view) {
+    if let Err(e) = run(view, half) {
         eprintln!("deck: {e}");
         std::process::exit(1);
     }
@@ -77,7 +82,7 @@ fn render_text(app: &App, w: u16, h: u16) -> String {
     out
 }
 
-fn run(view: View) -> io::Result<()> {
+fn run(view: View, half: bool) -> io::Result<()> {
     let (tx, rx) = mpsc::channel::<Msg>();
     // Data comes in on its own thread, so typing never waits on a file or
     // on `comms-deck status`.
@@ -102,6 +107,7 @@ fn run(view: View) -> io::Result<()> {
     }));
 
     let mut app = App::new(view, data::Snapshot { time: data::now(), ..Default::default() });
+    app.half = half;
     let mut last = Instant::now();
     let mut memory_at = 0.0;
     while !app.quit {
@@ -124,6 +130,7 @@ fn run(view: View) -> io::Result<()> {
         }
         let dt = last.elapsed().as_secs_f64();
         last = Instant::now();
+        app.tick(dt);
         if app.view == View::Nav {
             let w = app.warp();
             app.stars.step(dt, 0.12 * w);
@@ -161,7 +168,10 @@ fn on_key(app: &mut App, k: KeyEvent, tx: &mpsc::Sender<Msg>) {
         KeyCode::Tab => app.view = if app.view == View::Comms { View::Nav } else { View::Comms },
         KeyCode::F(1) => app.view = View::Comms,
         KeyCode::F(2) => app.view = View::Nav,
-        _ if app.view == View::Nav => on_nav_key(app, k),
+        // Nav: the chat box in 05 has the keyboard only while writing, so
+        // nav's one-letter keys still work the rest of the time.
+        KeyCode::Esc if app.view == View::Nav && app.typing => app.typing = false,
+        _ if app.view == View::Nav && !app.typing => on_nav_key(app, k),
         KeyCode::Enter => submit(app, tx),
         KeyCode::Char(c) => {
             let at = byte_at(&app.input, app.cursor);
@@ -198,6 +208,13 @@ fn on_key(app: &mut App, k: KeyEvent, tx: &mpsc::Sender<Msg>) {
 /// A click in the warp core picks the seat under it; a second click on the
 /// same seat shows its window. A click on empty space lets go.
 fn on_core_click(app: &mut App, col: u16, row: u16) {
+    let pos = ratatui::layout::Position { x: col, y: row };
+    // A click on 05 COMMS starts writing; anywhere else stops.
+    if !app.zoom && app.chat_area.get().contains(pos) {
+        app.typing = true;
+        return;
+    }
+    app.typing = false;
     let area = app.core_area.get();
     if !area.contains(ratatui::layout::Position { x: col, y: row }) {
         return;
@@ -243,6 +260,16 @@ fn on_nav_key(app: &mut App, k: KeyEvent) {
     match k.code {
         KeyCode::Char('`') | KeyCode::Char('c') => app.view = View::Comms,
         KeyCode::Char('z') => app.zoom = !app.zoom,
+        // Enter writes in 05 COMMS; with a seat picked, the note starts @seat.
+        KeyCode::Enter => {
+            app.typing = true;
+            app.zoom = false;
+            app.flash = None;
+            if let (Some(seat), true) = (app.selected.clone(), app.input.is_empty()) {
+                app.input = format!("@{seat} ");
+                app.cursor = app.input.chars().count();
+            }
+        }
         KeyCode::Esc => {
             app.selected = None;
             app.flash = None;
@@ -365,13 +392,13 @@ fn self_test() -> bool {
 
     let mut app = App::new(View::Nav, snap);
     let nav = render_text(&app, 160, 48);
-    for panel in ["01 CREW", "02 ACTIVITY", "03 USAGE", "04 WARP CORE", "05 EVENT TAIL", "06 WORKSPACES",
-                  "07 VITALS", "08 NAV-TIME", "09 DECK PULSE", "10 COCKPIT-CHAT"] {
+    for panel in ["01 CREW", "02 ACTIVITY", "03 USAGE", "04 WARP CORE", "05 COMMS", "06 WORKSPACES",
+                  "07 VITALS", "08 NAV-TIME", "09 DECK PULSE", "10 CONTEXT SPLIT"] {
         check(&format!("nav view at 160x48 shows {panel}"), nav.contains(panel), &nav);
     }
     let big = render_text(&app, 209, 50);
     check("nav at the owner's 209x50 shows every panel title",
-        ["03 USAGE", "06 WORKSPACES", "07 VITALS", "10 COCKPIT", "08 NAV-TIME", "09 DECK PULSE"].iter().all(|p| big.contains(p)), &big);
+        ["03 USAGE", "05 COMMS", "06 WORKSPACES", "07 VITALS", "10 CONTEXT SPLIT", "08 NAV-TIME", "09 DECK PULSE"].iter().all(|p| big.contains(p)), &big);
     let total = app.stars.stars.len();
     let claude = app.stars.count_for("claude");
     check("stars are dealt by the context split (claude 300k : grok 100k = 3:1)",
@@ -404,8 +431,74 @@ fn self_test() -> bool {
         on_core_click(&mut app, x, y);
     }
     check("a click on empty space lets the seat go", app.selected.is_none(), "still selected");
+    app.zoom = false;
+    // The half view: same ten panels in two columns, at a half-window's size.
+    app.half = true;
+    let half = render_text(&app, 110, 30);
+    for panel in ["01 CREW", "02 ACTIVITY", "03 USAGE", "04 WARP CORE", "05 COMMS", "06 WORKSPACES",
+                  "07 VITALS", "08 NAV-TIME", "09 DECK PULSE", "10 CONTEXT SPLIT"] {
+        check(&format!("half nav at 110x30 shows {panel}"), half.contains(panel), &half);
+    }
+    check("half nav is two columns (the core shares the left with the crew)",
+        half.contains("04 WARP CORE") && half.find("04 WARP CORE").zip(half.find("01 CREW")).is_some_and(|(c, k)| {
+            let (line_c, line_k) = (half[..c].lines().count(), half[..k].lines().count());
+            line_k > line_c
+        }), &half);
+    // One deck: nav carries the chat (05) and the context split (10).
+    app.half = false;
+    app.zoom = false;
+    app.selected = None;
+    let one = render_text(&app, 209, 50);
+    check("nav's 05 COMMS shows the conversation", one.contains("05 COMMS") && one.contains("make it one program"), &one);
+    check("nav's 10 CONTEXT SPLIT shows the dots and the shares (claude 75%)",
+        one.contains("10 CONTEXT SPLIT") && one.contains('●') && one.contains("75.0%"), &one);
+    on_nav_key(&mut app, event::KeyEvent::from(KeyCode::Enter));
+    check("Enter in nav starts writing in 05", app.typing, "not typing");
+    for c in "hi".chars() {
+        let (tx, _rx) = mpsc::channel::<Msg>();
+        on_key(&mut app, event::KeyEvent::from(KeyCode::Char(c)), &tx);
+    }
+    check("while writing, letters go to the chat box, not nav's keys", app.input == "hi" && !app.zoom && app.prompt.is_none(), &app.input);
+    let (tx, _rx) = mpsc::channel::<Msg>();
+    on_key(&mut app, event::KeyEvent::from(KeyCode::Esc), &tx);
+    check("Esc stops writing and keeps the draft", !app.typing && app.input == "hi", &app.input);
+    app.input.clear();
+    app.cursor = 0;
     let routed = send::route("@grok -claude hi", &["grok".into(), "claude".into()]);
     check("chat box routing matches comms-deck route()", routed.as_deref() == Ok("grok -claude"), &format!("{routed:?}"));
+
+    // The warp jump: a fresh note to all (or a merge note) bursts the speed,
+    // once, then fades. An old broadcast fires nothing.
+    let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let all_note = |time: &str, to: &str, text: &str| data::Note {
+        from: "owner".into(),
+        to: to.into(),
+        time: time.into(),
+        text: text.into(),
+        quiet: false,
+    };
+    let mut fresh = data::Snapshot { time: data::now(), ..Default::default() };
+    fresh.notes = vec![all_note(&stamp, "all", "bring everyone back online")];
+    check("a fresh note to all is a jump trigger", fresh.newest_jump_note(120.0).is_some(), "no trigger");
+    let mut old = data::Snapshot { time: data::now() + 3600.0, ..Default::default() };
+    old.notes = vec![all_note(&stamp, "all", "bring everyone back online")];
+    check("an hour-old broadcast is not a jump trigger", old.newest_jump_note(120.0).is_none(), "fired anyway");
+    let mut merge = data::Snapshot { time: data::now(), ..Default::default() };
+    merge.notes = vec![all_note(&stamp, "claude", "merged #144, thanks for the review")];
+    check("a merge note is a jump trigger too", merge.newest_jump_note(120.0).is_some(), "no trigger");
+    let mut no_merge = data::Snapshot { time: data::now(), ..Default::default() };
+    no_merge.notes = vec![all_note(&stamp, "claude", "not merged #144 yet, waiting on Y")];
+    check("\"not merged #n\" is not a jump trigger", no_merge.newest_jump_note(120.0).is_none(), "fired anyway");
+    let mut japp = App::new(View::Nav, data::Snapshot { time: data::now(), ..Default::default() });
+    let base = japp.warp();
+    japp.refresh(data::Snapshot { jump_trigger: Some(data::now()), ..Default::default() });
+    check("the warp jump bursts above the traffic's warp", japp.jump_left > 0.0 && japp.warp() > base, &format!("{} vs {base}", japp.warp()));
+    japp.tick(JUMP_SECS);
+    check("the burst fades when its timer runs out", japp.jump_left == 0.0 && japp.warp() == base, &format!("{}", japp.warp()));
+    japp.refresh(data::Snapshot { jump_trigger: Some(data::now()), ..Default::default() });
+    let fired = japp.jump_left;
+    japp.refresh(data::Snapshot { jump_trigger: Some(japp.seen_trigger), ..Default::default() });
+    check("the same broadcast doesn't fire twice", japp.jump_left == fired, &format!("{} then {}", fired, japp.jump_left));
     println!("{}", if ok { "all passed" } else { "some failed" });
     ok
 }

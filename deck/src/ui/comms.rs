@@ -20,8 +20,8 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         Layout::horizontal([Constraint::Min(60), Constraint::Length(42)]).areas(area)
     };
     let [log_area, input_area] = Layout::vertical([Constraint::Min(3), Constraint::Length(3)]).areas(left);
-    draw_log(f, log_area, app);
-    draw_input(f, input_area, app);
+    draw_log(f, log_area, app, "COMMS");
+    draw_input(f, input_area, app, true);
     if !narrow {
         let [crew, usage] = Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(right);
         draw_crew(f, crew, app);
@@ -75,8 +75,8 @@ fn note_lines(n: &Note, width: usize) -> Vec<Line<'static>> {
     out
 }
 
-fn draw_log(f: &mut Frame, area: Rect, app: &App) {
-    let block = panel("COMMS");
+pub fn draw_log(f: &mut Frame, area: Rect, app: &App, title: &str) {
+    let block = panel(title);
     let inner = block.inner(area);
     f.render_widget(block, area);
     let width = inner.width as usize;
@@ -102,13 +102,15 @@ fn draw_log(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(shown), inner);
 }
 
-fn draw_input(f: &mut Frame, area: Rect, app: &App) {
+/// The chat box. `focused`: it has the keyboard, so it shows the cursor.
+pub fn draw_input(f: &mut Frame, area: Rect, app: &App, focused: bool) {
     let to = crate::send::route(&app.input, &app.seat_names());
     let title = match &to {
         Ok(t) => format!("to {t}"),
         Err(e) => e.clone(),
     };
     let block = panel(&title).border_style(Style::default().fg(match to {
+        _ if !focused => Color::Indexed(240),
         Ok(_) => Color::Indexed(117),
         Err(_) => Color::Indexed(203),
     }));
@@ -133,6 +135,9 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
         Paragraph::new(Line::from(vec![Span::styled(prompt, Style::default().fg(seat_colour("owner"))), Span::raw(shown)])),
         inner,
     );
+    if !focused {
+        return;
+    }
     let x = inner.x + prompt.chars().count() as u16 + (before_w - skip) as u16;
     f.set_cursor_position(Position::new(x.min(inner.right().saturating_sub(1)), inner.y));
 }
