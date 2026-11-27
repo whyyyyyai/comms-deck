@@ -6846,7 +6846,13 @@ def mcp_tool(seat, name, args):
         add_note(seat, str(args.get("text", "")))
         return "Added to the commentary.", False
     if name == "set_status":
-        update_seat(seat, state="busy", doing=describe(args.get("text", "")))
+        text = args.get("text", "")
+        # "idle", "done" or "ready" means the turn is over (Codex found
+        # set_status(text="idle") left her busy, 23:45 on 27 Nov, t69).
+        if text.strip().lower().rstrip(".!") in ("idle", "done", "ready"):
+            update_seat(seat, state="idle", doing="")
+        else:
+            update_seat(seat, state="busy", doing=describe(text))
         return "Status set.", False
     if name == "team_status":
         return status_text(), False
@@ -8235,6 +8241,8 @@ def self_test():
         "assert not x.screen_says_idle('Allow this command?\\n  1. Yes  2. No')",
         "st = dict(x.load_seat('codex'), state='busy', since=x.time.time(), woke_at=0); assert x.settle_from_screen('codex', st) is st",
         "st = dict(x.load_seat('grok'), state='busy', since=0.0); assert x.settle_from_screen('grok', st) is st",
+        "x.mcp_call('codex', 'set_status', {'text': 'reviewing #158'}); assert x.load_seat('codex')['state'] == 'busy'",
+        "x.mcp_call('codex', 'set_status', {'text': 'Idle.'}); assert x.load_seat('codex')['state'] == 'idle' and x.load_seat('codex')['doing'] == ''",
         "x.write_json(x.DATA / 'usage' / 'gravity.json', {'time': now, 'data': {'rate_limits': {'five_hour': full(x.time.time() + 600)}}})",
         "x.update_seat('gravity', state='away')",
         "assert x.seat_spent('gravity') and any(s == 'gravity' for s, _, _ in x.current_states())",
