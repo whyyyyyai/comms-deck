@@ -996,10 +996,18 @@ fn body_size(share: f32, seats: usize, span: f32) -> f32 {
     (1.0 + span * (share / even - 1.0)).clamp(1.0 - span * 0.5, 1.0 + span * 0.5)
 }
 
+/// The radius of the ring a working agent's planet climbs to and holds
+/// (t52): `ring` of the room between the core and the nearest wall, so
+/// the whole circle stays clear of the screen's edges.
+fn ring_radius(scene: Vec2, cfg: &mods::PhysicsCfg) -> f32 {
+    let wall = scene * 0.5 - cfg.edge_margin;
+    (cfg.ring * wall.x.min(wall.y)).max(cfg.min_radius)
+}
+
 /// One step of the planets' physics (t13). The core is a singularity: its
-/// pull is `gravity / r²` towards the centre. A busy seat has thrust enough
-/// to climb to a higher orbit; an idle one keeps a fairly stable orbit
-/// (t18). The ring's turning (drift, traffic, warp, the notes' spin kicks)
+/// pull is `gravity / r²` towards the centre. A busy seat climbs to the
+/// ring (`ring_radius`) and holds a circle there (t52); an idle one keeps
+/// its orbit (t18), and every planet's in-and-out swing is damped. The ring's turning (drift, traffic, warp, the notes' spin kicks)
 /// rides on top of each planet's own circular speed (`turn_share` of
 /// `turning * r`), so the whole ring still answers the deck the way it
 /// did. `pull` is what the other planets' gravity
@@ -1016,16 +1024,17 @@ fn step_body(body: &mut Body, busy: bool, turning: f32, scene: Vec2, dt: f32, cf
     let tang = Vec2::new(out.y, -out.x);
     // The core's pull, softened at the floor so the sim stays stable there.
     let g = cfg.gravity / (r.max(cfg.min_radius) * r.max(cfg.min_radius));
-    // Thrust rides on the local pull (a multiple of it), so even a planet
-    // that sank all the way in has climb enough to get back out. It fades
-    // out on the approach to the screen's edge — measured in the planet's
-    // own direction — so a working agent parks on the highest orbit there
-    // is room for.
+    // A working agent climbs to the ring and holds it (t52, Y: "a stable
+    // ring orbit to the core"): a spring towards the ring's radius, a
+    // circle that fits inside the walls. Until now thrust beat the pull
+    // all the way out, so a busy planet rode the screen's edge and bounced.
     let half = scene * 0.5;
-    let edge = (1.0 / (out.x.abs() / half.x).max(out.y.abs() / half.y).max(1e-4)) - cfg.edge_margin;
-    let fade = 1.0 - ((r - 0.75 * edge) / (0.25 * edge.max(1.0))).clamp(0.0, 1.0);
-    let thrust = if busy { cfg.thrust * g * fade } else { 0.0 };
-    let sink = if busy { 0.0 } else { cfg.drift };
+    let ring = ring_radius(scene, cfg);
+    let lift = if busy { cfg.ring_pull * (ring - r) } else { -cfg.drift };
+    // Radial speed is damped for every planet, so a kick from a note, a
+    // contact or a neighbour's pull settles back onto a circle instead of
+    // swinging in and out for ever.
+    let calm = -cfg.radial_damping * body.vel.dot(out);
     // Steer the tangential speed onto the orbit's own circular speed plus
     // a share of the ring's turning (t18: fairly stable orbits, still
     // stirred by the deck), capped, so the spin kicks and warp swing are
@@ -1033,7 +1042,10 @@ fn step_body(body: &mut Body, busy: bool, turning: f32, scene: Vec2, dt: f32, cf
     let v_t = body.vel.dot(tang);
     let target = (g * r).sqrt() + turning * r * cfg.turn_share;
     let steer = ((target - v_t) * cfg.steering).clamp(-cfg.max_steer, cfg.max_steer);
-    body.vel += (out * (thrust - sink - g) + tang * steer + pull) * dt;
+    // On the ring the inward pull is exactly what the circle needs at the
+    // planet's speed, so the ring's turning can't push it wide of the ring.
+    let hold = if busy { v_t * v_t / r } else { g };
+    body.vel += (out * (lift + calm - hold) + tang * steer + pull) * dt;
     body.pos += body.vel * dt;
     // Skim, don't fall in: on the floor of the core's well the inward part
     // of the speed is taken away, leaving the planet to circle.
@@ -1046,20 +1058,20 @@ fn step_body(body: &mut Body, busy: bool, turning: f32, scene: Vec2, dt: f32, cf
         body.vel = v_t2;
     }
     // No planet is lost over the edge: it bounces back into the scene.
-    let half = scene * 0.5 - cfg.edge_margin;
+    let wall = half - cfg.edge_margin;
     let keep = cfg.bounce;
-    if body.pos.x < -half.x {
-        body.pos.x = -half.x;
+    if body.pos.x < -wall.x {
+        body.pos.x = -wall.x;
         body.vel.x = body.vel.x.abs() * keep;
-    } else if body.pos.x > half.x {
-        body.pos.x = half.x;
+    } else if body.pos.x > wall.x {
+        body.pos.x = wall.x;
         body.vel.x = -body.vel.x.abs() * keep;
     }
-    if body.pos.y < -half.y {
-        body.pos.y = -half.y;
+    if body.pos.y < -wall.y {
+        body.pos.y = -wall.y;
         body.vel.y = body.vel.y.abs() * keep;
-    } else if body.pos.y > half.y {
-        body.pos.y = half.y;
+    } else if body.pos.y > wall.y {
+        body.pos.y = wall.y;
         body.vel.y = -body.vel.y.abs() * keep;
     }
 }
@@ -1874,8 +1886,8 @@ fn layout_seats(
         deck.built = names;
         return;
     }
-    // The planets fly the sim now (t13): gravity, thrust, steering — each
-    // one on its own, so working agents climb to higher orbits while idle
+    // The planets fly the sim now (t13): gravity, the ring, steering — each
+    // one on its own, so working agents climb to a stable ring while idle
     // ones hold a fairly stable circle. On top of the core's pull the
     // planets pull on each other (t18), each weighing its share of the
     // crew's context pool.
@@ -3722,7 +3734,7 @@ mod tests {
         // A planet circling at the old ring's radius, steered onto a slow
         // turn (t18: the target is the circular speed plus a share of the
         // ring's turning, so idle planets hold fairly stable orbits).
-        let start = Body { pos: Vec2::new(0.0, 240.0), vel: Vec2::new(24.0, 0.0) };
+        let start = Body { pos: Vec2::new(0.0, 180.0), vel: Vec2::new(24.0, 0.0) };
         let circling = |busy| {
             let mut b = start;
             let mut sum = 0.0;
@@ -3739,12 +3751,56 @@ mod tests {
         assert!(idle_lo > 150.0, "an idle planet keeps a fairly stable orbit, never sinking in: lo {idle_lo}");
         let (busy_mean, _) = circling(true);
         assert!(busy_mean > idle_mean + 20.0, "a working planet rides higher on average: idle {idle_mean:.0} busy {busy_mean:.0}");
-        // Even one that sank all the way in can climb back out at work.
+        // Even one that sank all the way in climbs back out to the ring.
         let mut sunken = Body { pos: Vec2::new(0.0, cfg.min_radius), vel: Vec2::new(9.0, 0.0) };
-        for _ in 0..1800 {
+        for _ in 0..(60 * 60) {
             step_body(&mut sunken, true, 0.1, scene, 1.0 / 60.0, &cfg, Vec2::ZERO);
         }
-        assert!(sunken.pos.length() > 200.0, "thrust is a multiple of the local pull, so it escapes: {}", sunken.pos.length());
+        let ring = ring_radius(scene, &cfg);
+        assert!((sunken.pos.length() - ring).abs() < 15.0, "it climbs to the ring: {} vs {ring}", sunken.pos.length());
+    }
+
+    #[test]
+    fn a_busy_planet_holds_a_stable_ring_clear_of_the_edges() {
+        // t52 (Y: "get yourself on a stable ring orbit to the core"). Before,
+        // thrust beat the pull all the way out and a busy planet rode the
+        // screen's edge, bouncing. Now it settles on a circle and stays.
+        let cfg = mods::PhysicsCfg::default();
+        for scene in [Vec2::new(1280.0, 800.0), Vec2::new(2900.0, 2520.0)] {
+            let ring = ring_radius(scene, &cfg);
+            let wall = scene * 0.5 - cfg.edge_margin;
+            for start in [
+                Body { pos: Vec2::new(0.0, cfg.min_radius), vel: Vec2::new(10.0, 0.0) },
+                Body { pos: Vec2::new(wall.x - 5.0, 0.0), vel: Vec2::new(60.0, -80.0) },
+                Body { pos: Vec2::new(150.0, -150.0), vel: Vec2::new(-120.0, 40.0) },
+            ] {
+                let mut b = start;
+                for _ in 0..(90 * 60) {
+                    step_body(&mut b, true, 0.1, scene, 1.0 / 60.0, &cfg, Vec2::ZERO);
+                }
+                // The next half minute: on the ring, round, off the walls.
+                let (mut lo, mut hi) = (f32::MAX, 0.0f32);
+                let a0 = b.pos.y.atan2(b.pos.x);
+                let mut turned = 0.0;
+                let mut last = a0;
+                for _ in 0..(30 * 60) {
+                    step_body(&mut b, true, 0.1, scene, 1.0 / 60.0, &cfg, Vec2::ZERO);
+                    let r = b.pos.length();
+                    lo = lo.min(r);
+                    hi = hi.max(r);
+                    assert!(b.pos.x.abs() < wall.x - 1.0 && b.pos.y.abs() < wall.y - 1.0, "touched a wall at {:?}", b.pos);
+                    let a = b.pos.y.atan2(b.pos.x);
+                    let mut d = a - last;
+                    if d > std::f32::consts::PI { d -= std::f32::consts::TAU; }
+                    if d < -std::f32::consts::PI { d += std::f32::consts::TAU; }
+                    turned += d;
+                    last = a;
+                }
+                assert!((lo - ring).abs() < 10.0 && (hi - ring).abs() < 10.0,
+                        "{scene:?} from {:?}: holds the ring {ring:.0}, swung {lo:.0}..{hi:.0}", start.pos);
+                assert!(turned.abs() > 0.5, "and keeps circling it: turned {turned:.2} rad");
+            }
+        }
     }
 
     #[test]

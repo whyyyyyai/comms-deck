@@ -54,14 +54,16 @@ max_spin = 1.5
 
 # The planets' motion is a simplified physics sim (t13, vibe): gravity pulls
 # each one towards the singularity (acceleration falls off as 1/r², so inner
-# orbits run faster); an agent at work has thrust enough to climb to a
-# higher orbit away from the warp core; an agent with nothing to do keeps a
+# orbits run faster); an agent at work climbs to a stable ring orbit
+# round the warp core, clear of the screen's edges (t52); an agent with nothing to do keeps a
 # fairly stable orbit; the planets pull on each other, each weighing its
 # share of the crew's context pool, and no planet is ever lost over the
 # screen's edge — it is reflected back in, keeping some of its speed.
 [physics]
 gravity = 530000.0            # the core's pull, px³/s² (a = gravity / r²)
-thrust = 1.6                  # outward push while busy, as a multiple of the local pull (fades near the edge)
+ring = 0.8                    # a busy planet's ring: this share of the room to the nearest wall (t52)
+ring_pull = 0.2               # how hard a busy planet is pulled onto its ring, per s² on the gap
+radial_damping = 0.9          # how fast in-and-out swings die away, per s (planets settle onto circles)
 drift = 0.0                   # inward sink while not busy, px/s² (0 = fairly stable orbits, Y t18)
 mutual = 60000.0              # the planets' pull on each other, px³/s²
 soften = 60.0                 # close pairs pull at this distance, px
