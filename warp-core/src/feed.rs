@@ -37,6 +37,8 @@ pub struct SeatInfo {
     pub week: Option<f64>,
     /// Tokens in the seat's context window, for the stars' split.
     pub ctx_tokens: Option<f64>,
+    /// The session's cost as the seat reports it (an estimate).
+    pub cost_usd: Option<f64>,
 }
 
 impl SeatInfo {
@@ -70,8 +72,27 @@ pub struct ChatNote {
     pub quiet: bool,
 }
 
+/// A change of a seat's state (activity.jsonl), as the chat screen's ACTIVITY.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Activity {
+    pub time: f64,
+    pub seat: String,
+    pub state: String,
+    pub doing: String,
+}
+
+/// A desktop notification (notifications.jsonl), as the chat screen shows.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Notice {
+    pub time: f64,
+    pub text: String,
+}
+
 pub enum Msg {
     Seats(Vec<SeatInfo>),
+    /// `true` when it just happened (it ripples the ring), false from the backlog.
+    Activity(Activity, bool),
+    Notice(Notice),
     Note(NoteInfo),
     Chat(ChatNote),
     Problem(String),
@@ -231,6 +252,41 @@ pub fn backlog(path: &std::path::Path, n: usize) -> Vec<ChatNote> {
     notes[notes.len().saturating_sub(n)..].to_vec()
 }
 
+pub fn parse_activity(v: &Value) -> Option<Activity> {
+    Some(Activity {
+        time: v.get("time")?.as_f64()?,
+        seat: seat_id(&scrub(v.get("seat")?.as_str()?)),
+        state: scrub(v.get("state").and_then(Value::as_str).unwrap_or("")),
+        doing: scrub(v.get("doing").and_then(Value::as_str).unwrap_or("")),
+    })
+}
+
+pub fn parse_notice(v: &Value) -> Option<Notice> {
+    Some(Notice { time: v.get("time")?.as_f64()?, text: scrub(v.get("text")?.as_str()?) })
+}
+
+/// The last `n` parsed lines of a jsonl file's tail.
+fn tail_lines<T>(path: &std::path::Path, n: usize, parse: fn(&Value) -> Option<T>) -> Vec<T> {
+    let Ok(mut f) = File::open(path) else { return Vec::new() };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = len.saturating_sub(256 * 1024);
+    if f.seek(SeekFrom::Start(start)).is_err() {
+        return Vec::new();
+    }
+    let mut buf = Vec::new();
+    if f.read_to_end(&mut buf).is_err() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines = text.lines();
+    if start > 0 {
+        lines.next();
+    }
+    let all: Vec<T> = lines.filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter_map(|v| parse(&v)).collect();
+    let skip = all.len().saturating_sub(n);
+    all.into_iter().skip(skip).collect()
+}
+
 /// A seat's meters from usage/<seat>.json (the statusline shape the
 /// terminal deck reads): context, 5-hour and weekly used percentages.
 pub fn parse_usage(v: &Value) -> (Option<f64>, Option<f64>, Option<f64>) {
@@ -263,6 +319,7 @@ fn add_usage(seats: &mut [SeatInfo], dir: &std::path::Path) {
         let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
         (seat.ctx, seat.five_hour, seat.week) = parse_usage(&v);
         seat.ctx_tokens = context_tokens(&v);
+        seat.cost_usd = v.pointer("/data/cost/total_cost_usd").and_then(Value::as_f64);
     }
 }
 
@@ -325,6 +382,20 @@ pub fn run(tx: Sender<Msg>) {
             return;
         }
     }
+    let act_path = data_dir().join("activity.jsonl");
+    let note_path = data_dir().join("notifications.jsonl");
+    for a in tail_lines(&act_path, 80, parse_activity) {
+        if tx.send(Msg::Activity(a, false)).is_err() {
+            return;
+        }
+    }
+    for n in tail_lines(&note_path, 40, parse_notice) {
+        if tx.send(Msg::Notice(n)).is_err() {
+            return;
+        }
+    }
+    let mut act_tail = LogTail::new(act_path);
+    let mut note_tail = LogTail::new(note_path);
     let mut last_status = Instant::now() - Duration::from_secs(10);
     loop {
         if last_status.elapsed() >= Duration::from_secs(2) {
@@ -348,6 +419,20 @@ pub fn run(tx: Sender<Msg>) {
             }
             if let Some(note) = parse_note(&v) {
                 if tx.send(Msg::Note(note)).is_err() {
+                    return;
+                }
+            }
+        }
+        for v in act_tail.read_new() {
+            if let Some(a) = parse_activity(&v) {
+                if tx.send(Msg::Activity(a, true)).is_err() {
+                    return;
+                }
+            }
+        }
+        for v in note_tail.read_new() {
+            if let Some(n) = parse_notice(&v) {
+                if tx.send(Msg::Notice(n)).is_err() {
                     return;
                 }
             }
@@ -451,6 +536,15 @@ mod tests {
             Some(20000.0)
         );
         assert_eq!(context_tokens(&json!({"data": {}})), None);
+    }
+
+    #[test]
+    fn activity_and_notices_parse_and_scrub() {
+        let a = parse_activity(&json!({"time": 5.0, "seat": "Y", "state": "busy", "doing": "a\x1bb"})).unwrap();
+        assert_eq!((a.seat.as_str(), a.doing.as_str()), ("owner", "ab"));
+        assert!(parse_activity(&json!({"seat": "x"})).is_none(), "no time, no row");
+        let n = parse_notice(&json!({"time": 1.0, "text": "Note from claude"})).unwrap();
+        assert_eq!(n.text, "Note from claude");
     }
 
     #[test]

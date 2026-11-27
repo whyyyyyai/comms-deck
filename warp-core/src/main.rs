@@ -52,7 +52,7 @@ use bevy::{
     sprite_render::{AlphaMode2d, Material2d, Material2dPlugin},
     winit::{UpdateMode, WinitSettings},
 };
-use feed::{ChatNote, Msg, NoteInfo, SeatInfo};
+use feed::{Activity, ChatNote, Msg, Notice, NoteInfo, SeatInfo};
 use mods::{Config, Rule, Val};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{mpsc, Mutex};
@@ -306,12 +306,36 @@ fn panel_width(window_w: f32, cfg: &mods::ChatCfg) -> f32 {
     (window_w * cfg.width).clamp(300.0, 600.0).min(window_w * 0.6)
 }
 
-type SendResult = (String, Result<String, String>);
+/// What came back from a send (Some(the line)) or a wake (None).
+type SendResult = (Option<String>, Result<String, String>);
+
+/// The panel's tabs: the chat screen's notes, activity and notifications.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum Tab {
+    #[default]
+    Comms,
+    Activity,
+    Notify,
+}
+
+impl Tab {
+    const ALL: [Tab; 3] = [Tab::Comms, Tab::Activity, Tab::Notify];
+    fn name(self) -> &'static str {
+        match self {
+            Tab::Comms => "COMMS",
+            Tab::Activity => "ACTIVITY",
+            Tab::Notify => "NOTIFY",
+        }
+    }
+}
 
 /// The chat panel: the notes, the line being typed, and sends in flight.
 #[derive(Resource)]
 struct Chat {
     notes: VecDeque<ChatNote>,
+    activity: VecDeque<Activity>,
+    notices: VecDeque<Notice>,
+    tab: Tab,
     input: String,
     /// True: keys go to the chat box. False: they drive the ring.
     focus: bool,
@@ -332,6 +356,9 @@ impl Default for Chat {
         let (tx, rx) = mpsc::channel();
         Chat {
             notes: VecDeque::new(),
+            activity: VecDeque::new(),
+            notices: VecDeque::new(),
+            tab: Tab::Comms,
             input: String::new(),
             focus: true,
             scroll: 0,
@@ -846,12 +873,28 @@ fn read_feed(feed: Res<Feed>, mut deck: ResMut<Deck>, mut chat: ResMut<Chat>, mo
                 deck.problem = None;
             }
             Msg::Problem(p) => deck.problem = Some(p),
+            Msg::Activity(a, live) => {
+                // A seat changing state ripples the ring in its colour.
+                if live {
+                    deck.shocks.push(Shock { seat: a.seat.clone(), at: now, colour: seat_rgb(&a.seat), size: 0.45 });
+                }
+                chat.activity.push_back(a);
+                let over = chat.activity.len().saturating_sub(200);
+                chat.activity.drain(..over);
+                chat.dirty |= chat.tab == Tab::Activity;
+            }
+            Msg::Notice(n) => {
+                chat.notices.push_back(n);
+                let over = chat.notices.len().saturating_sub(100);
+                chat.notices.drain(..over);
+                chat.dirty |= chat.tab == Tab::Notify;
+            }
             Msg::Chat(n) => {
                 chat.notes.push_back(n);
                 let over = chat.notes.len().saturating_sub(mods.cfg.chat.keep.max(10));
                 chat.notes.drain(..over);
                 // Scrolled back: stay on the same notes as new ones arrive.
-                if chat.scroll > 0 {
+                if chat.scroll > 0 && chat.tab == Tab::Comms {
                     chat.scroll += 1;
                 }
                 chat.dirty = true;
@@ -1041,7 +1084,14 @@ fn pointer(
         deck.cursor = None;
         deck.hover = None;
         if mouse.just_pressed(MouseButton::Left) {
-            chat.focus = true;
+            let w = world.unwrap_or_default();
+            if w.y > layout.scene.y * 0.5 - 38.0 {
+                // The header: a click picks a tab by thirds.
+                let k = ((w.x - layout.scene.x * 0.5) / layout.panel.max(1.0) * 3.0).clamp(0.0, 2.0) as usize;
+                set_tab(&mut chat, Tab::ALL[k]);
+            } else {
+                chat.focus = true;
+            }
         }
         return;
     }
@@ -1065,6 +1115,26 @@ fn pointer(
             chat.input = chat::address(&chat.input, &h);
             chat.focus = true;
         }
+    }
+    // Right-click wakes a seat, through comms-deck wake and its rules.
+    if mouse.just_pressed(MouseButton::Right) {
+        if let Some(h) = deck.hover.clone().filter(|h| h != "owner") {
+            chat.sending += 1;
+            chat.status = Some((format!("waking {}...", label_for(&h)), false, f32::MAX));
+            let tx = chat.tx.clone();
+            std::thread::spawn(move || {
+                let r = chat::wake(&h);
+                let _ = tx.send((None, r));
+            });
+        }
+    }
+}
+
+fn set_tab(chat: &mut Chat, tab: Tab) {
+    if chat.tab != tab {
+        chat.tab = tab;
+        chat.scroll = 0;
+        chat.dirty = true;
     }
 }
 
@@ -1455,6 +1525,10 @@ fn hud(
             waiting,
             deck.notes_last(now, 3600.0),
         );
+        let costs: Vec<f64> = deck.seats.iter().filter_map(|s| s.cost_usd).collect();
+        if !costs.is_empty() {
+            line.push_str(&format!(" | ~${:.2} (estimate)", costs.iter().sum::<f64>()));
+        }
         if deck.warp > 0.05 {
             line.push_str(&format!("    >> WARP {:.1}", deck.warp));
         } else if deck.thrust > 0.05 {
@@ -1515,7 +1589,7 @@ fn hud(
     let dock_line = if show {
         // Three to a line, so it fits a half-width window.
         let rows: Vec<String> = off.chunks(3).map(|c| c.join("   |   ")).collect();
-        format!("off the ring: {}\nhover a seat | click to focus | 1-9 | h c m f r | space: test", rows.join("\n              "))
+        format!("off the ring: {}\nhover a seat | click: focus + address | right-click: wake | 1-9 | h c m f r | space: test", rows.join("\n              "))
     } else {
         String::new()
     };
@@ -1749,8 +1823,17 @@ fn chat_input(
         if !ev.state.is_pressed() {
             continue;
         }
-        // Scrolling works from either side.
+        // Tabs and scrolling work from either side.
         match ev.key_code {
+            KeyCode::F1 | KeyCode::F2 | KeyCode::F3 => {
+                let k = match ev.key_code {
+                    KeyCode::F1 => 0,
+                    KeyCode::F2 => 1,
+                    _ => 2,
+                };
+                set_tab(&mut chat, Tab::ALL[k]);
+                continue;
+            }
             KeyCode::PageUp => {
                 chat.scroll = (chat.scroll + 5).min(n);
                 chat.dirty = true;
@@ -1852,7 +1935,7 @@ fn send_line(chat: &mut Chat, deck: &Deck, now: f32) {
             let tx = chat.tx.clone();
             std::thread::spawn(move || {
                 let r = chat::send(&to, &text);
-                let _ = tx.send((text, r));
+                let _ = tx.send((Some(text), r));
             });
         }
     }
@@ -1866,6 +1949,14 @@ fn chat_results(mut chat: ResMut<Chat>, real: Res<Time<Real>>) {
     };
     for (text, r) in got {
         chat.sending = chat.sending.saturating_sub(1);
+        let Some(text) = text else {
+            // A wake's answer.
+            chat.status = Some(match r {
+                Ok(say) => (feed::scrub(&say), false, now),
+                Err(e) => (format!("not woken: {}", feed::scrub(&e)), true, now),
+            });
+            continue;
+        };
         match r {
             Ok(say) => {
                 let say = if say.is_empty() { "sent".to_string() } else { feed::scrub(&say) };
@@ -1954,6 +2045,50 @@ fn chat_spans(notes: &VecDeque<ChatNote>, scroll: usize, cap: usize) -> Vec<(Str
     out
 }
 
+/// The ACTIVITY tab: each change of a seat's state, newest last.
+fn activity_spans(rows: &VecDeque<Activity>, scroll: usize, cap: usize, now: f64) -> Vec<(String, Color)> {
+    let end = rows.len().saturating_sub(scroll);
+    let start = end.saturating_sub(cap);
+    let dim = Color::srgb(0.42, 0.47, 0.58);
+    let mut out = Vec::new();
+    for (i, a) in rows.range(start..end).enumerate() {
+        if i > 0 {
+            out.push(("\n".to_string(), dim));
+        }
+        out.push((format!("{:>7} ", ago(now - a.time)), dim));
+        out.push((label_for(&a.seat), seat_colour(&a.seat, 1.1)));
+        let state_colour = match a.state.as_str() {
+            "busy" => Color::srgb(0.95, 0.8, 0.35),
+            "idle" | "ready" => Color::srgb(0.5, 0.85, 0.55),
+            "away" | "offline" => Color::srgb(0.5, 0.52, 0.6),
+            _ => Color::srgb(0.85, 0.6, 0.6),
+        };
+        out.push((format!(" {}", a.state), state_colour));
+        if !a.doing.is_empty() {
+            let doing: String = plain(&a.doing).chars().take(160).collect();
+            out.push((format!("  {doing}"), Color::srgb(0.72, 0.75, 0.84)));
+        }
+    }
+    out
+}
+
+/// The NOTIFY tab: the desktop notifications the top bar scrolls.
+fn notice_spans(rows: &VecDeque<Notice>, scroll: usize, cap: usize, now: f64) -> Vec<(String, Color)> {
+    let end = rows.len().saturating_sub(scroll);
+    let start = end.saturating_sub(cap);
+    let dim = Color::srgb(0.42, 0.47, 0.58);
+    let mut out = Vec::new();
+    for (i, n) in rows.range(start..end).enumerate() {
+        if i > 0 {
+            out.push(("\n".to_string(), dim));
+        }
+        out.push((format!("{:>7}  ", ago(now - n.time)), dim));
+        let text: String = plain(&n.text).chars().take(300).collect();
+        out.push((text, Color::srgb(0.82, 0.85, 0.93)));
+    }
+    out
+}
+
 /// Lays out the panel each frame, and rebuilds the note spans when they
 /// changed.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
@@ -2001,9 +2136,14 @@ fn draw_chat(
     }
     for (mut text, mut tf, mut v) in &mut title {
         *v = vis;
-        let mut t = format!("COMMS   {} notes", chat.notes.len());
+        let mut t = Tab::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, tab)| if *tab == chat.tab { format!("[F{} {}]", i + 1, tab.name()) } else { format!(" F{} {} ", i + 1, tab.name()) })
+            .collect::<Vec<_>>()
+            .join(" ");
         if chat.scroll > 0 {
-            t.push_str(&format!("   (scrolled back {}, PgDn)", chat.scroll));
+            t.push_str(&format!("  (back {}, PgDn)", chat.scroll));
         }
         if text.0 != t {
             text.0 = t;
@@ -2023,7 +2163,15 @@ fn draw_chat(
         if chat.dirty {
             chat.dirty = false;
             commands.entity(e).despawn_related::<Children>();
-            let spans = chat_spans(&chat.notes, chat.scroll, 60);
+            let now_epoch = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            let spans = match chat.tab {
+                Tab::Comms => chat_spans(&chat.notes, chat.scroll, 60),
+                Tab::Activity => activity_spans(&chat.activity, chat.scroll, 80, now_epoch),
+                Tab::Notify => notice_spans(&chat.notices, chat.scroll, 50, now_epoch),
+            };
             commands.entity(e).with_children(|p| {
                 for (text, colour) in spans {
                     p.spawn((TextSpan::new(text), TextColor(colour), TextFont { font_size: FontSize::Px(cfg.font), ..default() }));
@@ -2062,7 +2210,7 @@ fn draw_chat(
                 Err(e) => (e, true),
             },
             None if !chat.focus => ("keys drive the ring (Tab: back to typing)".into(), false),
-            None => ("Enter sends as Y | Esc clears | Tab: ring keys".into(), false),
+            None => ("Enter sends as Y | Esc clears | Tab: ring keys | F1-F3 tabs".into(), false),
         };
         let t: String = t.chars().take(120).collect();
         if text.0 != t {
@@ -2296,6 +2444,19 @@ mod tests {
     fn notes_lose_the_glyphs_the_font_lacks() {
         assert_eq!(plain("on \u{2014} off \u{2192} done\u{2026} \u{201c}ok\u{201d}"), "on -- off -> done... \"ok\"");
         assert_eq!(plain("plain ascii stays"), "plain ascii stays");
+    }
+
+    #[test]
+    fn activity_and_notify_tabs_read_like_the_chat_screen() {
+        let mut rows = VecDeque::new();
+        rows.push_back(Activity { time: 1000.0, seat: "vibe".into(), state: "busy".into(), doing: "note from Y: hi\u{2026}".into() });
+        rows.push_back(Activity { time: 1090.0, seat: "owner".into(), state: "idle".into(), doing: String::new() });
+        let text: String = activity_spans(&rows, 0, 80, 1100.0).into_iter().map(|(t, _)| t).collect();
+        assert_eq!(text, "     1m vibe busy  note from Y: hi...\n    10s Y idle");
+        let mut notes = VecDeque::new();
+        notes.push_back(Notice { time: 40.0, text: "Note from claude \u{2014} done".into() });
+        let text: String = notice_spans(&notes, 0, 50, 100.0).into_iter().map(|(t, _)| t).collect();
+        assert_eq!(text, "     1m  Note from claude -- done");
     }
 
     #[test]

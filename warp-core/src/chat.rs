@@ -89,6 +89,24 @@ pub fn send(to: &str, text: &str) -> Result<String, String> {
     }
 }
 
+/// One wake attempt for a seat through `comms-deck wake`, so its rules
+/// decide (never a spent seat, never over a draft). Blocking.
+pub fn wake(seat: &str) -> Result<String, String> {
+    if seat.is_empty() || !seat.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err(format!("no seat called {seat}"));
+    }
+    let out = Command::new(program())
+        .args(["wake", seat])
+        .output()
+        .map_err(|e| format!("couldn't run {}: {e}", program()))?;
+    let say = String::from_utf8_lossy(if out.status.success() { &out.stdout } else { &out.stderr }).trim().to_string();
+    if out.status.success() {
+        Ok(if say.is_empty() { format!("woke {seat}") } else { say })
+    } else {
+        Err(say)
+    }
+}
+
 /// The clipboard's text, for a paste; newlines become spaces so a paste
 /// never sends itself.
 pub fn paste() -> String {
