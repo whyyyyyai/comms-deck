@@ -137,6 +137,7 @@ fn main() {
                     draw_moons_and_marks,
                     hud,
                     sys_panel,
+                    task_panel,
                     tooltip,
                     chat_results,
                     draw_chat,
@@ -1114,6 +1115,10 @@ struct Hud;
 #[derive(Component)]
 struct SysPanel;
 
+/// The task list at the bottom of the scene's left side: id, title, holder, how long.
+#[derive(Component)]
+struct TaskPanel;
+
 #[derive(Component)]
 struct Dock;
 
@@ -1400,7 +1405,16 @@ fn setup(
         Text2d::new(""),
         TextFont { font_size: FontSize::Px(14.0), ..default() },
         TextColor(Color::srgb(0.5, 0.6, 0.75)),
-        Anchor::CENTER_LEFT,
+        Anchor::TOP_LEFT,
+        Transform::from_xyz(0.0, 0.0, 5.0),
+    ));
+    commands.spawn((
+        TaskPanel,
+        Text2d::new(""),
+        TextFont { font_size: FontSize::Px(14.0), ..default() },
+        TextBounds::new_horizontal(520.0),
+        TextColor(Color::srgb(0.62, 0.7, 0.85)),
+        Anchor::BOTTOM_LEFT,
         Transform::from_xyz(0.0, 0.0, 5.0),
     ));
     commands.spawn((
@@ -2803,7 +2817,12 @@ fn sys_panel(
     mut state: Local<(sys::Frames, sys::Machine, f32)>,
 ) {
     let now = real.elapsed_secs();
-    state.0.frame(now, real.delta_secs());
+    // Only frames drawn while shown count: hidden, the compositor sends no
+    // frame callbacks and every frame waits out a 1 s swap-chain timeout,
+    // which isn't the GPU stalling (18:46-18:54 on 27 Nov, all hidden).
+    if VISIBLE.load(std::sync::atomic::Ordering::Relaxed) {
+        state.0.frame(now, real.delta_secs());
+    }
     if state.2 <= 0.0 || now - state.2 >= 2.0 {
         state.1 = sys::read_machine();
         state.2 = now.max(1e-3);
@@ -2826,7 +2845,86 @@ fn sys_panel(
             c.0 = colour;
         }
         tf.translation.x = -layout.half().x + 18.0;
-        tf.translation.y = 0.0;
+        tf.translation.y = layout.half().y - 70.0;
+    }
+}
+
+/// A task's title cut to `max` characters at a word, with an ellipsis.
+fn short_title(title: &str, max: usize) -> String {
+    let t = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if t.chars().count() <= max {
+        return t;
+    }
+    let cut: String = t.chars().take(max).collect();
+    let head = match cut.rfind(' ') {
+        Some(i) if i > max / 2 => &cut[..i],
+        _ => cut.as_str(),
+    };
+    format!("{}…", head.trim_end_matches(|c: char| c == ',' || c == '.' || c == ':' || c == ';'))
+}
+
+/// How long, the short way: 40s, 12m, 3h 05m, 2d 4h.
+fn short_age(secs: f64) -> String {
+    let s = secs.max(0.0) as u64;
+    match s {
+        0..=59 => format!("{s}s"),
+        60..=3599 => format!("{}m", s / 60),
+        3600..=86_399 => format!("{}h {:02}m", s / 3600, s / 60 % 60),
+        _ => format!("{}d {}h", s / 86_400, s / 3600 % 24),
+    }
+}
+
+/// The task panel's text (Y, 2026-11-27: "who they're with, and how long
+/// they've been with them"): one line per task on the board, in id order.
+fn task_panel_text(tasks: &[TaskInfo], now_epoch: f64) -> String {
+    if tasks.is_empty() {
+        return "TASKS
+none on the board".to_string();
+    }
+    let mut s = String::from("TASKS");
+    for t in tasks {
+        let title = t.title.as_deref().map(|x| short_title(x, 40)).unwrap_or_else(|| "(private)".to_string());
+        let who = match &t.holder {
+            Some(h) => label_for(h),
+            None => "open".to_string(),
+        };
+        let age = t.since.map(|at| format!(", {}", short_age(now_epoch - at))).unwrap_or_default();
+        s.push_str(&format!("\n{}  {}  — {}{}", t.id, title, who, age));
+    }
+    s
+}
+
+/// The current tasks at the bottom of the scene's left side, above the dock.
+/// Shown with the HUD and `[hud] tasks_panel`; refreshed once a second.
+fn task_panel(
+    deck: Res<Deck>,
+    mods: Res<Mods>,
+    view: Res<View>,
+    real: Res<Time<Real>>,
+    layout: Res<Layout>,
+    mut panel: Query<(&mut Text2d, &mut Transform, &mut Visibility), With<TaskPanel>>,
+    mut last: Local<f32>,
+) {
+    let now = real.elapsed_secs();
+    let show = mods.cfg.hud.show && mods.cfg.hud.tasks_panel && view.hud;
+    let refresh = *last <= 0.0 || now - *last >= 1.0;
+    if refresh {
+        *last = now.max(1e-3);
+    }
+    let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+    for (mut t, mut tf, mut vis) in &mut panel {
+        let want = if show { Visibility::Inherited } else { Visibility::Hidden };
+        if *vis != want {
+            *vis = want;
+        }
+        if refresh || t.0.is_empty() {
+            let text = task_panel_text(&deck.tasks, epoch);
+            if t.0 != text {
+                t.0 = text;
+            }
+        }
+        tf.translation.x = -layout.half().x + 18.0;
+        tf.translation.y = -layout.half().y + 70.0;
     }
 }
 
@@ -3816,6 +3914,26 @@ mod tests {
     }
 
     #[test]
+    fn the_task_panel_says_who_has_what_and_for_how_long() {
+        assert_eq!(short_age(42.0), "42s");
+        assert_eq!(short_age(47.0 * 60.0), "47m");
+        assert_eq!(short_age(2.0 * 3600.0 + 5.0 * 60.0), "2h 05m");
+        assert_eq!(short_age(3.0 * 86_400.0 + 4.0 * 3600.0), "3d 4h");
+        assert_eq!(short_title("Make the warp core public", 40), "Make the warp core public");
+        assert_eq!(short_title("We need system stats, like gpu, memory, ram, context, on the left side", 40), "We need system stats, like gpu, memory…");
+        let tasks = vec![
+            feed::TaskInfo { id: "t50".into(), title: Some("electrons".into()), since: Some(1000.0), from: "owner".into(), holder: Some("vibe".into()), open: false },
+            feed::TaskInfo { id: "t54".into(), title: None, since: Some(4000.0), from: "owner".into(), holder: None, open: true },
+        ];
+        let text = task_panel_text(&tasks, 4000.0 + 300.0);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "TASKS");
+        assert!(lines[1].starts_with("t50  electrons  — ") && lines[1].ends_with(", 55m"), "{}", lines[1]);
+        assert_eq!(lines[2], "t54  (private)  — open, 5m");
+        assert_eq!(task_panel_text(&[], 0.0), "TASKS\nnone on the board");
+    }
+
+    #[test]
     fn a_busy_planet_holds_a_stable_ring_clear_of_the_edges() {
         // t52 (Y: "get yourself on a stable ring orbit to the core"). Before,
         // thrust beat the pull all the way out and a busy planet rode the
@@ -4220,6 +4338,7 @@ mod tests {
             from: "owner".into(),
             holder: holder.map(String::from),
             open,
+            ..Default::default()
         };
         let old = [t("t1", Some("vibe"), false), t("t2", None, true), t("t3", Some("claude"), false)];
         let new = [t("t3", Some("claude"), false)];

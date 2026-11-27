@@ -502,10 +502,12 @@ pub struct HudCfg {
     /// The system stats down the scene's left side: GPU frames, RAM, swap,
     /// load, power and each seat's context (t53).
     pub stats: bool,
+    /// The current tasks at the bottom left: id, title, holder, how long.
+    pub tasks_panel: bool,
 }
 impl Default for HudCfg {
     fn default() -> Self {
-        HudCfg { show: true, dock: true, hover_card: false, stats: true }
+        HudCfg { show: true, dock: true, hover_card: false, stats: true, tasks_panel: true }
     }
 }
 
