@@ -3109,7 +3109,7 @@ def availability(seat, state, now=None, snap=None):
             "shade": shade, "waiting": waiting, "usage": usage}
 
 
-ROUTABLE = ("claude", "grok", "gravity")  # agents a task can be handed to (not codex or app seats)
+ROUTABLE = ("claude", "grok", "gravity", "codex")  # agents a task can be handed to (not app seats); codex back 2026-11-27 (Y)
 
 
 def most_available(seats=ROUTABLE, now=None):
@@ -7911,7 +7911,7 @@ def self_test():
         "assert x.task_summary('deploy with token: ghp_' + 'a' * 30, []) == '(something private)'",
         "assert x.task_summary('', [('p', {'text': 'key ghp_' + 'b' * 30 + ' now', 'private': False})]) == '(something private)'",
         "assert sorted(['spent', 'stuck', 'ready', 'busy', 'away'], key=x.AVAILABILITY.get) == ['ready', 'busy', 'stuck', 'away', 'spent']",
-        "for s, st in (('claude', 'busy'), ('grok', 'idle'), ('gravity', 'idle')): x.update_seat(s, state=st)",
+        "for s, st in (('claude', 'busy'), ('grok', 'idle'), ('gravity', 'idle'), ('codex', 'away')): x.update_seat(s, state=st)",
         "x.mark_spent('gravity', '+2h', 'claude')",
         "assert x.availability('gravity', 'idle')['word'] == 'spent'",
         "assert x.availability('grok', 'idle')['word'] == 'ready'",

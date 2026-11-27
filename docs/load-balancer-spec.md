@@ -11,7 +11,7 @@ This morning's bottleneck was not writing code. Features landed fast all day (qu
 
 1. **Reviews are tasks.** The router treats "review PR N" as a routable task, weighted by urgency (age × merge-blocking flag), not by arrival order.
 
-2. **Reviewer pool by capability, not availability alone.** The pool is **a config list, not code** (default: claude, grok, gravity, lumo — the seats that can actually open a diff), so resuming Codex later is a one-line change. **The change's author is never in its pool** (review-check already fails a `Reviewed by` naming the `Written by` seat). Codex stays out while the owner has paused it; the Grok Bot chat seats stay out — they are chat seats, not reviewers. Availability orders *within* the pool; it does not define the pool.
+2. **Reviewer pool by capability, not availability alone.** The pool is **a config list, not code** (default: claude, grok, gravity, lumo — the seats that can actually open a diff), so resuming Codex later is a one-line change. **The change's author is never in its pool** (review-check already fails a `Reviewed by` naming the `Written by` seat). Codex is back (Y, 2026-11-27) and in the pool; the Grok Bot chat seats stay out — they are chat seats, not reviewers. Availability orders *within* the pool; it does not define the pool.
 
 3. **Pool never empties; rank, don't skip.** Rank the pool: ready > busy > stuck > idle-until. A stuck seat (idle with notes waiting) is handed work last, not never — skipping stuck seats can drain the pool and recreate the stall the router exists to fix. Reuse the deck's `availability()` and `most_available(seats=pool)` so panel and router cannot disagree. Escalate to the owner only when every seat in the pool is spent.
 
