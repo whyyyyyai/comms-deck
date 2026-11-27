@@ -240,6 +240,13 @@ pub struct PhysicsCfg {
     pub bounce: f32,
     /// The gap a planet keeps from the screen's edge (px).
     pub edge_margin: f32,
+    /// Two planets whose centres are closer than this (px) touch (t46):
+    /// they are pushed apart and bounce, and don't pull on each other, so
+    /// a pair can no longer clump into one and ride round stuck together.
+    pub contact: f32,
+    /// Kept speed (as a fraction) of the closing speed when two planets
+    /// bounce off each other.
+    pub restitution: f32,
 }
 impl Default for PhysicsCfg {
     fn default() -> Self {
@@ -256,6 +263,8 @@ impl Default for PhysicsCfg {
             min_radius: 90.0,
             bounce: 0.5,
             edge_margin: 90.0,
+            contact: 100.0,
+            restitution: 0.8,
         }
     }
 }
