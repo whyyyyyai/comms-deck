@@ -42,7 +42,7 @@ use bevy::{
         keyboard::{Key, KeyboardInput},
         mouse::MouseWheel,
     },
-    text::TextBounds,
+    text::{TextBounds, TextLayoutInfo},
     post_process::bloom::Bloom,
     prelude::*,
     reflect::TypePath,
@@ -674,6 +674,7 @@ fn setup(
         Hud,
         Text2d::new("warp core: waiting for the deck"),
         TextFont { font_size: FontSize::Px(15.0), ..default() },
+        TextBounds::new_horizontal(800.0),
         TextColor(Color::srgb(0.55, 0.65, 0.8)),
         Anchor::TOP_LEFT,
         Transform::from_xyz(0.0, 0.0, 5.0),
@@ -682,6 +683,7 @@ fn setup(
         Dock,
         Text2d::new(""),
         TextFont { font_size: FontSize::Px(13.0), ..default() },
+        TextBounds::new_horizontal(800.0),
         TextColor(Color::srgb(0.42, 0.48, 0.6)),
         Anchor::BOTTOM_LEFT,
         Transform::from_xyz(0.0, 0.0, 5.0),
@@ -1435,8 +1437,8 @@ fn hud(
     real: Res<Time<Real>>,
     vtime: Res<Time<Virtual>>,
     layout: Res<Layout>,
-    mut hud: Query<(&mut Text2d, &mut Transform), (With<Hud>, Without<Dock>)>,
-    mut dock: Query<(&mut Text2d, &mut Transform, &mut Visibility), (With<Dock>, Without<Hud>)>,
+    mut hud: Query<(&mut Text2d, &mut Transform, &mut TextBounds), (With<Hud>, Without<Dock>)>,
+    mut dock: Query<(&mut Text2d, &mut Transform, &mut Visibility, &mut TextBounds), (With<Dock>, Without<Hud>)>,
 ) {
     let half = layout.half();
     let now = time.elapsed_secs();
@@ -1483,7 +1485,12 @@ fn hud(
     for (file, why) in &mods.errors {
         line.push_str(&format!("\nmods: {file} refused, keeping the last good one: {why}"));
     }
-    for (mut text, mut tf) in &mut hud {
+    // Both wrap inside the scene, never under the chat panel.
+    let wrap = Some((layout.scene.x - 36.0).max(100.0));
+    for (mut text, mut tf, mut bounds) in &mut hud {
+        if bounds.width != wrap {
+            bounds.width = wrap;
+        }
         if text.0 != line {
             text.0 = line.clone();
         }
@@ -1512,7 +1519,10 @@ fn hud(
     } else {
         String::new()
     };
-    for (mut text, mut tf, mut vis) in &mut dock {
+    for (mut text, mut tf, mut vis, mut bounds) in &mut dock {
+        if bounds.width != wrap {
+            bounds.width = wrap;
+        }
         *vis = if show { Visibility::Inherited } else { Visibility::Hidden };
         if text.0 != dock_line {
             text.0 = dock_line.clone();
@@ -1865,6 +1875,35 @@ fn chat_results(mut chat: ResMut<Chat>, real: Res<Time<Real>>) {
     }
 }
 
+/// The default font has no dashes, arrows or curly quotes: swap the common
+/// ones for ASCII so notes don't show boxes.
+fn plain(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\u{2014}' | '\u{2015}' => out.push_str("--"),
+            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2212}' => out.push('-'),
+            '\u{2192}' | '\u{27f6}' => out.push_str("->"),
+            '\u{2190}' => out.push_str("<-"),
+            '\u{2194}' => out.push_str("<->"),
+            '\u{21d2}' => out.push_str("=>"),
+            '\u{2026}' => out.push_str("..."),
+            '\u{00b7}' | '\u{2022}' | '\u{2219}' => out.push('*'),
+            '\u{201c}' | '\u{201d}' | '\u{201e}' => out.push('"'),
+            '\u{2018}' | '\u{2019}' | '\u{201a}' => out.push('\''),
+            '\u{00d7}' => out.push('x'),
+            '\u{2265}' => out.push_str(">="),
+            '\u{2264}' => out.push_str("<="),
+            '\u{2260}' => out.push_str("!="),
+            '\u{2248}' => out.push('~'),
+            '\u{2713}' | '\u{2714}' => out.push_str("[ok]"),
+            '\u{00a0}' | '\u{202f}' => out.push(' '),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 fn clock(time: &str) -> &str {
     time.get(11..16).unwrap_or("")
 }
@@ -1893,7 +1932,7 @@ fn chat_spans(notes: &VecDeque<ChatNote>, scroll: usize, cap: usize) -> Vec<(Str
         let first = n.to.split([',', ' ']).find(|p| !p.is_empty()).map(feed::seat_id).unwrap_or_default();
         let to_colour = if first == "all" { Color::srgb(0.8, 0.82, 0.9) } else { seat_colour(&first, 1.0) };
         out.push((to_label(&n.to), to_colour));
-        let mut text: String = n.text.chars().take(1500).collect();
+        let mut text: String = plain(&n.text).chars().take(1500).collect();
         if n.text.chars().count() > 1500 {
             text.push_str("...");
         }
@@ -1920,7 +1959,7 @@ fn draw_chat(
     real: Res<Time<Real>>,
     mut panels: Query<(&mut Transform, &mut Visibility, Option<&ChatHeader>), Or<(With<ChatPanel>, With<ChatHeader>)>>,
     mut log: Query<(Entity, &mut Transform, &mut TextBounds, &mut Visibility, &mut TextFont), (With<ChatLog>, Without<ChatPanel>, Without<ChatHeader>, Without<ChatLine>)>,
-    mut line: Query<(&mut Text2d, &mut Transform, &mut TextBounds, &mut Visibility), (With<ChatLine>, Without<ChatPanel>, Without<ChatHeader>, Without<ChatLog>, Without<ChatStatus>, Without<ChatTitle>)>,
+    mut line: Query<(&mut Text2d, &mut Transform, &mut TextBounds, &mut Visibility, &TextLayoutInfo), (With<ChatLine>, Without<ChatPanel>, Without<ChatHeader>, Without<ChatLog>, Without<ChatStatus>, Without<ChatTitle>)>,
     mut status: Query<(&mut Text2d, &mut TextColor, &mut Transform, &mut Visibility), (With<ChatStatus>, Without<ChatPanel>, Without<ChatHeader>, Without<ChatLog>, Without<ChatLine>, Without<ChatTitle>)>,
     mut title: Query<(&mut Text2d, &mut Transform, &mut Visibility), (With<ChatTitle>, Without<ChatPanel>, Without<ChatHeader>, Without<ChatLog>, Without<ChatLine>, Without<ChatStatus>)>,
 ) {
@@ -1932,7 +1971,14 @@ fn draw_chat(
     let pad = 14.0;
     let inner = (layout.panel - pad * 2.0).max(50.0);
     let header_h = 38.0;
-    let input_h = 64.0;
+    // A long draft wraps upward: the status line and the notes sit above it.
+    let line_h = line
+        .iter()
+        .next()
+        .map(|(.., info)| info.size.y / info.scale_factor.max(0.1))
+        .filter(|y| *y > 1.0)
+        .unwrap_or(20.0);
+    let input_h = line_h + 46.0;
     let bottom = -h * 0.5;
     let top = h * 0.5;
 
@@ -1981,7 +2027,7 @@ fn draw_chat(
 
     let now = real.elapsed_secs();
     let blink = (now * 2.0) as i64 % 2 == 0;
-    for (mut text, mut tf, mut bounds, mut v) in &mut line {
+    for (mut text, mut tf, mut bounds, mut v, _) in &mut line {
         *v = vis;
         let t = if chat.input.is_empty() && !chat.focus {
             "> Enter or Tab to type a note".to_string()
@@ -2016,7 +2062,7 @@ fn draw_chat(
             text.0 = t;
         }
         colour.0 = if err { Color::srgb(1.0, 0.45, 0.4) } else { Color::srgb(0.5, 0.56, 0.68) };
-        tf.translation = Vec3::new(left + pad, bottom + 42.0, 10.0);
+        tf.translation = Vec3::new(left + pad, bottom + 12.0 + line_h + 8.0, 10.0);
     }
 }
 
@@ -2224,6 +2270,12 @@ mod tests {
         // A steady typist (5 keys a second) out-runs the drain (0.05 a second).
         let cfg = mods::TypingCfg::default();
         assert!(5.0 * cfg.kick > cfg.decay);
+    }
+
+    #[test]
+    fn notes_lose_the_glyphs_the_font_lacks() {
+        assert_eq!(plain("on \u{2014} off \u{2192} done\u{2026} \u{201c}ok\u{201d}"), "on -- off -> done... \"ok\"");
+        assert_eq!(plain("plain ascii stays"), "plain ascii stays");
     }
 
     #[test]
