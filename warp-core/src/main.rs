@@ -1759,19 +1759,16 @@ fn glow_seats(
         );
         for child in children.iter() {
             if let Ok(mut text) = labels.get_mut(child) {
-                // A seat with a logo wears it instead of its name (Y, 04:42).
-                let mut line = if logos.0.contains_key(&node.name) {
-                    seat.shown.clone()
-                } else {
-                    format!("{}\n{}", label_for(&node.name), seat.shown)
-                };
-                if seat.waiting > 0 {
-                    line.push_str(&format!(" | {} waiting", seat.waiting));
+                // No text on the planets (Y, 05:20): a seat with a logo
+                // wears it instead of its name (04:42), and its state and
+                // waiting notes show in how it looks. Only a seat with no
+                // logo keeps its name, and a mod's own labels still show.
+                let mut lines: Vec<String> = Vec::new();
+                if !logos.0.contains_key(&node.name) {
+                    lines.push(label_for(&node.name));
                 }
-                for l in &look.labels {
-                    line.push('\n');
-                    line.push_str(l);
-                }
+                lines.extend(look.labels.iter().cloned());
+                let line = lines.join("\n");
                 if text.0 != line {
                     text.0 = line;
                 }
