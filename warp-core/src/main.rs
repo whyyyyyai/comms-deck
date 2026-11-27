@@ -13,22 +13,36 @@
 //! drawn. Save one and it changes on screen; a broken edit is refused and
 //! the HUD says why (mods.rs).
 //!
-//! It only reads what the service writes (feed.rs), so closing it changes
-//! nothing, and the terminal deck keeps working without it.
+//! The chat panel on the right shows the notes and has a chat box that
+//! sends as Y (chat.rs), the one thing the warp core does rather than reads.
+//! Everything else only reads what the service writes (feed.rs), so closing
+//! it changes nothing, and the terminal deck, chat included, keeps working
+//! without it. The stars take the crew's colours in proportion to how their
+//! context is split.
 //!
-//! Mouse: hover a seat for its details, click it to focus its traffic, click
-//! empty space to clear. Keys: 1-9 focus a seat, 0 clears; h HUD, c fuel
-//! rings, m moons, f freeze, r reload mods, Space a test broadcast, Esc or
-//! q quits.
+//! Mouse: hover a seat for its details, click it to focus its traffic and
+//! address the chat box to it, click empty space to clear; the wheel over the
+//! panel scrolls the notes. Keys while typing: Enter sends, Esc clears (again
+//! to leave the box), Ctrl+U/W/V clear, delete a word, paste; Tab or Esc on
+//! an empty line hands the keys to the ring: 1-9 focus a seat, 0 clears, h
+//! HUD, c fuel rings, m moons, f freeze, r reload mods, Space a test
+//! broadcast, PgUp/PgDn scroll, Enter or Tab back to the box, q quits.
+//! Ctrl+Q quits from either.
 //!
 //! Written by: claude
 
+mod chat;
 mod feed;
 mod mods;
 
 use bevy::{
     asset::uuid_handle,
     core_pipeline::tonemapping::{DebandDither, Tonemapping},
+    input::{
+        keyboard::{Key, KeyboardInput},
+        mouse::MouseWheel,
+    },
+    text::TextBounds,
     post_process::bloom::Bloom,
     prelude::*,
     reflect::TypePath,
@@ -38,7 +52,7 @@ use bevy::{
     sprite_render::{AlphaMode2d, Material2d, Material2dPlugin},
     winit::{UpdateMode, WinitSettings},
 };
-use feed::{Msg, NoteInfo, SeatInfo};
+use feed::{ChatNote, Msg, NoteInfo, SeatInfo};
 use mods::{Config, Rule, Val};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{mpsc, Mutex};
@@ -60,6 +74,8 @@ fn main() {
         .insert_resource(Mods::default())
         .insert_resource(View::default())
         .insert_resource(Looks::default())
+        .insert_resource(Chat::default())
+        .insert_resource(Layout::default())
         .insert_resource(Rng(0x9E37_79B9_7F4A_7C15))
         // 30 fps until the mods say otherwise ([look] fps): it is a display,
         // not a game, and half the CPU of drawing at the refresh rate.
@@ -81,21 +97,22 @@ fn main() {
         .add_systems(
             Update,
             (
-                watch_mods,
-                read_feed,
-                apply_rules,
-                layout_seats,
-                pointer,
-                glow_seats,
-                draw_rings,
-                pulse_core,
-                fly_comets,
-                move_stars,
-                draw_links,
-                draw_moons_and_marks,
-                hud,
-                tooltip,
-                keys,
+                (watch_mods, read_feed, layout_view, apply_rules, layout_seats, pointer, chat_input, keys).chain(),
+                (
+                    glow_seats,
+                    draw_rings,
+                    pulse_core,
+                    fly_comets,
+                    move_stars,
+                    colour_stars,
+                    draw_links,
+                    draw_moons_and_marks,
+                    hud,
+                    tooltip,
+                    chat_results,
+                    draw_chat,
+                )
+                    .chain(),
             )
                 .chain(),
         )
@@ -261,6 +278,93 @@ impl Default for SeatLook {
 #[derive(Resource, Default)]
 struct Looks(HashMap<String, SeatLook>);
 
+/// Where things go this frame: the scene (ring, core, HUD) on the left, the
+/// chat panel on the right. World x runs -scene.x/2 .. scene.x/2 + panel.
+#[derive(Resource, Default)]
+struct Layout {
+    scene: Vec2,
+    panel: f32,
+}
+
+impl Layout {
+    fn half(&self) -> Vec2 {
+        self.scene * 0.5
+    }
+    /// Is this world point over the chat panel?
+    fn in_panel(&self, p: Vec2) -> bool {
+        self.panel > 0.0 && p.x > self.scene.x * 0.5
+    }
+}
+
+/// The panel's width for a window: a share of it, kept readable.
+fn panel_width(window_w: f32, cfg: &mods::ChatCfg) -> f32 {
+    if !cfg.show {
+        return 0.0;
+    }
+    (window_w * cfg.width).clamp(300.0, 600.0).min(window_w * 0.6)
+}
+
+type SendResult = (String, Result<String, String>);
+
+/// The chat panel: the notes, the line being typed, and sends in flight.
+#[derive(Resource)]
+struct Chat {
+    notes: VecDeque<ChatNote>,
+    input: String,
+    /// True: keys go to the chat box. False: they drive the ring.
+    focus: bool,
+    /// How many notes back from the newest the panel is scrolled.
+    scroll: usize,
+    /// The last send's outcome (text, is_error, real time).
+    status: Option<(String, bool, f32)>,
+    sending: usize,
+    tx: mpsc::Sender<SendResult>,
+    rx: Mutex<mpsc::Receiver<SendResult>>,
+    /// The notes need laying out again.
+    dirty: bool,
+    drawn_width: f32,
+}
+
+impl Default for Chat {
+    fn default() -> Self {
+        let (tx, rx) = mpsc::channel();
+        Chat {
+            notes: VecDeque::new(),
+            input: String::new(),
+            focus: true,
+            scroll: 0,
+            status: None,
+            sending: 0,
+            tx,
+            rx: Mutex::new(rx),
+            dirty: true,
+            drawn_width: 0.0,
+        }
+    }
+}
+
+#[derive(Component)]
+struct ChatPanel;
+#[derive(Component)]
+struct ChatHeader;
+#[derive(Component)]
+struct ChatTitle;
+#[derive(Component)]
+struct ChatLog;
+#[derive(Component)]
+struct ChatLine;
+#[derive(Component)]
+struct ChatStatus;
+
+/// The default star material and one per seat, for colouring by context.
+#[derive(Resource)]
+struct StarMats {
+    default: Handle<ColorMaterial>,
+    seats: HashMap<String, Handle<ColorMaterial>>,
+    /// What the stars were last coloured for, so they're only redone on change.
+    key: String,
+}
+
 /// A tiny xorshift: the stars need scatter, not cryptography.
 #[derive(Resource)]
 struct Rng(u64);
@@ -310,6 +414,8 @@ struct Star {
     dir: Vec2,
     dist: f32,
     speed: f32,
+    /// 0..1, fixed: which seat's share of the sky this star falls in.
+    slot: f32,
 }
 
 #[derive(Component)]
@@ -555,7 +661,7 @@ fn setup(
         let a = rng.next() * std::f32::consts::TAU;
         let dir = Vec2::from_angle(a);
         commands.spawn((
-            Star { dir, dist: 40.0 + rng.next() * 1400.0, speed: 0.4 + rng.next() * 1.2 },
+            Star { dir, dist: 40.0 + rng.next() * 1400.0, speed: 0.4 + rng.next() * 1.2, slot: rng.next() },
             Mesh2d(assets.star.clone()),
             MeshMaterial2d(star_mat.clone()),
             Transform::from_xyz(0.0, 0.0, 0.0),
@@ -588,6 +694,47 @@ fn setup(
         Visibility::Hidden,
     ));
 
+    // The chat panel: a dark column, a header that hides notes scrolled
+    // past the top, the notes, the status line and the chat box.
+    let panel_bg = materials.add(Color::srgb(0.028, 0.032, 0.058));
+    commands.spawn((ChatPanel, Mesh2d(assets.quad.clone()), MeshMaterial2d(panel_bg.clone()), Transform::from_xyz(0.0, 0.0, 7.0)));
+    commands.spawn((ChatHeader, Mesh2d(assets.quad.clone()), MeshMaterial2d(panel_bg), Transform::from_xyz(0.0, 0.0, 9.0)));
+    commands.spawn((
+        ChatTitle,
+        Text2d::new("COMMS"),
+        TextFont { font_size: FontSize::Px(14.0), ..default() },
+        TextColor(Color::srgb(0.55, 0.65, 0.8)),
+        Anchor::TOP_LEFT,
+        Transform::from_xyz(0.0, 0.0, 10.0),
+    ));
+    commands.spawn((
+        ChatLog,
+        Text2d::new(""),
+        TextFont { font_size: FontSize::Px(14.0), ..default() },
+        TextColor(Color::srgb(0.85, 0.88, 0.95)),
+        TextBounds::new_horizontal(300.0),
+        Anchor::BOTTOM_LEFT,
+        Transform::from_xyz(0.0, 0.0, 8.0),
+    ));
+    commands.spawn((
+        ChatStatus,
+        Text2d::new(""),
+        TextFont { font_size: FontSize::Px(13.0), ..default() },
+        TextColor(Color::srgb(0.5, 0.56, 0.68)),
+        Anchor::BOTTOM_LEFT,
+        Transform::from_xyz(0.0, 0.0, 10.0),
+    ));
+    commands.spawn((
+        ChatLine,
+        Text2d::new(""),
+        TextFont { font_size: FontSize::Px(15.0), ..default() },
+        TextColor(Color::srgb(0.95, 0.95, 1.0)),
+        TextBounds::new_horizontal(300.0),
+        Anchor::BOTTOM_LEFT,
+        Transform::from_xyz(0.0, 0.0, 10.0),
+    ));
+
+    commands.insert_resource(StarMats { default: star_mat, seats: HashMap::new(), key: String::new() });
     commands.insert_resource(assets);
 }
 
@@ -603,8 +750,9 @@ fn watch_mods(
     mut clear: ResMut<ClearColor>,
     mut winit: ResMut<WinitSettings>,
     mut bloom: Query<&mut Bloom>,
-    mut stars: Query<&MeshMaterial2d<ColorMaterial>, With<Star>>,
+    star_mats: Option<Res<StarMats>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
+    mut chat: ResMut<Chat>,
 ) {
     let now = time.elapsed_secs();
     m.since_check += time.delta_secs();
@@ -633,11 +781,12 @@ fn watch_mods(
                     b.intensity = c.look.bloom;
                 }
                 let sc = c.stars.colour;
-                if let Some(mat) = stars.iter_mut().next() {
-                    if let Some(mut mm) = materials.get_mut(&mat.0) {
+                if let Some(sm) = &star_mats {
+                    if let Some(mut mm) = materials.get_mut(&sm.default) {
                         mm.color = Color::linear_rgb(sc[0], sc[1], sc[2]);
                     }
                 }
+                chat.dirty = true;
             }
             Err(e) => {
                 eprintln!("warp-core: warp-core.toml refused:\n{e}");
@@ -683,7 +832,7 @@ fn watch_mods(
 
 // ---------------------------------------------------------------- systems
 
-fn read_feed(feed: Res<Feed>, mut deck: ResMut<Deck>, mods: Res<Mods>, time: Res<Time>) {
+fn read_feed(feed: Res<Feed>, mut deck: ResMut<Deck>, mut chat: ResMut<Chat>, mods: Res<Mods>, time: Res<Time>) {
     let now = time.elapsed_secs();
     let Ok(rx) = feed.0.lock() else { return };
     while let Ok(msg) = rx.try_recv() {
@@ -693,6 +842,16 @@ fn read_feed(feed: Res<Feed>, mut deck: ResMut<Deck>, mods: Res<Mods>, time: Res
                 deck.problem = None;
             }
             Msg::Problem(p) => deck.problem = Some(p),
+            Msg::Chat(n) => {
+                chat.notes.push_back(n);
+                let over = chat.notes.len().saturating_sub(mods.cfg.chat.keep.max(10));
+                chat.notes.drain(..over);
+                // Scrolled back: stay on the same notes as new ones arrive.
+                if chat.scroll > 0 {
+                    chat.scroll += 1;
+                }
+                chat.dirty = true;
+            }
             Msg::Note(n) => {
                 deck.arrivals.push_back(now);
                 deck.history.push_front(Seen { at: now, from: n.from.clone(), to: n.to.clone(), all: n.all });
@@ -754,6 +913,28 @@ fn window_size(windows: &Query<&Window>) -> Vec2 {
     windows.iter().next().map(|w| w.size()).unwrap_or(Vec2::new(1280.0, 800.0))
 }
 
+/// Splits the window into the scene and the chat panel, and moves the
+/// camera so the core sits in the middle of the scene.
+fn layout_view(
+    windows: Query<&Window>,
+    mods: Res<Mods>,
+    mut layout: ResMut<Layout>,
+    mut chat: ResMut<Chat>,
+    mut camera: Query<&mut Transform, With<Camera2d>>,
+) {
+    let w = window_size(&windows);
+    let panel = panel_width(w.x, &mods.cfg.chat);
+    layout.scene = Vec2::new(w.x - panel, w.y);
+    layout.panel = panel;
+    if (chat.drawn_width - panel).abs() > 0.5 {
+        chat.drawn_width = panel;
+        chat.dirty = true;
+    }
+    for mut tf in &mut camera {
+        tf.translation.x = panel * 0.5;
+    }
+}
+
 /// Builds the ring when the seat list changes, and keeps it fitted to the
 /// window when that is resized.
 #[allow(clippy::too_many_arguments)]
@@ -764,7 +945,7 @@ fn layout_seats(
     assets: Res<Assets2d>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut rings: ResMut<Assets<RingMaterial>>,
-    windows: Query<&Window>,
+    layout: Res<Layout>,
     time: Res<Time>,
     mut nodes: Query<(Entity, &mut SeatNode, &mut Transform)>,
 ) {
@@ -772,7 +953,7 @@ fn layout_seats(
     let warp = deck.warp;
     deck.orbit = (deck.orbit + time.delta_secs() * orbit_speed(&mods.cfg.orbit, pace, warp)) % std::f32::consts::TAU;
     let names: Vec<String> = deck.seats.iter().filter(|s| s.online()).map(|s| s.name.clone()).collect();
-    let pos = ring_positions(&names, window_size(&windows), deck.orbit);
+    let pos = ring_positions(&names, layout.scene, deck.orbit);
     if names != deck.built {
         for (e, _, _) in &nodes {
             commands.entity(e).despawn();
@@ -827,17 +1008,38 @@ fn layout_seats(
 }
 
 /// The seat under the pointer, and clicks to focus one.
+#[allow(clippy::too_many_arguments)]
 fn pointer(
     mut deck: ResMut<Deck>,
+    mut chat: ResMut<Chat>,
+    layout: Res<Layout>,
     windows: Query<&Window>,
     cameras: Query<(&Camera, &GlobalTransform)>,
     mouse: Res<ButtonInput<MouseButton>>,
+    mut wheel: MessageReader<MouseWheel>,
     nodes: Query<(&SeatNode, &GlobalTransform)>,
 ) {
     let world = windows.iter().next().and_then(|w| w.cursor_position()).and_then(|c| {
         let (cam, tf) = cameras.iter().next()?;
         cam.viewport_to_world_2d(tf, c).ok()
     });
+    let over_panel = world.is_some_and(|w| layout.in_panel(w));
+    // The wheel over the panel scrolls the notes, a note a notch.
+    for ev in wheel.read() {
+        if over_panel {
+            let n = chat.notes.len().saturating_sub(1);
+            chat.scroll = if ev.y > 0.0 { (chat.scroll + 1).min(n) } else { chat.scroll.saturating_sub(1) };
+            chat.dirty = true;
+        }
+    }
+    if over_panel {
+        deck.cursor = None;
+        deck.hover = None;
+        if mouse.just_pressed(MouseButton::Left) {
+            chat.focus = true;
+        }
+        return;
+    }
     deck.cursor = world;
     deck.hover = world.and_then(|w| {
         nodes
@@ -853,6 +1055,11 @@ fn pointer(
             (Some(h), _) => Some(h.clone()),
             (None, _) => None,
         };
+        // Clicking a seat also addresses the chat box to it.
+        if let Some(h) = deck.hover.clone().filter(|h| h != "owner") {
+            chat.input = chat::address(&chat.input, &h);
+            chat.focus = true;
+        }
     }
 }
 
@@ -1188,12 +1395,14 @@ fn move_stars(
     deck: Res<Deck>,
     mods: Res<Mods>,
     time: Res<Time>,
+    layout: Res<Layout>,
     windows: Query<&Window>,
     mut rng: ResMut<Rng>,
     mut stars: Query<(&mut Star, &mut Transform)>,
 ) {
     let sc = &mods.cfg.stars;
-    let half = window_size(&windows) * 0.5;
+    // The sky fills the whole window (the panel covers its right side).
+    let half = Vec2::new(layout.scene.x * 0.5 + layout.panel, window_size(&windows).y * 0.5);
     let reach = half.length() + 20.0;
     let pace = (deck.notes_last(time.elapsed_secs(), 600.0) as f32).min(30.0);
     let speed = sc.speed + pace * 2.0 + deck.warp * sc.warp_speed;
@@ -1221,11 +1430,11 @@ fn hud(
     time: Res<Time>,
     real: Res<Time<Real>>,
     vtime: Res<Time<Virtual>>,
-    windows: Query<&Window>,
+    layout: Res<Layout>,
     mut hud: Query<(&mut Text2d, &mut Transform), (With<Hud>, Without<Dock>)>,
     mut dock: Query<(&mut Text2d, &mut Transform, &mut Visibility), (With<Dock>, Without<Hud>)>,
 ) {
-    let half = window_size(&windows) * 0.5;
+    let half = layout.half();
     let now = time.elapsed_secs();
     let online: Vec<_> = deck.seats.iter().filter(|s| s.online()).collect();
     let busy = online.iter().filter(|s| s.shown == "busy").count();
@@ -1248,6 +1457,12 @@ fn hud(
         }
         if let Some(f) = &deck.focus {
             line.push_str(&format!("    * {} (click empty space to clear)", label_for(f)));
+        }
+        let shares = context_shares(&deck.seats);
+        if mods.cfg.stars.by_context && !shares.is_empty() {
+            let split: Vec<String> =
+                shares.iter().map(|(n, s)| format!("{} {:.0}%", label_for(n), s * 100.0)).collect();
+            line.push_str(&format!("\nstars = context: {}", split.join(" | ")));
         }
         if let Some(p) = &deck.problem {
             line.push_str(&format!("\n{p}"));
@@ -1341,10 +1556,10 @@ fn hover_card(deck: &Deck, name: &str, now: f32) -> Option<String> {
 fn tooltip(
     deck: Res<Deck>,
     time: Res<Time>,
-    windows: Query<&Window>,
+    layout: Res<Layout>,
     mut tip: Query<(&mut Text2d, &mut Transform, &mut Visibility, &mut Anchor), With<Tooltip>>,
 ) {
-    let half = window_size(&windows) * 0.5;
+    let half = layout.half();
     let card = deck.hover.as_deref().and_then(|h| hover_card(&deck, h, time.elapsed_secs()));
     for (mut text, mut tf, mut vis, mut anchor) in &mut tip {
         let (Some(card), Some(at)) = (card.as_ref(), deck.cursor) else {
@@ -1371,13 +1586,23 @@ fn tooltip(
 
 fn keys(
     keys: Res<ButtonInput<KeyCode>>,
+    chat: Res<Chat>,
     mut deck: ResMut<Deck>,
     mut mods: ResMut<Mods>,
     mut view: ResMut<View>,
     mut vtime: ResMut<Time<Virtual>>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    if keys.just_pressed(KeyCode::Escape) || keys.just_pressed(KeyCode::KeyQ) {
+    let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    if ctrl && keys.just_pressed(KeyCode::KeyQ) {
+        exit.write(AppExit::Success);
+    }
+    // While the chat box has the keys, letters are typing, not commands.
+    // (Esc no longer quits: it clears the chat box.)
+    if chat.focus {
+        return;
+    }
+    if keys.just_pressed(KeyCode::KeyQ) {
         exit.write(AppExit::Success);
     }
     if keys.just_pressed(KeyCode::Space) {
@@ -1416,6 +1641,361 @@ fn keys(
     }
     if keys.just_pressed(KeyCode::Digit0) {
         deck.focus = None;
+    }
+}
+
+// ---------------------------------------------------------------- stars by context
+
+/// Each seat's share of the crew's context tokens, in the service's order;
+/// seats without a figure are left out (as in the deck's split).
+fn context_shares(seats: &[SeatInfo]) -> Vec<(String, f32)> {
+    let have: Vec<(&str, f64)> =
+        seats.iter().filter_map(|s| s.ctx_tokens.filter(|t| *t > 0.0).map(|t| (s.name.as_str(), t))).collect();
+    let total: f64 = have.iter().map(|(_, t)| t).sum();
+    if total <= 0.0 {
+        return Vec::new();
+    }
+    have.into_iter().map(|(n, t)| (n.to_string(), (t / total) as f32)).collect()
+}
+
+/// Which seat a star's slot (0..1) falls to, walking the shares in order.
+fn seat_for_slot(shares: &[(String, f32)], slot: f32) -> Option<&str> {
+    let mut edge = 0.0;
+    for (name, share) in shares {
+        edge += share;
+        if slot < edge {
+            return Some(name);
+        }
+    }
+    shares.last().map(|(n, _)| n.as_str())
+}
+
+/// Gives each star the colour of the seat whose share of the context its
+/// slot falls in, so the sky is split the way the crew's context is.
+fn colour_stars(
+    deck: Res<Deck>,
+    mods: Res<Mods>,
+    mut mats: ResMut<StarMats>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    mut stars: Query<(&Star, &mut MeshMaterial2d<ColorMaterial>)>,
+) {
+    let sc = &mods.cfg.stars;
+    let shares = if sc.by_context { context_shares(&deck.seats) } else { Vec::new() };
+    let key = format!(
+        "{}|{:?}",
+        sc.context_bright,
+        shares.iter().map(|(n, s)| format!("{n}:{:.3}", s)).collect::<Vec<_>>()
+    );
+    if key == mats.key {
+        return;
+    }
+    mats.key = key;
+    for (name, _) in &shares {
+        let colour = seat_colour(name, sc.context_bright);
+        match mats.seats.get(name) {
+            Some(h) => {
+                if let Some(mut m) = materials.get_mut(h) {
+                    m.color = colour;
+                }
+            }
+            None => {
+                let h = materials.add(colour);
+                mats.seats.insert(name.clone(), h);
+            }
+        }
+    }
+    for (star, mut mat) in &mut stars {
+        let want = seat_for_slot(&shares, star.slot)
+            .and_then(|n| mats.seats.get(n))
+            .unwrap_or(&mats.default)
+            .clone();
+        if mat.0 != want {
+            mat.0 = want;
+        }
+    }
+}
+
+// ---------------------------------------------------------------- chat
+
+/// Typing in the chat box, and the keys that move between it and the ring.
+fn chat_input(
+    mut chat: ResMut<Chat>,
+    deck: Res<Deck>,
+    real: Res<Time<Real>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut events: MessageReader<KeyboardInput>,
+) {
+    let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    let n = chat.notes.len().saturating_sub(1);
+    for ev in events.read() {
+        if !ev.state.is_pressed() {
+            continue;
+        }
+        // Scrolling works from either side.
+        match ev.key_code {
+            KeyCode::PageUp => {
+                chat.scroll = (chat.scroll + 5).min(n);
+                chat.dirty = true;
+                continue;
+            }
+            KeyCode::PageDown => {
+                chat.scroll = chat.scroll.saturating_sub(5);
+                chat.dirty = true;
+                continue;
+            }
+            _ => {}
+        }
+        if !chat.focus {
+            // On the ring: Enter, Tab or @ come back to the box.
+            let at = matches!(&ev.logical_key, Key::Character(c) if c.as_str() == "@");
+            if matches!(ev.logical_key, Key::Enter | Key::Tab) || at {
+                chat.focus = true;
+                if at {
+                    chat.input.push('@');
+                }
+            }
+            continue;
+        }
+        match &ev.logical_key {
+            Key::Enter if !ev.repeat => send_line(&mut chat, &deck, real.elapsed_secs()),
+            Key::Escape => {
+                if chat.input.is_empty() {
+                    chat.focus = false;
+                } else {
+                    chat.input.clear();
+                }
+            }
+            Key::Tab => chat.focus = false,
+            Key::Backspace if ctrl => chat.input = chat::drop_word(&chat.input),
+            Key::Backspace => {
+                chat.input.pop();
+            }
+            Key::Insert if shift => {
+                let p = chat::paste();
+                chat.input.push_str(&p);
+            }
+            Key::Character(c) if ctrl => match c.to_lowercase().as_str() {
+                "u" => chat.input.clear(),
+                "w" => chat.input = chat::drop_word(&chat.input),
+                "v" => {
+                    let p = chat::paste();
+                    chat.input.push_str(&p);
+                }
+                _ => {}
+            },
+            _ => {
+                if let Some(text) = &ev.text {
+                    if !ctrl {
+                        let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+                        chat.input.push_str(&clean);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Routes the line and sends it on its own thread; the outcome comes back
+/// through `chat.rx`. A line that doesn't route stays in the box.
+fn send_line(chat: &mut Chat, deck: &Deck, now: f32) {
+    let text = chat.input.trim().to_string();
+    if text.is_empty() {
+        return;
+    }
+    let seats: Vec<String> = deck.seats.iter().map(|s| s.name.clone()).collect();
+    match chat::route(&text, &seats) {
+        Err(e) => chat.status = Some((e, true, now)),
+        Ok(to) => {
+            chat.input.clear();
+            chat.scroll = 0;
+            chat.sending += 1;
+            chat.status = Some((format!("sending to {to}..."), false, now));
+            let tx = chat.tx.clone();
+            std::thread::spawn(move || {
+                let r = chat::send(&to, &text);
+                let _ = tx.send((text, r));
+            });
+        }
+    }
+}
+
+fn chat_results(mut chat: ResMut<Chat>, real: Res<Time<Real>>) {
+    let now = real.elapsed_secs();
+    let got: Vec<SendResult> = match chat.rx.lock() {
+        Ok(rx) => rx.try_iter().collect(),
+        Err(_) => return,
+    };
+    for (text, r) in got {
+        chat.sending = chat.sending.saturating_sub(1);
+        match r {
+            Ok(say) => {
+                let say = if say.is_empty() { "sent".to_string() } else { feed::scrub(&say) };
+                chat.status = Some((say, false, now));
+            }
+            Err(e) => {
+                chat.status = Some((format!("not sent: {}", feed::scrub(&e)), true, now));
+                // Nothing typed is lost: a failed line comes back to the box.
+                if chat.input.is_empty() {
+                    chat.input = text;
+                }
+            }
+        }
+    }
+}
+
+fn clock(time: &str) -> &str {
+    time.get(11..16).unwrap_or("")
+}
+
+fn to_label(to: &str) -> String {
+    to.split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|p| !p.is_empty())
+        .map(|p| if p.starts_with('-') { p.to_string() } else { label_for(&feed::seat_id(p)) })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The panel's spans for the notes shown: newest last, `scroll` notes back.
+fn chat_spans(notes: &VecDeque<ChatNote>, scroll: usize, cap: usize) -> Vec<(String, Color)> {
+    let end = notes.len().saturating_sub(scroll);
+    let start = end.saturating_sub(cap);
+    let dim = Color::srgb(0.42, 0.47, 0.58);
+    let mut out = Vec::new();
+    for (i, n) in notes.range(start..end).enumerate() {
+        if i > 0 {
+            out.push(("\n".to_string(), dim));
+        }
+        out.push((format!("{} ", clock(&n.time)), dim));
+        out.push((label_for(&n.from), seat_colour(&n.from, 1.1)));
+        out.push((" -> ".into(), dim));
+        let first = n.to.split([',', ' ']).find(|p| !p.is_empty()).map(feed::seat_id).unwrap_or_default();
+        let to_colour = if first == "all" { Color::srgb(0.8, 0.82, 0.9) } else { seat_colour(&first, 1.0) };
+        out.push((to_label(&n.to), to_colour));
+        let mut text: String = n.text.chars().take(1500).collect();
+        if n.text.chars().count() > 1500 {
+            text.push_str("...");
+        }
+        if n.quiet {
+            out.push(("  (quiet) ".into(), dim));
+            out.push((text, Color::srgb(0.6, 0.64, 0.72)));
+        } else {
+            out.push(("  ".into(), dim));
+            out.push((text, Color::srgb(0.88, 0.9, 0.96)));
+        }
+    }
+    out
+}
+
+/// Lays out the panel each frame, and rebuilds the note spans when they
+/// changed.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+fn draw_chat(
+    mut commands: Commands,
+    mut chat: ResMut<Chat>,
+    deck: Res<Deck>,
+    mods: Res<Mods>,
+    layout: Res<Layout>,
+    real: Res<Time<Real>>,
+    mut panels: Query<(&mut Transform, &mut Visibility, Option<&ChatHeader>), Or<(With<ChatPanel>, With<ChatHeader>)>>,
+    mut log: Query<(Entity, &mut Transform, &mut TextBounds, &mut Visibility, &mut TextFont), (With<ChatLog>, Without<ChatPanel>, Without<ChatHeader>, Without<ChatLine>)>,
+    mut line: Query<(&mut Text2d, &mut Transform, &mut TextBounds, &mut Visibility), (With<ChatLine>, Without<ChatPanel>, Without<ChatHeader>, Without<ChatLog>, Without<ChatStatus>, Without<ChatTitle>)>,
+    mut status: Query<(&mut Text2d, &mut TextColor, &mut Transform, &mut Visibility), (With<ChatStatus>, Without<ChatPanel>, Without<ChatHeader>, Without<ChatLog>, Without<ChatLine>, Without<ChatTitle>)>,
+    mut title: Query<(&mut Text2d, &mut Transform, &mut Visibility), (With<ChatTitle>, Without<ChatPanel>, Without<ChatHeader>, Without<ChatLog>, Without<ChatLine>, Without<ChatStatus>)>,
+) {
+    let cfg = &mods.cfg.chat;
+    let show = layout.panel > 0.0;
+    let vis = if show { Visibility::Inherited } else { Visibility::Hidden };
+    let h = layout.scene.y;
+    let left = layout.scene.x * 0.5;
+    let pad = 14.0;
+    let inner = (layout.panel - pad * 2.0).max(50.0);
+    let header_h = 38.0;
+    let input_h = 64.0;
+    let bottom = -h * 0.5;
+    let top = h * 0.5;
+
+    for (mut tf, mut v, header) in &mut panels {
+        *v = vis;
+        if header.is_some() {
+            tf.translation = Vec3::new(left + layout.panel * 0.5, top - header_h * 0.5, 9.0);
+            tf.scale = Vec3::new(layout.panel, header_h, 1.0);
+        } else {
+            tf.translation = Vec3::new(left + layout.panel * 0.5, 0.0, 7.0);
+            tf.scale = Vec3::new(layout.panel, h, 1.0);
+        }
+    }
+    for (mut text, mut tf, mut v) in &mut title {
+        *v = vis;
+        let mut t = format!("COMMS   {} notes", chat.notes.len());
+        if chat.scroll > 0 {
+            t.push_str(&format!("   (scrolled back {}, PgDn)", chat.scroll));
+        }
+        if text.0 != t {
+            text.0 = t;
+        }
+        tf.translation = Vec3::new(left + pad, top - 12.0, 10.0);
+    }
+    for (e, mut tf, mut bounds, mut v, mut font) in &mut log {
+        *v = vis;
+        tf.translation = Vec3::new(left + pad, bottom + input_h + 10.0, 8.0);
+        if bounds.width != Some(inner) {
+            bounds.width = Some(inner);
+        }
+        if font.font_size != FontSize::Px(cfg.font) {
+            font.font_size = FontSize::Px(cfg.font);
+            chat.dirty = true;
+        }
+        if chat.dirty {
+            chat.dirty = false;
+            commands.entity(e).despawn_related::<Children>();
+            let spans = chat_spans(&chat.notes, chat.scroll, 60);
+            commands.entity(e).with_children(|p| {
+                for (text, colour) in spans {
+                    p.spawn((TextSpan::new(text), TextColor(colour), TextFont { font_size: FontSize::Px(cfg.font), ..default() }));
+                }
+            });
+        }
+    }
+
+    let now = real.elapsed_secs();
+    let blink = (now * 2.0) as i64 % 2 == 0;
+    for (mut text, mut tf, mut bounds, mut v) in &mut line {
+        *v = vis;
+        let t = if chat.input.is_empty() && !chat.focus {
+            "> Enter or Tab to type a note".to_string()
+        } else if chat.input.is_empty() {
+            format!("> {}type a note: @seat to address it, none for all", if blink { "_" } else { " " })
+        } else {
+            format!("> {}{}", chat.input, if chat.focus && blink { "_" } else { " " })
+        };
+        if text.0 != t {
+            text.0 = t;
+        }
+        if bounds.width != Some(inner) {
+            bounds.width = Some(inner);
+        }
+        tf.translation = Vec3::new(left + pad, bottom + 12.0, 10.0);
+    }
+    for (mut text, mut colour, mut tf, mut v) in &mut status {
+        *v = vis;
+        let seats: Vec<String> = deck.seats.iter().map(|s| s.name.clone()).collect();
+        let fresh = chat.status.as_ref().filter(|(_, _, at)| now - at < 8.0);
+        let (t, err) = match fresh {
+            Some((msg, err, _)) => (msg.clone(), *err),
+            None if !chat.input.trim().is_empty() => match chat::route(&chat.input, &seats) {
+                Ok(to) => (format!("to: {}", to_label(&to)), false),
+                Err(e) => (e, true),
+            },
+            None if !chat.focus => ("keys drive the ring (Tab: back to typing)".into(), false),
+            None => ("Enter sends as Y | Esc clears | Tab: ring keys".into(), false),
+        };
+        let t: String = t.chars().take(120).collect();
+        if text.0 != t {
+            text.0 = t;
+        }
+        colour.0 = if err { Color::srgb(1.0, 0.45, 0.4) } else { Color::srgb(0.5, 0.56, 0.68) };
+        tf.translation = Vec3::new(left + pad, bottom + 42.0, 10.0);
     }
 }
 
@@ -1558,6 +2138,62 @@ mod tests {
         assert!(card.contains("-> Y  1m ago") && card.contains("<- claude  1m ago"));
         assert!(!card.contains("grok"), "other seats' notes aren't on it");
         assert!(hover_card(&deck, "nobody", 0.0).is_none());
+    }
+
+
+    #[test]
+    fn stars_split_the_way_the_context_does() {
+        let seat = |n: &str, t: Option<f64>| SeatInfo { name: n.into(), ctx_tokens: t, ..Default::default() };
+        let seats = [seat("claude", Some(60000.0)), seat("vibe", Some(20000.0)), seat("devin", Some(20000.0)), seat("grok", None)];
+        let shares = context_shares(&seats);
+        assert_eq!(shares.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["claude", "vibe", "devin"]);
+        assert!((shares[0].1 - 0.6).abs() < 1e-6);
+        assert_eq!(seat_for_slot(&shares, 0.1), Some("claude"));
+        assert_eq!(seat_for_slot(&shares, 0.7), Some("vibe"));
+        assert_eq!(seat_for_slot(&shares, 0.95), Some("devin"));
+        assert_eq!(seat_for_slot(&shares, 1.0), Some("devin"), "the top edge belongs to the last seat");
+        assert!(context_shares(&[seat("grok", None)]).is_empty(), "nobody reporting: plain stars");
+        assert_eq!(seat_for_slot(&[], 0.5), None);
+    }
+
+    #[test]
+    fn the_panel_keeps_a_readable_width() {
+        let cfg = mods::ChatCfg::default();
+        assert_eq!(panel_width(2000.0, &cfg), 600.0);
+        assert_eq!(panel_width(1100.0, &cfg), 352.0);
+        assert!((panel_width(400.0, &cfg) - 240.0).abs() < 0.01, "never more than 60% of a narrow window");
+        assert_eq!(panel_width(1100.0, &mods::ChatCfg { show: false, ..cfg }), 0.0);
+    }
+
+    #[test]
+    fn chat_lines_read_like_the_deck() {
+        let mut notes = VecDeque::new();
+        for (i, (from, to, quiet)) in [("claude", "all", false), ("owner", "vibe, devin", false), ("vibe", "owner", true)].iter().enumerate() {
+            notes.push_back(ChatNote {
+                from: from.to_string(),
+                to: to.to_string(),
+                time: format!("2026-11-27 03:0{i}:00"),
+                text: format!("note {i}"),
+                quiet: *quiet,
+            });
+        }
+        let text: String = chat_spans(&notes, 0, 60).into_iter().map(|(t, _)| t).collect();
+        assert_eq!(text, "03:00 claude -> all  note 0\n03:01 Y -> vibe, devin  note 1\n03:02 vibe -> Y  (quiet) note 2");
+        let back: String = chat_spans(&notes, 1, 60).into_iter().map(|(t, _)| t).collect();
+        assert!(back.ends_with("note 1"), "scrolled back one note");
+        let capped: String = chat_spans(&notes, 0, 1).into_iter().map(|(t, _)| t).collect();
+        assert_eq!(capped, "03:02 vibe -> Y  (quiet) note 2");
+    }
+
+    #[test]
+    fn a_line_that_doesnt_route_stays_in_the_box() {
+        let mut chat = Chat { input: "@nobody hi".into(), ..Default::default() };
+        let mut deck = Deck::default();
+        deck.seats.push(SeatInfo { name: "vibe".into(), ..Default::default() });
+        send_line(&mut chat, &deck, 0.0);
+        assert_eq!(chat.input, "@nobody hi");
+        assert!(chat.status.as_ref().is_some_and(|(m, err, _)| *err && m.contains("@nobody")));
+        assert_eq!(chat.sending, 0, "nothing went out");
     }
 
     #[test]

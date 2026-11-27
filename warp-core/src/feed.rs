@@ -3,6 +3,10 @@
 //! log.jsonl for the notes flying between them. Read-only, and on its own
 //! thread, so a slow `comms-deck` call never drops a frame.
 //!
+//! Note text reaches the screen only through the chat panel, under the
+//! terminal deck's rules: messages only, private ones never, and scrubbed of
+//! anything a renderer might act on. Comets carry who and when, not text.
+//!
 //! Written by: claude
 
 use serde_json::Value;
@@ -31,6 +35,8 @@ pub struct SeatInfo {
     pub ctx: Option<f64>,
     pub five_hour: Option<f64>,
     pub week: Option<f64>,
+    /// Tokens in the seat's context window, for the stars' split.
+    pub ctx_tokens: Option<f64>,
 }
 
 impl SeatInfo {
@@ -52,9 +58,22 @@ pub struct NoteInfo {
     pub len: usize,
 }
 
+/// A note for the chat panel.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ChatNote {
+    pub from: String,
+    /// As written: a seat, "all", "vibe, devin", "all -grok".
+    pub to: String,
+    /// "2026-11-27 03:04:16", the service's local time.
+    pub time: String,
+    pub text: String,
+    pub quiet: bool,
+}
+
 pub enum Msg {
     Seats(Vec<SeatInfo>),
     Note(NoteInfo),
+    Chat(ChatNote),
     Problem(String),
 }
 
@@ -153,6 +172,65 @@ pub fn parse_note(v: &Value) -> Option<NoteInfo> {
     Some(NoteInfo { from, to, all, quiet, len })
 }
 
+/// Text from agents, remote seats and Twitch strangers: drop C0/C1 controls,
+/// DEL, zero-width and bidi marks and the BOM (the deck's scrub.rs). Tabs
+/// and newlines become spaces.
+pub fn scrub(s: &str) -> String {
+    s.chars()
+        .map(|c| if c == '\n' || c == '\t' { ' ' } else { c })
+        .filter(|&c| {
+            let u = c as u32;
+            !(u < 0x20
+                || (0x7f..=0x9f).contains(&u)
+                || (0x200b..=0x200f).contains(&u)
+                || (0x202a..=0x202e).contains(&u)
+                || (0x2060..=0x2069).contains(&u)
+                || u == 0xfeff)
+        })
+        .collect()
+}
+
+/// A log line for the chat panel: the deck's rules (messages, not private).
+pub fn parse_chat(v: &Value) -> Option<ChatNote> {
+    if v.get("kind").and_then(Value::as_str) != Some("message") {
+        return None;
+    }
+    if v.get("private").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let s = |k: &str| scrub(v.get(k).and_then(Value::as_str).unwrap_or(""));
+    Some(ChatNote {
+        from: seat_id(&s("from")),
+        to: s("to"),
+        time: s("time"),
+        text: s("text"),
+        quiet: v.get("quiet").and_then(Value::as_bool).unwrap_or(false),
+    })
+}
+
+/// The last `n` chat notes already in the log, read from its tail, so the
+/// panel opens with the conversation instead of empty.
+pub fn backlog(path: &std::path::Path, n: usize) -> Vec<ChatNote> {
+    let Ok(mut f) = File::open(path) else { return Vec::new() };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = len.saturating_sub(512 * 1024);
+    if f.seek(SeekFrom::Start(start)).is_err() {
+        return Vec::new();
+    }
+    let mut buf = Vec::new();
+    if f.read_to_end(&mut buf).is_err() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines = text.lines();
+    if start > 0 {
+        lines.next(); // likely cut in half
+    }
+    let notes: Vec<ChatNote> =
+        lines.filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter_map(|v| parse_chat(&v)).collect();
+    notes[notes.len().saturating_sub(n)..].to_vec()
+}
+
 /// A seat's meters from usage/<seat>.json (the statusline shape the
 /// terminal deck reads): context, 5-hour and weekly used percentages.
 pub fn parse_usage(v: &Value) -> (Option<f64>, Option<f64>, Option<f64>) {
@@ -166,12 +244,25 @@ pub fn parse_usage(v: &Value) -> (Option<f64>, Option<f64>, Option<f64>) {
     )
 }
 
+/// Tokens in context: context_tokens when the seat reports it, else used%
+/// x window size (the deck's context_tokens); None when neither is there.
+pub fn context_tokens(v: &Value) -> Option<f64> {
+    let cw = v.get("data")?.get("context_window")?;
+    if let Some(t) = cw.get("context_tokens").and_then(Value::as_f64).filter(|t| *t > 0.0) {
+        return Some(t);
+    }
+    let pct = cw.get("used_percentage").and_then(Value::as_f64).filter(|p| *p > 0.0)?;
+    let size = cw.get("context_window_size").and_then(Value::as_f64).filter(|s| *s > 0.0)?;
+    Some(size * pct / 100.0)
+}
+
 fn add_usage(seats: &mut [SeatInfo], dir: &std::path::Path) {
     for seat in seats {
         let path = dir.join(format!("{}.json", seat.name));
         let Ok(text) = std::fs::read_to_string(&path) else { continue };
         let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
         (seat.ctx, seat.five_hour, seat.week) = parse_usage(&v);
+        seat.ctx_tokens = context_tokens(&v);
     }
 }
 
@@ -227,7 +318,13 @@ impl LogTail {
 
 /// Runs forever on its own thread; stops when the window has gone.
 pub fn run(tx: Sender<Msg>) {
-    let mut tail = LogTail::new(data_dir().join("log.jsonl"));
+    let log = data_dir().join("log.jsonl");
+    let mut tail = LogTail::new(log.clone());
+    for note in backlog(&log, 150) {
+        if tx.send(Msg::Chat(note)).is_err() {
+            return;
+        }
+    }
     let mut last_status = Instant::now() - Duration::from_secs(10);
     loop {
         if last_status.elapsed() >= Duration::from_secs(2) {
@@ -244,6 +341,11 @@ pub fn run(tx: Sender<Msg>) {
             }
         }
         for v in tail.read_new() {
+            if let Some(chat) = parse_chat(&v) {
+                if tx.send(Msg::Chat(chat)).is_err() {
+                    return;
+                }
+            }
             if let Some(note) = parse_note(&v) {
                 if tx.send(Msg::Note(note)).is_err() {
                     return;
@@ -315,6 +417,40 @@ mod tests {
     fn a_note_carries_its_length_not_its_text() {
         let n = parse_note(&json!({"kind": "message", "from": "a", "to": "b", "text": "héllo", "quiet": true})).unwrap();
         assert_eq!((n.len, n.quiet), (5, true));
+    }
+
+    #[test]
+    fn the_chat_follows_the_deck_rules() {
+        let n = parse_chat(&json!({"kind": "message", "from": "Y", "to": "vibe", "time": "2026-11-27 03:04:16",
+            "text": "hi\x1b[31m\nthere\u{202e}"})).unwrap();
+        assert_eq!((n.from.as_str(), n.text.as_str()), ("owner", "hi[31m there"));
+        assert!(parse_chat(&json!({"kind": "message", "from": "a", "to": "b", "private": true})).is_none());
+        assert!(parse_chat(&json!({"kind": "commentary", "from": "a", "to": "b"})).is_none());
+    }
+
+    #[test]
+    fn the_backlog_is_the_last_notes_in_order() {
+        let dir = std::env::temp_dir().join(format!("warp-core-backlog-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("log.jsonl");
+        let lines: String = (0..10)
+            .map(|i| format!("{{\"kind\":\"message\",\"from\":\"a\",\"to\":\"b\",\"text\":\"{i}\"}}\n"))
+            .collect();
+        std::fs::write(&path, lines).unwrap();
+        let got: Vec<String> = backlog(&path, 3).into_iter().map(|n| n.text).collect();
+        assert_eq!(got, ["7", "8", "9"]);
+        assert!(backlog(&dir.join("missing"), 3).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn context_tokens_from_either_shape() {
+        assert_eq!(context_tokens(&json!({"data": {"context_window": {"context_tokens": 5000.0}}})), Some(5000.0));
+        assert_eq!(
+            context_tokens(&json!({"data": {"context_window": {"used_percentage": 10.0, "context_window_size": 200000.0}}})),
+            Some(20000.0)
+        );
+        assert_eq!(context_tokens(&json!({"data": {}})), None);
     }
 
     #[test]

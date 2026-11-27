@@ -117,10 +117,37 @@ pub struct StarsCfg {
     pub warp_speed: f32,
     pub stretch: f32,
     pub colour: [f32; 3],
+    /// Colour the stars by how the crew's context is split: each seat gets
+    /// its share of the stars in its own colour.
+    pub by_context: bool,
+    pub context_bright: f32,
 }
 impl Default for StarsCfg {
     fn default() -> Self {
-        StarsCfg { speed: 18.0, warp_speed: 900.0, stretch: 40.0, colour: [0.9, 0.95, 1.4] }
+        StarsCfg {
+            speed: 18.0,
+            warp_speed: 900.0,
+            stretch: 40.0,
+            colour: [0.9, 0.95, 1.4],
+            by_context: true,
+            context_bright: 1.6,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ChatCfg {
+    pub show: bool,
+    /// The panel's share of the window's width (clamped to 300..600 px).
+    pub width: f32,
+    pub font: f32,
+    /// How many notes the panel keeps (older ones scroll away).
+    pub keep: usize,
+}
+impl Default for ChatCfg {
+    fn default() -> Self {
+        ChatCfg { show: true, width: 0.32, font: 14.0, keep: 200 }
     }
 }
 
@@ -272,6 +299,7 @@ pub struct Config {
     pub fuel: FuelCfg,
     pub moons: MoonsCfg,
     pub hud: HudCfg,
+    pub chat: ChatCfg,
     pub rule: Vec<RuleSpec>,
 }
 
