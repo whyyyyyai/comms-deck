@@ -78,10 +78,13 @@ pub struct Look {
     pub fps: f32,
     /// Frames a second while another window has the focus: less CPU.
     pub fps_unfocused: f32,
+    /// Frames a second while the window is hidden (in the scratchpad or on
+    /// a workspace no monitor shows): 24, so tabbing back is snappy (Y, 06:18).
+    pub fps_hidden: f32,
 }
 impl Default for Look {
     fn default() -> Self {
-        Look { background: [0.01, 0.012, 0.03], bloom: 0.28, fps: 60.0, fps_unfocused: 60.0 }
+        Look { background: [0.01, 0.012, 0.03], bloom: 0.28, fps: 60.0, fps_unfocused: 60.0, fps_hidden: 24.0 }
     }
 }
 

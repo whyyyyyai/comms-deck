@@ -667,19 +667,58 @@ fn version() -> &'static str {
 /// `watch_visibility` once a second; true until it knows otherwise.
 static VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
-/// t28: Hyprland, asked once a second, says whether the warp-core window is
-/// on a shown workspace (its scratchpad open, or its workspace active on a
-/// monitor). Hidden, the warp core draws at 1 fps instead of 30.
+/// t28: whether the warp-core window is on a shown workspace (its
+/// scratchpad open, or its workspace active on a monitor). Hidden, it draws
+/// at [look] fps_hidden. Hyprland's event socket says the moment a workspace
+/// or the scratchpad changes, so tabbing back flips to full speed within a
+/// frame (Y, 06:18: snappy); a check once a second covers anything missed.
 fn watch_visibility() {
     std::thread::Builder::new()
         .name("visibility".into())
-        .spawn(|| loop {
-            if let Some(v) = window_visible() {
-                VISIBLE.store(v, std::sync::atomic::Ordering::Relaxed);
+        .spawn(|| {
+            use std::io::{BufRead, BufReader};
+            let check = || {
+                if let Some(v) = window_visible() {
+                    VISIBLE.store(v, std::sync::atomic::Ordering::Relaxed);
+                }
+            };
+            loop {
+                check();
+                let Some(sock) = hypr_events() else {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    continue;
+                };
+                let _ = sock.set_read_timeout(Some(std::time::Duration::from_secs(1)));
+                let mut lines = BufReader::new(sock);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match lines.read_line(&mut line) {
+                        Ok(0) => break, // Hyprland went away: reconnect
+                        Ok(_) if shows_change(&line) => check(),
+                        Ok(_) => {}
+                        Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => check(),
+                        Err(_) => break,
+                    }
+                }
             }
-            std::thread::sleep(std::time::Duration::from_secs(1));
         })
         .ok();
+}
+
+fn hypr_events() -> Option<std::os::unix::net::UnixStream> {
+    let sig = std::env::var("HYPRLAND_INSTANCE_SIGNATURE").ok()?;
+    let run = std::env::var("XDG_RUNTIME_DIR").ok()?;
+    std::os::unix::net::UnixStream::connect(format!("{run}/hypr/{sig}/.socket2.sock")).ok()
+}
+
+/// Hyprland events that can show or hide a window.
+fn shows_change(line: &str) -> bool {
+    let ev = line.split(">>").next().unwrap_or("");
+    matches!(
+        ev,
+        "workspace" | "workspacev2" | "activespecial" | "activespecialv2" | "focusedmon" | "focusedmonv2" | "movewindow" | "movewindowv2" | "openwindow" | "closewindow" | "monitoradded" | "monitorremoved"
+    )
 }
 
 fn hyprctl_json(what: &str) -> Option<serde_json::Value> {
@@ -707,13 +746,14 @@ fn shown(clients: &serde_json::Value, monitors: &serde_json::Value) -> bool {
     })
 }
 
-/// Sets the frame rate each frame: the mods' fps while shown, 1 fps hidden.
+/// Sets the frame rate each frame: the mods' fps while shown, fps_hidden
+/// while hidden.
 fn pace_frames(mods: Res<Mods>, mut winit: ResMut<WinitSettings>) {
     let frame = |fps: f32| std::time::Duration::from_secs_f32(1.0 / fps.clamp(1.0, 120.0));
     let (focused, unfocused) = if VISIBLE.load(std::sync::atomic::Ordering::Relaxed) {
         (frame(mods.cfg.look.fps), frame(mods.cfg.look.fps_unfocused))
     } else {
-        (frame(1.0), frame(1.0))
+        (frame(mods.cfg.look.fps_hidden), frame(mods.cfg.look.fps_hidden))
     };
     let want = (UpdateMode::reactive(focused), UpdateMode::reactive(unfocused));
     if winit.focused_mode != want.0 || winit.unfocused_mode != want.1 {
@@ -3316,6 +3356,14 @@ mod tests {
     /// Bevy refuses, at start, two queries in one system that could touch
     /// the same component mutably (B0001): 1.32 died in a restart loop on
     /// exactly that. Initialising the systems catches it without a GPU.
+    #[test]
+    fn workspace_and_scratchpad_events_wake_the_visibility_check() {
+        assert!(shows_change("activespecial>>special:magic,DP-1\n"));
+        assert!(shows_change("workspacev2>>2,nav\n"));
+        assert!(!shows_change("activewindow>>kitty,claude\n"));
+        assert_eq!(mods::Look::default().fps_hidden, 24.0);
+    }
+
     #[test]
     fn the_systems_queries_do_not_clash() {
         let mut world = World::new();

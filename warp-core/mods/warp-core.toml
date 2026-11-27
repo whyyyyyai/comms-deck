@@ -9,8 +9,9 @@
 [look]
 background = [0.01, 0.012, 0.03]
 bloom = 0.28
-fps = 60                      # frames a second while shown: 60 at least (Y, 05:26); 1 while hidden
+fps = 60                      # frames a second while shown: 60 at least (Y, 05:26)
 fps_unfocused = 60            # the same with another window focused (Y, 05:26)
+fps_hidden = 24               # while hidden in the scratchpad: low, but tabbing back is snappy (Y, 06:18)
 
 [core]
 cool = [0.25, 0.9, 3.2]       # the core's colour when the crew has room
