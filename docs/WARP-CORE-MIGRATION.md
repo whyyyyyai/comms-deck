@@ -1,4 +1,4 @@
-# Moving the project into the warp core
+# Retiring comms-deck: moving the project into the warp core
 
 Y, 2026-11-27 05:04: the warp core is the default, and moving systems and
 code over from comms-deck should end with the warp core as the standalone
@@ -33,7 +33,10 @@ and the self-test.
    and is the default screen at login. It survives a bad value in the
    feed (one `Infinity` once emptied the whole ring). Crashes are filed
    in quantum-kittens.md.
-2. **Read state directly.** Read `seats/<seat>.json` and the pid checks
+2. **Read state directly.** Started: the service writes
+   `~/.local/share/comms-deck/status.json` every 2 s and the warp core reads
+   that file, running the command only when the file is stale (t28; this
+   saved about 17% of a core). Next: read `seats/<seat>.json` and the pid checks
    in Rust, instead of shelling out to `comms-deck status --json` every
    poll. This is the first logic to move. Keep the JSON shape as the
    contract, and test the warp core against comms-deck's self-test

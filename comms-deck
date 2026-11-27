@@ -2761,6 +2761,19 @@ def guard_live_tree(state):
     send("comms-deck", "all", text, quiet=True)
 
 
+STATUS_SNAPSHOT_EVERY = 2  # seconds
+
+
+def write_status_snapshot():
+    """status.json: what `status --json` prints, written by the service so the
+    warp core can read a file instead of starting Python every 2 s (about
+    0.35 s of CPU each time; Y, t28). Written whole, then renamed into place."""
+    path = DATA / "status.json"
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(status_json(), allow_nan=False))
+    os.replace(tmp, path)
+
+
 def serve():
     """Run forever: wake agents, drive Grok Bot seats, refresh usage, copy records, mirror to Discord."""
     log(f"comms-deck serving on {MACHINE}; data in {DATA}")
@@ -2768,7 +2781,14 @@ def serve():
     last_sync, discord_wait_until, last_usage = 0.0, 0.0, 0.0
     notify_pos = 0
     live_guard, last_live_check = {}, 0.0
+    last_snapshot = 0.0
     while True:
+        if time.time() - last_snapshot >= STATUS_SNAPSHOT_EVERY:
+            last_snapshot = time.time()
+            try:
+                write_status_snapshot()
+            except Exception as error:  # the warp core falls back to `status --json`
+                log(f"couldn't write the status snapshot: {error}")
         if time.time() - last_live_check >= LIVE_GUARD_EVERY:
             last_live_check = time.time()
             try:
