@@ -3119,7 +3119,7 @@ def availability(seat, state, now=None, snap=None):
             "shade": shade, "waiting": waiting, "usage": usage}
 
 
-ROUTABLE = ("claude", "grok", "gravity")  # agents a task can be handed to (not codex or app seats)
+ROUTABLE = ("claude", "grok", "gravity", "codex")  # agents an @deck task can be handed to (not app seats); codex back 2026-11-27
 
 
 def most_available(seats=ROUTABLE, now=None):
