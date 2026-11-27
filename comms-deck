@@ -957,6 +957,8 @@ def render(records, seat):
 #                      not. channel_closed / shutdown mark away.
 #   StopCancelled      a late cancel can arrive after the next prompt, so this
 #                      does not mark idle. Older promptIds are ignored on Stop.
+#   SubagentStart/Stop record the seat's own subagents (t30); a subagent's
+#                      other events carry subagentType and are left to it.
 #   Notification       idle_prompt only: mark idle. For Grok this is what
 #                      settles idle. StopFailure is not hooked: idle_prompt
 #                      also fires after an errored turn.
@@ -6809,11 +6811,11 @@ def claude_hooks(cmd):
         if matcher:
             h["matcher"] = matcher
         return h
-    return {e: [entry(e)] for e in ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd")} | {
+    return {e: [entry(e)] for e in ("SessionStart", "UserPromptSubmit", "Stop", "SubagentStart", "SubagentStop", "SessionEnd")} | {
         "Notification": [entry("Notification", "idle_prompt")]}
 
 
-DEVIN_HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd")
+DEVIN_HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "SubagentStart", "SubagentStop", "SessionEnd")
 DEVIN_ALLOW = "mcp__comms-deck__*"  # the deck's MCP tools run without a prompt, as for Vibe
 
 
@@ -7482,7 +7484,7 @@ def self_test():
     mine = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "my-own-check"}]}]},
             "permissions": {"allow": ["exec"]}}
     once = devin_config(mine, "/x/comms-deck")
-    check("devin's config: four deck hooks and the tool permission added, the owner's own kept, twice is once",
+    check("devin's config: the deck hooks and the tool permission added, the owner's own kept, twice is once",
           once == devin_config(once, "/x/comms-deck") and len(once["hooks"]["Stop"]) == 2
           and once["hooks"]["Stop"][0]["hooks"][0]["command"] == "my-own-check"
           and set(once["hooks"]) == set(DEVIN_HOOK_EVENTS)
@@ -7655,6 +7657,8 @@ def self_test():
           "(0s ago)" in team and "Team at " in team and "more than one agent" in team, team)
     check("Grok's Notification hook matches idle_prompt only",
           grok_hooks("comms-deck")["hooks"]["Notification"][0].get("matcher") == "idle_prompt")
+    check("Claude's hooks include subagent start/stop",
+          all(e in claude_hooks("comms-deck") for e in ("SubagentStart", "SubagentStop")))
     code = "\n".join([
         "import importlib.machinery as m, importlib.util as u, json",
         f"l = m.SourceFileLoader('cd', {me!r}); s = u.spec_from_loader('cd', l)",
