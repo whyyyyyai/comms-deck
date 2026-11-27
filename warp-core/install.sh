@@ -50,7 +50,11 @@ if [ "${since:-0}" -gt 0 ] && [ $((now - since / 1000000)) -lt 60 ]; then
     echo "installed warp core 1.$(cat "$it"); it restarted under a minute ago, so this one goes live on its next start" >&2
     exit 0
 fi
-if systemctl --user is-active --quiet warp-core; then
+if systemctl --user is-active --quiet warp-core || systemctl --user is-failed --quiet warp-core; then
+    # A deliberate install isn't a crash loop: clear the start counter so
+    # systemd's 3-in-15-minutes limit is left for real crashes (installs are
+    # held to one a minute above, and only on a healthy GPU).
+    systemctl --user reset-failed warp-core 2>/dev/null || true
     systemctl --user restart warp-core
     # Survival first: if the new one won't stay up, put the old one back.
     sleep 8
