@@ -1381,16 +1381,16 @@ def _is_hbar(line):
 
 
 def _after_marker(line):
-    """Text typed after a ❯ or '>' prompt marker, with the box drawing removed."""
+    """Text typed after a ❯, › (Codex) or '>' prompt marker, box drawing removed."""
     text = line.replace("│", " ").replace("\u00a0", " ").strip()
-    for marker in ("❯", ">"):
+    for marker in ("❯", "›", ">"):
         if text.startswith(marker):
             return text[len(marker):].strip()
     return text
 
 
 SGR = re.compile(r"\033\[([0-9;:]*)m")
-STRUCTURE = set("❯>│─━═╭╮╰╯-|")
+STRUCTURE = set("❯›>│─━═╭╮╰╯-|")
 
 
 def drop_placeholders(ansi_screen):
@@ -1423,15 +1423,25 @@ def drop_placeholders(ansi_screen):
             muted = (dim or grey) and ch not in STRUCTURE and not ch.isspace()
             out.append(" " if muted else ch)
         params = m.group(1)
-        codes = [c for c in re.split(r"[;:]", params) if c] or ["0"]
-        if "0" in codes and params.split(";")[0] in ("", "0"):
-            dim = grey = False
-        if "2" in codes and params.split(";")[0] == "2":
-            dim = True
-        if "22" in codes:
-            dim = False
-        if "39" in codes:
-            grey = False
+        # Read the codes in order (Codex sends "22;2": end bold, then dim),
+        # skipping the arguments of 38/48/58 colours so their numbers aren't
+        # taken for codes of their own.
+        parts = params.split(";") if params else ["0"]
+        k = 0
+        while k < len(parts):
+            head = parts[k].split(":")[0] or "0"
+            if head in ("38", "48", "58") and ":" not in parts[k]:
+                k += 3 if k + 1 < len(parts) and parts[k + 1] == "5" else 5
+                continue
+            if head == "0":
+                dim = grey = False
+            elif head == "2":
+                dim = True
+            elif head == "22":
+                dim = False
+            elif head == "39":
+                grey = False
+            k += 1
         g = is_grey(params)
         if g is not None:
             grey = g
@@ -1449,7 +1459,8 @@ def composer_text(screen):
     wrapped lines before the box closes. Claude Code's is the `❯` line between
     the two rules at the bottom of the screen. Antigravity's is a `>` between
     two rules, with a hint such as "? for shortcuts" under the bottom rule;
-    that hint is not part of the draft. A bare `>` marker uses the next line
+    that hint is not part of the draft. Codex's is the last `›` line, with
+    its dim "Ask Codex to do anything" placeholder already blanked. A bare `>` marker uses the next line
     (Claude Code's composer when the marker sits on its own line).
     An empty string means the composer is on screen and has no draft.
     """
@@ -1490,7 +1501,8 @@ def composer_text(screen):
     marker = None
     for i, line in enumerate(lines):
         stripped = line.strip().replace("\u00a0", " ")
-        if stripped.startswith("❯") or stripped == ">" or stripped.startswith("> "):
+        if (stripped.startswith("❯") or stripped == ">" or stripped.startswith("> ")
+                or stripped == "›" or stripped.startswith("› ")):
             marker = i
     if marker is None:
         return None
@@ -7386,6 +7398,15 @@ def self_test():
     check("Claude's bare > marker uses the next line",
           composer_text("> \nfix the hook\n") == "fix the hook")
     check("a screen with no composer is left alone", composer_text("no prompt here\n") is None)
+    # Codex's composer, as its window drew it on 2026-11-27: a bold › with a
+    # dim placeholder, the model line and the shortcut hints under it.
+    codex_screen = ("\033[m\033[22;1;48:2:30:30:30m›\033[22m \033[22;2mAsk Codex to do anything\n"
+                    "\033[m\033[48:2:30:30:30m \n"
+                    "\033[m  \033[38:2:246:226:183mGPT-6.2-Sol default\033[38:2:132:132:132m · ~\n"
+                    "\033[m  \033[22;1;38:2:221:221:221m←\033[22;38:2:132:132:132m for agents · ? for shortcuts\n")
+    check("an empty Codex composer is safe to paste into",
+          composer_text(drop_placeholders(codex_screen)) == "", repr(drop_placeholders(codex_screen)))
+    check("a Codex draft blocks the paste", composer_text("› old prompt\nwords\n› ship it\n  hints\n") == "ship it")
     scrollback = ("│ ❯ old text from another screen │\n> a quoted line in a reply\n"
                   + "words\n" * 20 + claude_empty + "  status line\n")
     check("text in the scrollback above the prompt isn't a draft", composer_text(scrollback) == "",
