@@ -116,9 +116,11 @@ when = "held_by_draft"
 effect = "label"
 text = "drafting..."
 
+# Stuck, and something other than quiet notes is waiting: the deck calls a
+# seat stuck for a quiet FYI too, which isn't meant to wake it.
 [[rule]]
 on = "seat"
-when = "stuck"
+when = "stuck && waiting_normal > 0"
 effect = "halo"
 colour = "red"
 pulse = 2.5
