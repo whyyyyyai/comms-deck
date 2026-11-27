@@ -1784,10 +1784,12 @@ fn pulse_core(
             };
         }
     }
-    // Two containment rings turning against each other, coloured by heat.
+    // Two containment rings, coloured by heat. Both turn clockwise with the
+    // disk and the planets, the inner one faster (Kepler: angular speed
+    // ~ r^-1.5). They used to turn against each other (Y, t11).
     let shell = mix3(c.cool, c.hot, heat);
-    for (r, dir, k) in [(78.0, 1.0, 0.6), (96.0, -1.0, 0.35)] {
-        let spin = t * dir * (0.4 + rate * 0.2) * c.ring_spin;
+    for (r, k) in [(78.0f32, 0.6), (96.0f32, 0.35)] {
+        let spin = -t * (0.4 + rate * 0.2) * c.ring_spin * (r / 78.0).powf(-1.5);
         for i in 0..3 {
             let start = spin + i as f32 * std::f32::consts::TAU / 3.0;
             gizmos.arc_2d(Isometry2d::from_rotation(Rot2::radians(start)), 1.4, r * s, lin(shell, k * 0.75));
@@ -1945,14 +1947,15 @@ fn fly_comets(
             let look = note_look(&mods.rules, &mods.cfg, &note);
             deck.warp = deck.warp.max(look.warp);
             // An agent writing to Y boosts the stars; notes between agents
-            // spin the ring the way they travel.
+            // speed the ring up. Always clockwise, the way the core's disk
+            // turns: a note never reverses the orbit (Y, t11).
             if note.from != "owner" && note.to.iter().any(|t| t == "owner") {
                 deck.boost += mods.cfg.stars.boost_per_note;
             }
             if !note.all && note.from != "owner" {
                 let ring = deck.roster.clone();
                 for to in note.to.iter().filter(|t| *t != "owner") {
-                    deck.spin += spin_kick(&ring, &note.from, to, mods.cfg.orbit.spin_kick);
+                    deck.spin += spin_kick(&ring, &note.from, to, mods.cfg.orbit.spin_kick).abs();
                 }
             }
             let from = positions.get(&note.from).copied().unwrap_or(Vec2::ZERO);
@@ -2903,6 +2906,33 @@ mod tests {
         assert_eq!(ring_travel(&ring, "owner", "ghost"), 0.0, "off the ring");
         assert_eq!(spin_kick(&ring, "owner", "claude", 0.1), 0.1);
         assert_eq!(spin_kick(&ring, "claude", "owner", 0.1), -0.1);
+    }
+
+    #[test]
+    fn a_free_orbit_stays_an_orbit() {
+        // The physics check (t12): with nothing steering, pushing or dragging
+        // it, a planet on a circular orbit must keep orbiting — the
+        // integrator is symplectic (speed first, then position), so the
+        // radius may breathe but mustn't run away or collapse.
+        let mut cfg = mods::PhysicsCfg::default();
+        // Nothing but the core's pull: no steering, no sink, no thrust.
+        cfg.drift = 0.0;
+        cfg.steering = 0.0;
+        let scene = Vec2::new(1280.0, 800.0);
+        let r = 300.0;
+        let v = (cfg.gravity / r).sqrt();
+        let mut b = Body { pos: Vec2::new(r, 0.0), vel: Vec2::new(0.0, -v) }; // clockwise
+        let (mut lo, mut hi) = (r, r);
+        let (mut went_down, mut went_left) = (false, false);
+        for _ in 0..5400 {
+            step_body(&mut b, false, 0.0, scene, 1.0 / 60.0, &cfg);
+            lo = lo.min(b.pos.length());
+            hi = hi.max(b.pos.length());
+            went_down |= b.pos.y < -100.0;
+            went_left |= b.pos.x < -100.0;
+        }
+        assert!(lo > 250.0 && hi < 360.0, "the orbit breathes between {lo} and {hi}, it doesn't decay or escape");
+        assert!(went_down && went_left, "it really went round, not just wobbled in place");
     }
 
     #[test]

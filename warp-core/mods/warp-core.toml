@@ -20,7 +20,8 @@ breath = 0.07                 # how far it swells each breath
 ring_spin = 1.0               # containment ring speed
 
 # The ring's spin comes from the agents' notes to each other: each one
-# kicks it in the direction it travels round the ring. The drift keeps the
+# kicks it on clockwise, the way the core's disk turns (a note never
+# reverses it), and it slows to a stop without them. The drift keeps the
 # planets slowly circling even when nobody has spoken for a while — in the
 # physics sim (t13) this is the turning their tangential speed steers onto.
 [orbit]
