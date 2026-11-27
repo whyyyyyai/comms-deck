@@ -35,6 +35,15 @@ what was lost, what the logs say, and what was done. Where to look:
 - Uncommitted work: `git worktree list`, then `git status` in each warp
   worktree. Save any diff as a patch before anything else.
 
+### 2026-11-27 05:16: warp core 1.24 down for about a minute
+
+- The mods folder was linked to a working tree. The planet shader there
+  was edited for the next build (logos), and the running binary failed GPU
+  validation on it at every start (`Validation RenderError`).
+- Fixed in 1.25: `install.sh` now copies the mods per version instead of
+  linking them, and rolls back to the previous binary and mods if the new
+  one won't stay up. Filed by claude.
+
 ### 2026-11-27 04:56: power-off, warp core came back at 04:57
 
 - Sessions ended 04:33 and 04:56, both clean power-offs; no panic, OOM or

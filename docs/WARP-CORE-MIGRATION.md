@@ -36,7 +36,7 @@ and the self-test.
 2. **Read state directly.** Started: the service writes
    `~/.local/share/comms-deck/status.json` every 2 s and the warp core reads
    that file, running the command only when the file is stale (t28; this
-   saved about 17% of a core). Next: read `seats/<seat>.json` and the pid checks
+   the warp core with its children went from 46% to about 29% of a core). Next: read `seats/<seat>.json` and the pid checks
    in Rust, instead of shelling out to `comms-deck status --json` every
    poll. This is the first logic to move. Keep the JSON shape as the
    contract, and test the warp core against comms-deck's self-test
@@ -49,8 +49,9 @@ and the self-test.
    notes. This is the riskiest step, so run both for a day with the warp
    core in shadow mode, logging what it would do, before switching over.
 5. **Own the load balancer and the task board.**
-6. **The rest:** records, the Discord mirror, desktop actions, mail, the
-   nav deck. comms-deck shrinks to `install` and `self-test`, then retires.
+6. **The rest:** records, the Discord mirror, desktop actions, mail. The
+   nav deck comes down once the warp core is stable (Y, 05:17): its
+   cockpit and meters are already in the warp core. comms-deck shrinks to `install` and `self-test`, then retires.
    The warp core gets a headless mode, so the logic runs even when no
    window can open.
 
