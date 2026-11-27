@@ -157,6 +157,8 @@ speed = 0.22                  # radians a second the task ring turns
 radius = 0.42                 # the ring's radius, as a share of the seat ring's
 size = 0.5
 bright = 1.1
+shooting = true               # a task that leaves the board leaves the sky as a shooting star (t50)
+shooting_secs = 2.2           # how long a shooting star flies before it burns out
 
 # The chat panel on the right: the notes, and a chat box that sends as Y.
 # The terminal chat screen keeps working alongside it.

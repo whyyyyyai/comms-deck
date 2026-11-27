@@ -134,6 +134,7 @@ fn main() {
                     draw_links,
                     drive_planets,
                     draw_moons_and_marks,
+                    draw_shooting_stars,
                     hud,
                     tooltip,
                     chat_results,
@@ -384,6 +385,23 @@ struct Shock {
     size: f32,
 }
 
+/// A task that left the board (t50): it flies off the task ring as a
+/// shooting star, in the colour of the seat that asked for it. Where it
+/// sat is kept as its slot on the old open ring, so the star launches
+/// from exactly where the task was last seen orbiting.
+struct ShootingStar {
+    at: f32,
+    slot: usize,
+    of: usize,
+    /// The task ring's orbit when the task left, so the launch point is
+    /// where the dot really was.
+    orbit: f32,
+    colour: [f32; 3],
+    /// How much the flight curls sideways, off the task id, so each star
+    /// leaves its own way.
+    curl: f32,
+}
+
 #[derive(Resource, Default)]
 struct Deck {
     seats: Vec<SeatInfo>,
@@ -437,6 +455,8 @@ struct Deck {
     problem: Option<String>,
     pending: Vec<NoteInfo>,
     shocks: Vec<Shock>,
+    /// Tasks gone from the board, still flying out (t50).
+    shooting: Vec<ShootingStar>,
     /// The seat under the pointer, and the one clicked to focus.
     hover: Option<String>,
     focus: Option<String>,
@@ -1633,6 +1653,22 @@ fn read_feed(
                     .filter_map(|d| Some(Packet { seat: d.holder.clone()?, at: now, colour: seat_rgb(&d.from), absorbed: false }))
                     .collect();
                 deck.packets.extend(fired);
+                // An open task gone from the board leaves the sky as a
+                // shooting star (t50), flung from where it was orbiting.
+                for slot in finished_open_task_slots(&deck.tasks, &tasks) {
+                    let open: Vec<&TaskInfo> = deck.tasks.iter().filter(|t| t.open).collect();
+                    let t = open[slot];
+                    let key = task_key(&t.id);
+                    let star = ShootingStar {
+                        at: now,
+                        slot,
+                        of: open.len(),
+                        orbit: deck.task_orbit,
+                        colour: seat_rgb(&t.from),
+                        curl: (key % 1000) as f32 / 999.0 * 1.2 - 0.6,
+                    };
+                    deck.shooting.push(star);
+                }
                 deck.tasks = tasks;
             }
         }
@@ -1734,6 +1770,27 @@ fn finished_tasks<'a>(old: &'a [feed::TaskInfo], new: &[feed::TaskInfo]) -> Vec<
         .filter(|t| t.holder.is_some() && !t.open)
         .filter(|t| !new.iter().any(|n| n.id == t.id && !n.open))
         .collect()
+}
+
+/// The slots on the old board's open ring of tasks that are gone from the
+/// new one entirely (t50): each leaves the sky as a shooting star. A task
+/// that merely became held stays (it is on the board still); a held task
+/// going is the packets' job, not the sky's.
+fn finished_open_task_slots(old: &[feed::TaskInfo], new: &[feed::TaskInfo]) -> Vec<usize> {
+    old.iter()
+        .enumerate()
+        .filter(|(_, t)| t.open)
+        .filter(|(_, t)| !new.iter().any(|n| n.id == t.id))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Where a shooting star is `t` seconds after leaving its ring slot: it
+/// flies outward, curled a little towards the way the ring was turning,
+/// at a speed that crosses the scene within its burn time.
+fn shooting_star_flight(p0: Vec2, out: Vec2, tang: Vec2, scene: Vec2, curl: f32, t: f32) -> Vec2 {
+    let dir = (out + tang * curl).normalize_or_zero();
+    p0 + dir * scene.length() * 0.45 * t
 }
 
 /// Points along a conduit, seat (first) to core (last), bent by the ring's
@@ -2561,6 +2618,49 @@ fn draw_moons_and_marks(
         let k = (t - sh.at) / 1.2;
         let r = (30.0 + k * 120.0 * sh.size) * s;
         gizmos.circle_2d(Isometry2d::from_translation(*p), r, lin(sh.colour, 3.0 * (1.0 - k)));
+    }
+}
+
+/// A task that left the board leaves the sky as a shooting star (t50): it
+/// launches from where the task's dot was last seen on the ring, flies
+/// outward in the colour of the seat that asked for it, and burns out.
+fn draw_shooting_stars(
+    mut deck: ResMut<Deck>,
+    mods: Res<Mods>,
+    view: Res<View>,
+    layout: Res<Layout>,
+    time: Res<Time>,
+    mut gizmos: Gizmos,
+) {
+    let tc = &mods.cfg.tasks;
+    let t = time.elapsed_secs();
+    deck.shooting.retain(|s| t - s.at < tc.shooting_secs.max(0.5));
+    if deck.shooting.len() > 30 {
+        let over = deck.shooting.len() - 30;
+        deck.shooting.drain(..over);
+    }
+    if !tc.show || !tc.shooting || !view.tasks {
+        return;
+    }
+    let scene = layout.scene;
+    for s in &deck.shooting {
+        let elapsed = (t - s.at).max(0.0);
+        let ring = task_positions(s.of.max(1), scene, s.orbit, tc.radius);
+        let Some(p0) = ring.get(s.slot.min(ring.len().saturating_sub(1))).copied() else { continue };
+        let out = p0.normalize_or_zero();
+        // The way the ring was turning at its slot: one step ahead in orbit.
+        let ahead = task_positions(s.of.max(1), scene, s.orbit + 0.04, tc.radius)
+            .get(s.slot.min(ring.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(p0);
+        let tang = (ahead - p0).normalize_or_zero();
+        let head = shooting_star_flight(p0, out, tang, scene, s.curl, elapsed);
+        let tail = shooting_star_flight(p0, out, tang, scene, s.curl, (elapsed - 0.16).max(0.0));
+        let a = (1.0 - (elapsed / tc.shooting_secs.max(0.1)).clamp(0.0, 1.0)).powi(2) * tc.bright;
+        if tail.distance(head) > 0.5 {
+            gizmos.linestrip_gradient_2d([(tail, lin(s.colour, 0.0)), (head, lin(s.colour, 3.5 * a))]);
+        }
+        gizmos.circle_2d(Isometry2d::from_translation(head), 2.2, lin(s.colour, 4.0 * a));
     }
 }
 
@@ -3572,6 +3672,7 @@ mod tests {
         init(Box::new(IntoSystem::into_system(layout_seats)));
         init(Box::new(IntoSystem::into_system(drive_planets)));
         init(Box::new(IntoSystem::into_system(draw_moons_and_marks)));
+        init(Box::new(IntoSystem::into_system(draw_shooting_stars)));
         init(Box::new(IntoSystem::into_system(hud)));
     }
 
@@ -4114,6 +4215,31 @@ mod tests {
         let new = [t("t3", Some("claude"), false)];
         let done: Vec<&str> = finished_tasks(&old, &new).iter().map(|t| t.id.as_str()).collect();
         assert_eq!(done, ["t1"], "held and gone: done; unheld or still held: not");
+    }
+
+    #[test]
+    fn a_task_off_the_board_leaves_the_sky() {
+        // t50: an open task gone from the board becomes a shooting star,
+        // launched from its slot on the old ring. A task that became held
+        // stays (it's still on the board); a held task going is the
+        // packets' job.
+        let t = |id: &str, holder: Option<&str>, open: bool| feed::TaskInfo {
+            id: id.into(),
+            from: "owner".into(),
+            holder: holder.map(String::from),
+            open,
+        };
+        let old = [t("t1", None, true), t("t2", Some("vibe"), false), t("t3", None, true), t("t4", None, true)];
+        let gone = finished_open_task_slots(&old, &[t("t1", None, true), t("t3", Some("vibe"), false)]);
+        assert_eq!(gone, [3], "only the open task that vanished entirely");
+        assert!(finished_open_task_slots(&old, &old).is_empty(), "an unchanged board fires nothing");
+        // The flight: outward, and out of the scene within its burn time.
+        let scene = Vec2::new(1280.0, 800.0);
+        let p0 = Vec2::new(0.0, 250.0);
+        let out = p0.normalize_or_zero();
+        let end = shooting_star_flight(p0, out, Vec2::new(1.0, 0.0), scene, 0.6, 2.2);
+        assert!(end.x.abs() > scene.x * 0.5 || end.y.abs() > scene.y * 0.5, "it leaves the scene: {end}");
+        assert!((end - p0).length() > (p0 - Vec2::ZERO).length() * 2.0, "it really flies out, not circles");
     }
 
     #[test]

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **A task off the board leaves the sky as a shooting star (t50).** Open
+  tasks orbit the core on their own ring (t20); when one vanishes from
+  the board it is now flung out of the scene from exactly where its dot
+  was last seen — a streak in the colour of the seat that asked for it,
+  curling slightly the way the ring was turning, burning out after
+  `shooting_secs` (2.2 s). Held tasks still leave as their holder's
+  packet (that didn't change); `shooting = false` turns the stars off.
+  By vibe.
+
 - **The owner's name is Y.** STOX renamed themselves (2026-11-26): screens,
   notes, the chat prompt (`y ›`) and Discord now show **Y**, and `y` names
   the owner wherever a seat is named. The seat id stays `owner` in files

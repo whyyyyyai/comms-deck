@@ -508,10 +508,23 @@ pub struct TasksCfg {
     pub radius: f32,
     pub size: f32,
     pub bright: f32,
+    /// A task that leaves the board leaves the sky as a shooting star,
+    /// flung off the ring in its colour (t50).
+    pub shooting: bool,
+    /// How long a shooting star flies before it burns out (s).
+    pub shooting_secs: f32,
 }
 impl Default for TasksCfg {
     fn default() -> Self {
-        TasksCfg { show: true, speed: 0.22, radius: 0.42, size: 0.5, bright: 1.1 }
+        TasksCfg {
+            show: true,
+            speed: 0.22,
+            radius: 0.42,
+            size: 0.5,
+            bright: 1.1,
+            shooting: true,
+            shooting_secs: 2.2,
+        }
     }
 }
 
