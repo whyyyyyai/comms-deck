@@ -569,6 +569,78 @@ struct SeatNode {
     flash: f32,
     /// 0 at the back of the orbit (behind the core), 1 at the front.
     depth: f32,
+    /// The planet's body: its place and motion in the physics sim (t13).
+    body: Body,
+}
+
+/// One planet in the simplified physics sim: where it is, how it moves.
+#[derive(Clone, Copy, Default)]
+struct Body {
+    pos: Vec2,
+    vel: Vec2,
+}
+
+/// One step of the planets' physics (t13). The core is a singularity: its
+/// pull is `gravity / r²` towards the centre. A busy seat has thrust enough
+/// to climb to a higher orbit; an idle one keeps orbiting and drifts in
+/// towards the core. The ring's turning (drift, traffic, warp, the notes'
+/// spin kicks) steers each planet's tangential speed towards `turning * r`,
+/// so the whole ring still answers the deck the way it did. No planet is
+/// ever lost over the screen's edge: past the margin it is reflected back
+/// in, keeping `bounce` of its speed. Inside `min_radius` nothing falls
+/// further in: the planet skims the singularity and keeps circling.
+fn step_body(body: &mut Body, busy: bool, turning: f32, scene: Vec2, dt: f32, cfg: &mods::PhysicsCfg) {
+    let dt = dt.min(0.1); // a stall mustn't fling anything
+    let p = body.pos;
+    let r = p.length().max(1.0);
+    let out = p / r;
+    // Clockwise round the ring (the way the ring turns as its angle grows).
+    let tang = Vec2::new(out.y, -out.x);
+    // The core's pull, softened at the floor so the sim stays stable there.
+    let g = cfg.gravity / (r.max(cfg.min_radius) * r.max(cfg.min_radius));
+    // Thrust rides on the local pull (a multiple of it), so even a planet
+    // that sank all the way in has climb enough to get back out. It fades
+    // out on the approach to the screen's edge — measured in the planet's
+    // own direction — so a working agent parks on the highest orbit there
+    // is room for.
+    let half = scene * 0.5;
+    let edge = (1.0 / (out.x.abs() / half.x).max(out.y.abs() / half.y).max(1e-4)) - cfg.edge_margin;
+    let fade = 1.0 - ((r - 0.75 * edge) / (0.25 * edge.max(1.0))).clamp(0.0, 1.0);
+    let thrust = if busy { cfg.thrust * g * fade } else { 0.0 };
+    let sink = if busy { 0.0 } else { cfg.drift };
+    // Steer the tangential speed onto the ring's turning, capped, so the
+    // spin kicks and warp swing are felt but can't throw a planet.
+    let v_t = body.vel.dot(tang);
+    let steer = ((turning * r - v_t) * cfg.steering).clamp(-cfg.max_steer, cfg.max_steer);
+    body.vel += (out * (thrust - sink - g) + tang * steer) * dt;
+    body.pos += body.vel * dt;
+    // Skim, don't fall in: on the floor of the core's well the inward part
+    // of the speed is taken away, leaving the planet to circle.
+    let r2 = body.pos.length();
+    if r2 < cfg.min_radius {
+        let out2 = body.pos / r2.max(1e-4);
+        let tang2 = Vec2::new(out2.y, -out2.x);
+        let v_t2 = body.vel.dot(tang2).max(0.0) * tang2 + body.vel.dot(out2).max(0.0) * out2;
+        body.pos = out2 * cfg.min_radius;
+        body.vel = v_t2;
+    }
+    // No planet is lost over the edge: it bounces back into the scene.
+    let half = scene * 0.5 - cfg.edge_margin;
+    let keep = cfg.bounce;
+    if body.pos.x < -half.x {
+        body.pos.x = -half.x;
+        body.vel.x = body.vel.x.abs() * keep;
+    } else if body.pos.x > half.x {
+        body.pos.x = half.x;
+        body.vel.x = -body.vel.x.abs() * keep;
+    }
+    if body.pos.y < -half.y {
+        body.pos.y = -half.y;
+        body.vel.y = body.vel.y.abs() * keep;
+    } else if body.pos.y > half.y {
+        body.pos.y = half.y;
+        body.vel.y = -body.vel.y.abs() * keep;
+    }
 }
 
 /// One open task orbiting the core, coloured by who assigned it.
@@ -1182,10 +1254,10 @@ fn orbit_speed(cfg: &mods::OrbitCfg, notes_10min: usize, warp: f32, spin: f32) -
     cfg.drift + (notes_10min.min(30) as f32) * cfg.traffic + warp * cfg.warp_swing + spin
 }
 
-/// The spin a note from `from` to `to` adds: `kick` in the direction it
-/// travels round the ring the short way (positive = clockwise, the way the
-/// ring turns as its angle grows), nothing between seats not on the ring.
-fn spin_kick(ring: &[String], from: &str, to: &str, kick: f32) -> f32 {
+/// Which way a note travels the short way round the ring (t14): +1.0
+/// clockwise (the way the ring turns as its angle grows), -1.0 anticlockwise,
+/// 0.0 when the seats aren't both on the ring, are the same, or sit opposite.
+fn ring_travel(ring: &[String], from: &str, to: &str) -> f32 {
     let (Some(i), Some(j)) = (ring.iter().position(|s| s == from), ring.iter().position(|s| s == to)) else {
         return 0.0;
     };
@@ -1194,10 +1266,17 @@ fn spin_kick(ring: &[String], from: &str, to: &str, kick: f32) -> f32 {
     if d == 0 || 2 * d == n {
         0.0
     } else if 2 * d < n {
-        kick
+        1.0
     } else {
-        -kick
+        -1.0
     }
+}
+
+/// The spin a note from `from` to `to` adds: `kick` in the direction it
+/// travels round the ring the short way (positive = clockwise, the way the
+/// ring turns as its angle grows), nothing between seats not on the ring.
+fn spin_kick(ring: &[String], from: &str, to: &str, kick: f32) -> f32 {
+    ring_travel(ring, from, to) * kick
 }
 
 /// A job finished: the seat was busy and now isn't (stuck or spent aren't
@@ -1301,9 +1380,13 @@ fn layout_seats(
         }
         for name in &names {
             let (p, depth) = pos[name];
+            // A planet joins the ring in step with it: circling at the
+            // ring's current turning (t13).
+            let r = p.length().max(1.0);
+            let tang = Vec2::new(p.y / r, -p.x / r);
             commands
                 .spawn((
-                    SeatNode { name: name.clone(), flash: 0.0, depth },
+                    SeatNode { name: name.clone(), flash: 0.0, depth, body: Body { pos: p, vel: tang * turning * r } },
                     Mesh2d(assets.seat.clone()),
                     MeshMaterial2d(materials.add(seat_colour(name, 1.0))),
                     Transform::from_xyz(p.x, p.y, seat_z(depth)),
@@ -1344,13 +1427,20 @@ fn layout_seats(
         deck.built = names;
         return;
     }
+    // The planets fly the sim now (t13): gravity, thrust, drift, steering —
+    // each one on its own, so working agents climb to higher orbits while
+    // the idle ones sink towards the core. Depth follows the sim too: the
+    // higher a planet stands on the screen (the far side of the tilted
+    // orbit), the further behind the core it slides.
+    let ry = layout.scene.y * 0.30;
     for (_, mut node, mut tf) in &mut nodes {
-        if let Some((p, depth)) = pos.get(&node.name) {
-            tf.translation.x = p.x;
-            tf.translation.y = p.y;
-            tf.translation.z = seat_z(*depth);
-            node.depth = *depth;
-        }
+        let busy = deck.seat(&node.name).is_some_and(|s| s.shown == "busy");
+        step_body(&mut node.body, busy, turning, layout.scene, dt, &mods.cfg.physics);
+        let p = node.body.pos;
+        node.depth = (0.5 - 0.5 * (p.y / ry)).clamp(0.0, 1.0);
+        tf.translation.x = p.x;
+        tf.translation.y = p.y;
+        tf.translation.z = seat_z(node.depth);
     }
 }
 
@@ -1874,8 +1964,14 @@ fn fly_comets(
             let involved = |seat: &str| deck.focus.as_deref().is_none_or(|f| f == seat || f == note.from);
             for to in targets {
                 let Some(to_pos) = positions.get(&to).copied() else { continue };
-                // Through the core, bowed a little so two-way traffic doesn't overlap.
-                let via = (from + to_pos) * 0.12 + (to_pos - from).perp().normalize_or_zero() * 40.0;
+                // Through the core, bowed the way the note travels round the
+                // ring (t14), so the tail's arc follows the spin instead of
+                // fighting it. Bowed at all so two-way traffic doesn't overlap.
+                let side = match ring_travel(&deck.roster, &note.from, &to) {
+                    0.0 => 1.0,
+                    s => s,
+                };
+                let via = (from + to_pos) * 0.12 + (to_pos - from).perp().normalize_or_zero() * (40.0 * side);
                 let bright = look.bright * if involved(&to) { 1.0 } else { 0.12 };
                 let colour = lin(look.colour, bright);
                 commands.spawn((
@@ -2793,6 +2889,73 @@ mod tests {
         assert_eq!(orbit_speed(&cfg, 0, 0.0, 0.0), 0.0, "still with no notes between agents");
         assert!(orbit_speed(&cfg, 0, 0.0, 0.3) > 0.0 && orbit_speed(&cfg, 0, 0.0, -0.3) < 0.0, "spin either way");
         assert!(orbit_speed(&cfg, 0, 1.0, 0.0) > 1.0, "warp swings it");
+    }
+
+    #[test]
+    fn a_note_between_agents_travels_the_short_way() {
+        let ring: Vec<String> = ["owner", "claude", "grok", "vibe", "devin"].map(String::from).to_vec();
+        assert_eq!(ring_travel(&ring, "owner", "claude"), 1.0, "forward is clockwise");
+        assert_eq!(ring_travel(&ring, "claude", "owner"), -1.0, "backward is anticlockwise");
+        assert_eq!(ring_travel(&ring, "owner", "devin"), -1.0, "the long way round is not the way");
+        let even: Vec<String> = ["owner", "claude", "grok", "vibe"].map(String::from).to_vec();
+        assert_eq!(ring_travel(&even, "owner", "grok"), 0.0, "opposite seats, no way is shorter");
+        assert_eq!(ring_travel(&ring, "owner", "owner"), 0.0);
+        assert_eq!(ring_travel(&ring, "owner", "ghost"), 0.0, "off the ring");
+        assert_eq!(spin_kick(&ring, "owner", "claude", 0.1), 0.1);
+        assert_eq!(spin_kick(&ring, "claude", "owner", 0.1), -0.1);
+    }
+
+    #[test]
+    fn busy_planets_climb_and_idle_ones_sink() {
+        let cfg = mods::PhysicsCfg::default();
+        let scene = Vec2::new(1280.0, 800.0);
+        // A planet circling steadily at the old ring's radius, steered onto
+        // a slow turn.
+        let start = Body { pos: Vec2::new(0.0, 240.0), vel: Vec2::new(24.0, 0.0) };
+        let circling = |busy| {
+            let mut b = start;
+            let r0 = b.pos.length();
+            for _ in 0..600 {
+                step_body(&mut b, busy, 0.1, scene, 1.0 / 60.0, &cfg);
+            }
+            (r0, b.pos.length())
+        };
+        let (r0, busy_r) = circling(true);
+        assert!(busy_r > r0 + 30.0, "thrust carries a working planet to a higher orbit: {r0} -> {busy_r}");
+        let (_, idle_r) = circling(false);
+        assert!(idle_r < 150.0, "an idle planet keeps orbiting but drifts in: {r0} -> {idle_r}");
+        // Even one that sank all the way in can climb back out at work.
+        let mut sunken = Body { pos: Vec2::new(0.0, cfg.min_radius), vel: Vec2::new(9.0, 0.0) };
+        for _ in 0..1800 {
+            step_body(&mut sunken, true, 0.1, scene, 1.0 / 60.0, &cfg);
+        }
+        assert!(sunken.pos.length() > 200.0, "thrust is a multiple of the local pull, so it escapes: {}", sunken.pos.length());
+    }
+
+    #[test]
+    fn a_planet_never_falls_in_the_core_or_off_the_screen() {
+        let cfg = mods::PhysicsCfg::default();
+        let scene = Vec2::new(1280.0, 800.0);
+        // Straight at the singularity: it stops at the floor and keeps
+        // whatever sideways motion it had.
+        let mut falling = Body { pos: Vec2::new(200.0, 0.0), vel: Vec2::new(-80.0, 30.0) };
+        for _ in 0..1200 {
+            step_body(&mut falling, false, 0.1, scene, 1.0 / 60.0, &cfg);
+        }
+        assert!(falling.pos.length() >= cfg.min_radius - 0.5, "stops at the floor: {}", falling.pos.length());
+        // Flung at the screen's edge: reflected back into the scene.
+        let mut flung = Body { pos: Vec2::new(0.0, 100.0), vel: Vec2::new(0.0, 400.0) };
+        for _ in 0..600 {
+            step_body(&mut flung, false, 0.1, scene, 1.0 / 60.0, &cfg);
+        }
+        assert!(flung.pos.y <= scene.y * 0.5 - cfg.edge_margin + 0.5, "never over the edge: {}", flung.pos.y);
+        assert!(flung.vel.y < 0.0, "it bounces back in, not stuck at the wall");
+        // Whatever happens, a planet stays inside the scene's margins.
+        let mut wild = Body { pos: Vec2::new(-500.0, 300.0), vel: Vec2::new(600.0, -600.0) };
+        for _ in 0..3600 {
+            step_body(&mut wild, true, 1.5, scene, 1.0 / 60.0, &cfg);
+        }
+        assert!(wild.pos.x.abs() <= scene.x * 0.5 && wild.pos.y.abs() <= scene.y * 0.5);
     }
 
     #[test]

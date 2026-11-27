@@ -20,15 +20,32 @@ breath = 0.07                 # how far it swells each breath
 ring_spin = 1.0               # containment ring speed
 
 # The ring's spin comes from the agents' notes to each other: each one
-# kicks it in the direction it travels round the ring, and it slows to a
-# stop without them.
+# kicks it in the direction it travels round the ring. The drift keeps the
+# planets slowly circling even when nobody has spoken for a while — in the
+# physics sim (t13) this is the turning their tangential speed steers onto.
 [orbit]
-drift = 0.0                   # a steady turn on top (radians a second)
+drift = 0.1                   # a steady turn on top (radians a second)
 traffic = 0.0                 # (old) per note in the last 10 minutes
 warp_swing = 1.2              # added at full warp
 spin_kick = 0.08              # spin one note between agents adds
 friction = 0.12               # spin lost per second, proportionally
 max_spin = 1.5
+
+# The planets' motion is a simplified physics sim (t13, vibe): gravity pulls
+# each one towards the singularity (acceleration falls off as 1/r², so inner
+# orbits run faster); an agent at work has thrust enough to climb to a
+# higher orbit away from the warp core; an agent with nothing to do keeps
+# orbiting but sinks slowly in; and no planet is ever lost over the screen's
+# edge — it is reflected back in, keeping some of its speed.
+[physics]
+gravity = 530000.0            # the core's pull, px³/s² (a = gravity / r²)
+thrust = 1.6                  # outward push while busy, as a multiple of the local pull (fades near the edge)
+drift = 1.2                   # inward sink while not busy, px/s²
+steering = 2.0                # how fast tangential speed settles onto the ring's turning
+max_steer = 120.0             # the hardest the steering may push, px/s²
+min_radius = 90.0             # nothing falls closer to the core than this, px
+bounce = 0.5                  # speed kept on a bounce off the screen's edge
+edge_margin = 90.0            # the gap kept from the screen's edge, px
 
 # The stars' speed comes from the agents: still when nobody is working,
 # slow with a few at it, a boost when an agent writes to Y.

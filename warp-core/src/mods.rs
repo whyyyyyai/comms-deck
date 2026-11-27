@@ -144,6 +144,54 @@ impl Default for OrbitCfg {
     }
 }
 
+/// The planets' motion (t13): each seat is a body in a simplified physics
+/// sim — gravity pulls it towards the singularity, an agent at work has
+/// thrust enough to climb to a higher orbit, an idle one keeps orbiting and
+/// drifts inwards, and no planet is ever lost over the screen's edge.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PhysicsCfg {
+    /// The core's pull: the inward acceleration at radius r is
+    /// `gravity / r²` (px and seconds), so inner orbits run faster.
+    pub gravity: f32,
+    /// Outward thrust while a seat is busy, as a multiple of the core's
+    /// pull at the planet's radius, fading to nothing near the screen's
+    /// edge so a working agent parks on the highest orbit there is room for.
+    pub thrust: f32,
+    /// Inward drift while a seat isn't working (px/s²): it keeps orbiting
+    /// but sinks slowly towards the core.
+    pub drift: f32,
+    /// How hard the planets are steered onto the ring's turning, as a
+    /// rate (per second) on the gap between their tangential speed and the
+    /// ring's; this is what the notes' spin kicks and warp swing ride on.
+    pub steering: f32,
+    /// The hardest the steering may push or pull (px/s²), so one note
+    /// between two seats can't fling a planet across the screen.
+    pub max_steer: f32,
+    /// Inside this radius from the core nothing falls further in (px):
+    /// the planets skim the singularity and keep circling it.
+    pub min_radius: f32,
+    /// Kept speed (as a fraction) when a planet is reflected off the
+    /// screen's edge.
+    pub bounce: f32,
+    /// The gap a planet keeps from the screen's edge (px).
+    pub edge_margin: f32,
+}
+impl Default for PhysicsCfg {
+    fn default() -> Self {
+        PhysicsCfg {
+            gravity: 530_000.0,
+            thrust: 1.6,
+            drift: 1.2,
+            steering: 2.0,
+            max_steer: 120.0,
+            min_radius: 90.0,
+            bounce: 0.5,
+            edge_margin: 90.0,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct StarsCfg {
@@ -412,6 +460,7 @@ pub struct Config {
     pub look: Look,
     pub core: CoreCfg,
     pub orbit: OrbitCfg,
+    pub physics: PhysicsCfg,
     pub stars: StarsCfg,
     pub comets: CometsCfg,
     pub warp: WarpCfg,
