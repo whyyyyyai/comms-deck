@@ -2928,7 +2928,7 @@ fn chat_input(
                 let before = chat.sending;
                 let len = chat.input.trim().chars().count();
                 let seats: Vec<String> = deck.seats.iter().map(|s| s.name.clone()).collect();
-                let reach = chat::route(chat.input.trim(), &seats).map(|to| recipients(&to, &seats)).unwrap_or(1);
+                let reach = chat::route(chat.input.trim(), &seats, &available_seats(&deck)).map(|to| recipients(&to, &seats)).unwrap_or(1);
                 send_line(&mut chat, &deck, real.elapsed_secs());
                 // A note went out: jump to warp in proportion to its length.
                 if chat.sending > before && mods.cfg.typing.jump_on_send {
@@ -3001,13 +3001,19 @@ fn add_thrust(thrust: f32, keys: usize, kick: f32) -> f32 {
 
 /// Routes the line and sends it on its own thread; the outcome comes back
 /// through `chat.rx`. A line that doesn't route stays in the box.
+/// The agents signalling they're free: on, and idle or ready (not busy,
+/// stuck or spent). A note without @names goes to them (Y, 06:11).
+fn available_seats(deck: &Deck) -> Vec<String> {
+    deck.seats.iter().filter(|s| s.online() && matches!(s.shown.as_str(), "idle" | "ready")).map(|s| s.name.clone()).collect()
+}
+
 fn send_line(chat: &mut Chat, deck: &Deck, now: f32) {
     let text = chat.input.trim().to_string();
     if text.is_empty() {
         return;
     }
     let seats: Vec<String> = deck.seats.iter().map(|s| s.name.clone()).collect();
-    match chat::route(&text, &seats) {
+    match chat::route(&text, &seats, &available_seats(deck)) {
         Err(e) => chat.status = Some((e, true, now)),
         Ok(to) => {
             chat.input.clear();
@@ -3269,7 +3275,7 @@ fn draw_chat(
         let t = if chat.input.is_empty() && !chat.focus {
             "> Enter or Tab to type a note".to_string()
         } else if chat.input.is_empty() {
-            format!("> {}type a note: @seat to address it, none for all", if blink { "_" } else { " " })
+            format!("> {}type a note: @seat to address it, @all for all, none for the free agents", if blink { "_" } else { " " })
         } else {
             format!("> {}{}", chat.input, if chat.focus && blink { "_" } else { " " })
         };
@@ -3287,7 +3293,7 @@ fn draw_chat(
         let fresh = chat.status.as_ref().filter(|(_, _, at)| now - at < 8.0);
         let (t, err) = match fresh {
             Some((msg, err, _)) => (msg.clone(), *err),
-            None if !chat.input.trim().is_empty() => match chat::route(&chat.input, &seats) {
+            None if !chat.input.trim().is_empty() => match chat::route(&chat.input, &seats, &available_seats(&deck)) {
                 Ok(to) => (format!("to: {}", to_label(&to)), false),
                 Err(e) => (e, true),
             },

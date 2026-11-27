@@ -12,7 +12,10 @@ use std::process::Command;
 /// (several are fine); `@all` or no `@` is everyone; `-seat` drops that seat.
 /// Only words that start with @ or - count, so "re-run" and "foo@bar" are
 /// left alone.
-pub fn route(text: &str, seats: &[String]) -> Result<String, String> {
+/// `available` is the seats signalling they're free (idle or ready). A note
+/// with no @names goes to them alone (Y, 06:11); with nobody free, or with
+/// @all or @names, it goes the usual way.
+pub fn route(text: &str, seats: &[String], available: &[String]) -> Result<String, String> {
     let is_seat = |n: &str| seats.iter().any(|s| s == n);
     let mut names: Vec<String> = Vec::new();
     let mut excludes: Vec<String> = Vec::new();
@@ -27,6 +30,12 @@ pub fn route(text: &str, seats: &[String]) -> Result<String, String> {
         }
     }
     let drops: Vec<String> = excludes.iter().map(|s| format!("-{s}")).collect();
+    if names.is_empty() {
+        let free: Vec<&String> = available.iter().filter(|s| is_seat(s) && !excludes.contains(s)).collect();
+        if !free.is_empty() {
+            return Ok(free.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
+        }
+    }
     if names.is_empty() || names.iter().any(|n| n == "all") {
         let mut to = vec!["all".to_string()];
         to.extend(drops);
@@ -221,6 +230,7 @@ mod tests {
 
     #[test]
     fn routes_like_the_deck_chat_box() {
+        let route = |t: &str, s: &[String]| super::route(t, s, &[]);
         assert_eq!(route("hello", &seats()).unwrap(), "all");
         assert_eq!(route("@vibe hi", &seats()).unwrap(), "vibe");
         assert_eq!(route("@vibe @Devin look", &seats()).unwrap(), "vibe, devin");
@@ -229,6 +239,17 @@ mod tests {
         assert!(route("@nobody hi", &seats()).unwrap_err().contains("@nobody"));
         assert!(route("@owner hi", &seats()).is_err(), "Y doesn't send to Y");
         assert!(route("@vibe -vibe", &seats()).is_err());
+    }
+
+    #[test]
+    fn a_plain_note_goes_to_the_free_agents_first() {
+        let free = vec!["vibe".to_string(), "devin".to_string()];
+        assert_eq!(route("hello", &seats(), &free).unwrap(), "vibe, devin", "free ones only");
+        assert_eq!(route("hello -devin", &seats(), &free).unwrap(), "vibe");
+        assert_eq!(route("hello -vibe -devin", &seats(), &free).unwrap(), "all -vibe -devin", "none left free: as usual");
+        assert_eq!(route("@all hello", &seats(), &free).unwrap(), "all", "@all still means all");
+        assert_eq!(route("@grok hi", &seats(), &free).unwrap(), "grok", "a name still wins");
+        assert_eq!(route("hello", &seats(), &[]).unwrap(), "all", "everyone busy: as usual");
     }
 
     #[test]
