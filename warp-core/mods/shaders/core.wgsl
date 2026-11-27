@@ -68,8 +68,11 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let gas = base * disk * streaks * arms * (0.7 + 1.6 * inner_heat);
 
     // The photon ring and the lensed glow just outside the shadow.
-    let photon = exp(-pow((r - horizon - 0.012) / 0.01, 2.0)) * (3.0 + warp * 3.0);
-    let lensed = exp(-pow((r - horizon - 0.05) / 0.04, 2.0)) * 0.8;
+    // cool.a: the flare from packets just taken in (0..1); it lights the
+    // photon ring and the lensed glow instead of swelling the core.
+    let flare = clamp(core.cool.a, 0.0, 1.0);
+    let photon = exp(-pow((r - horizon - 0.012) / 0.01, 2.0)) * (3.0 + warp * 3.0 + flare * 5.0);
+    let lensed = exp(-pow((r - horizon - 0.05) / 0.04, 2.0)) * (0.8 + flare * 0.9);
 
     // Hawking radiation (Y, 05:23): faint sparks born at the photon ring,
     // drifting out on the disk's own turn and fading as they go, the start

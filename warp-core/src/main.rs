@@ -132,12 +132,44 @@ fn main() {
                     tooltip,
                     chat_results,
                     draw_chat,
+                    health_log,
                 )
                     .chain(),
             )
                 .chain(),
         )
         .run();
+}
+
+/// Once a minute, to the journal: what the warp core is carrying, so a cost
+/// that grows the longer it runs shows which part is growing (Y, 06:20).
+fn health_log(
+    real: Res<Time<Real>>,
+    all: Query<Entity>,
+    mats: Res<Assets<ColorMaterial>>,
+    meshes: Res<Assets<Mesh>>,
+    mut acc: Local<(u32, f32, f32, f32)>,
+) {
+    let dt = real.delta_secs();
+    acc.0 += 1;
+    acc.1 += dt;
+    acc.2 = acc.2.max(dt);
+    acc.3 += dt;
+    if acc.3 < 60.0 {
+        return;
+    }
+    let shown = VISIBLE.load(std::sync::atomic::Ordering::Relaxed);
+    eprintln!(
+        "warp-core health: up {:.0} min, {} entities, {} colour materials, {} meshes, {:.1} fps, worst frame {:.0} ms, {}",
+        real.elapsed_secs() / 60.0,
+        all.iter().count(),
+        mats.len(),
+        meshes.len(),
+        acc.0 as f32 / acc.1,
+        acc.2 * 1000.0,
+        if shown { "shown" } else { "hidden" }
+    );
+    *acc = (0, 0.0, 0.0, 0.0);
 }
 
 // ---------------------------------------------------------------- stopping
@@ -373,6 +405,7 @@ struct Deck {
     core_swell: f32,
     core_swell_v: f32,
     core_phase: f32,
+    core_rest: f32,
     /// The accretion disk's angle (radians), carried on frame to frame so a
     /// change of pace bends its turning instead of jumping the swirl, and
     /// how fast it turns now. The stars leave the core on the same turn.
@@ -677,6 +710,7 @@ fn watch_visibility() {
         .name("visibility".into())
         .spawn(|| {
             use std::io::{BufRead, BufReader};
+            bring_forward();
             let check = || {
                 if let Some(v) = window_visible() {
                     VISIBLE.store(v, std::sync::atomic::Ordering::Relaxed);
@@ -704,6 +738,21 @@ fn watch_visibility() {
             }
         })
         .ok();
+}
+
+/// After a start (a restart, an install), show the warp core in front once
+/// its window is up (Y, 06:19): focusing it opens its scratchpad if needed.
+fn bring_forward() {
+    for _ in 0..30 {
+        let up = hyprctl_json("clients")
+            .and_then(|c| c.as_array().map(|cs| cs.iter().any(|c| c["class"] == "warp-core")))
+            .unwrap_or(false);
+        if up {
+            let _ = std::process::Command::new("hyprctl").args(["dispatch", "focuswindow", "class:^(warp-core)$"]).output();
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
 }
 
 fn hypr_events() -> Option<std::os::unix::net::UnixStream> {
@@ -2149,11 +2198,11 @@ fn pulse_core(
     }
     let warp = deck.warp;
     let d = &mut *deck;
-    d.disk_rate = disk_rate(pace, warp);
+    d.disk_rate = disk_rate(pace, warp, d.core_energy);
     d.disk_angle = (d.disk_angle + d.disk_rate * dt).rem_euclid(std::f32::consts::TAU * 1024.0);
     let shape = core_step(
         &c,
-        CoreState { energy: d.core_energy, swell: d.core_swell, swell_v: d.core_swell_v, phase: d.core_phase },
+        CoreState { energy: d.core_energy, swell: d.core_swell, swell_v: d.core_swell_v, phase: d.core_phase, rest: d.core_rest },
         CoreInputs { arrived, busy, online, pace, warp, heat },
         dt,
     );
@@ -2161,11 +2210,14 @@ fn pulse_core(
     d.core_swell = shape.state.swell;
     d.core_swell_v = shape.state.swell_v;
     d.core_phase = shape.state.phase;
+    d.core_rest = shape.state.rest;
     for (mut tf, mat) in &mut core {
         tf.scale = Vec3::new(170.0 * shape.size, 170.0 * shape.size, 1.0);
         if let Some(mut m) = core_materials.get_mut(&mat.0) {
             m.u = CoreUniform {
-                cool: v4(c.cool, 1.0),
+                // cool.w carries the photon ring's flare (no new field, so
+                // the uniform's size and the shader's binding stay as they are).
+                cool: v4(c.cool, shape.flare),
                 hot: v4(c.hot, 1.0),
                 // The shader's churn runs on the core's own energy too.
                 // x is the disk's carried angle, not the clock (t29/Y 05:23).
@@ -2186,6 +2238,8 @@ struct CoreState {
     swell: f32,
     swell_v: f32,
     phase: f32,
+    /// The drawn size, eased toward where the energy and the crew put it.
+    rest: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -2205,14 +2259,16 @@ struct CoreShape {
     state: CoreState,
     /// The core's drawn size, 1.0 = `[core] size`.
     size: f32,
+    /// 0..1: how bright the photon ring flares from packets just taken in.
+    flare: f32,
 }
 
-/// One step of the core (t29): its size and oscillation are governed by
-/// what it takes in. Each packet that arrives adds energy (which decays)
-/// and kicks a damped spring, so the core visibly gulps it and rings down.
-/// Its resting size grows with that energy and with the share of the crew
-/// at work; its breathing quickens with energy, note traffic and heat, and
-/// deepens with energy. Warp swells it on top.
+/// One step of the core. Y didn't like it swelling in and out (06:19), so
+/// its size no longer oscillates: it eases (over `[core] settle` seconds)
+/// toward a resting size set by its energy and the share of the crew at
+/// work, and never wobbles. What it takes in shows as light instead: each
+/// packet adds energy and kicks a damped spring whose ringing is the photon
+/// ring's flare, and energy turns the disk faster (`disk_rate`).
 fn core_step(c: &mods::CoreCfg, s: CoreState, i: CoreInputs, dt: f32) -> CoreShape {
     let energy = (s.energy * (-c.energy_decay.max(0.0) * dt).exp() + i.arrived as f32 * c.per_packet).min(c.max_energy);
     // The spring: pulled back to rest, damped, kicked outward per packet.
@@ -2220,20 +2276,22 @@ fn core_step(c: &mods::CoreCfg, s: CoreState, i: CoreInputs, dt: f32) -> CoreSha
     let mut swell_v = s.swell_v + i.arrived as f32 * c.kick;
     swell_v += (-w * w * s.swell - 2.0 * c.ring_damping * w * swell_v) * dt;
     let swell = (s.swell + swell_v * dt).clamp(-0.5, 1.0);
-    // Breathing: a carried phase, so a change of rate bends it smoothly.
+    // The breathing phase still runs (the shader's churn can use it), but
+    // no longer moves the size.
     let rate = c.breath_rate + c.rate_per_energy * energy + c.rate_per_note * i.pace.min(30.0) + c.rate_per_heat * i.heat;
     let phase = (s.phase + rate * dt).rem_euclid(std::f32::consts::TAU * 64.0);
-    let depth = c.breath * (1.0 + c.depth_per_energy * energy);
     let busy_share = if i.online == 0 { 0.0 } else { i.busy as f32 / i.online as f32 };
-    let rest = 1.0 + c.grow_per_energy * energy + c.grow_busy * busy_share;
-    let size = c.size * rest * (1.0 + depth * phase.sin() + swell + i.warp * 0.25);
-    CoreShape { state: CoreState { energy, swell, swell_v, phase }, size: size.max(0.05) }
+    let target = 1.0 + c.grow_per_energy * energy + c.grow_busy * busy_share;
+    let from = if s.rest > 0.0 { s.rest } else { target };
+    let rest = from + (target - from) * (1.0 - (-dt / c.settle.max(0.05)).exp());
+    let flare = (swell.max(0.0) * 2.0).min(1.0);
+    CoreShape { state: CoreState { energy, swell, swell_v, phase, rest }, size: (c.size * rest).max(0.05), flare }
 }
 
 /// How fast the core's disk turns (radians a second at its edge): slow
 /// when quiet, faster with traffic and in warp.
-fn disk_rate(pace: f32, warp: f32) -> f32 {
-    0.35 + (pace.min(30.0) / 30.0) * 1.2 + warp * 1.5
+fn disk_rate(pace: f32, warp: f32, energy: f32) -> f32 {
+    0.35 + (pace.min(30.0) / 30.0) * 1.2 + warp * 1.5 + energy * 0.3
 }
 
 fn crew_heat(seats: &[SeatInfo]) -> f32 {
@@ -3619,7 +3677,15 @@ mod tests {
         let (_, quiet) = run_core(&c, CoreState::default(), calm, 2.0);
         let (st, fed) = run_core(&c, CoreState::default(), CoreInputs { arrived: 3, ..calm }, 2.0);
         let peak = |v: &[f32]| v.iter().cloned().fold(0.0, f32::max);
-        assert!(peak(&fed) > peak(&quiet) * 1.2, "a gulp of packets swells it: {} vs {}", peak(&fed), peak(&quiet));
+        assert!(peak(&fed) > peak(&quiet), "a gulp of packets grows it: {} vs {}", peak(&fed), peak(&quiet));
+        // ...without swinging: it eases up, and as the energy fades eases
+        // back down; its size turns round at most once, never in and out.
+        let (_, long) = run_core(&c, CoreState::default(), CoreInputs { arrived: 3, ..calm }, 30.0);
+        let steps: Vec<f32> = long.windows(2).map(|w| w[1] - w[0]).filter(|d| d.abs() > 1e-6).collect();
+        let turns = steps.windows(2).filter(|d| d[0].signum() != d[1].signum()).count();
+        assert!(turns <= 1, "no in-and-out: it turned {turns} times");
+        let quiet_moves = quiet.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f32::max);
+        assert!(quiet_moves < 1e-4, "a calm core holds still: {quiet_moves}");
         assert!(st.energy > 0.5, "and leaves it charged: {}", st.energy);
         // Left alone it rings down and the energy fades.
         let (st, _) = run_core(&c, st, calm, 60.0);
@@ -3636,7 +3702,9 @@ mod tests {
         assert!(charged.state.phase > still.state.phase * 2.0, "energy quickens the breathing");
         let idle = core_step(&c, CoreState::default(), base, 0.0).size;
         let busy = core_step(&c, CoreState::default(), CoreInputs { busy: 4, ..base }, 0.0).size;
-        assert!(busy > idle, "a working crew swells the core: {busy} vs {idle}");
+        assert!(busy > idle, "a working crew grows the core: {busy} vs {idle}");
+        let kicked = core_step(&c, CoreState::default(), CoreInputs { arrived: 2, ..base }, 0.05);
+        assert!(kicked.flare > 0.0, "a packet flares the photon ring");
         let flood = core_step(&c, CoreState::default(), CoreInputs { arrived: 1000, ..base }, 0.016);
         assert!(flood.state.energy <= c.max_energy && flood.state.swell <= 1.0, "a flood can't blow it up");
     }

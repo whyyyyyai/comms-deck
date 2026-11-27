@@ -35,6 +35,8 @@ depth_per_energy = 0.5        # each breath deeper with energy
 kick = 1.6                    # outward kick per packet (the gulp)
 ring_freq = 1.4               # the gulp rings down at this many Hz
 ring_damping = 0.25           # 1 = settles without overshoot
+settle = 3.0                  # seconds to ease to a new size; the core never swells in and out (Y, 06:19).
+                              # A packet's kick now flares the photon ring instead of the size.
 
 # The ring's spin comes from the agents' notes to each other: each one
 # kicks it on clockwise, the way the core's disk turns (a note never

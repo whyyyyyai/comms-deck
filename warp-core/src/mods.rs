@@ -140,6 +140,9 @@ pub struct CoreCfg {
     pub kick: f32,
     pub ring_freq: f32,
     pub ring_damping: f32,
+    /// Seconds the core takes to ease to a new resting size; it no longer
+    /// swells in and out (Y, 06:19).
+    pub settle: f32,
 }
 impl Default for CoreCfg {
     fn default() -> Self {
@@ -161,6 +164,7 @@ impl Default for CoreCfg {
             kick: 1.6,
             ring_freq: 1.4,
             ring_damping: 0.25,
+            settle: 3.0,
         }
     }
 }
