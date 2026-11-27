@@ -2632,7 +2632,11 @@ fn draw_moons_and_marks(
                 let r = (56.0 + band as f32 * 9.0) * s;
                 let a = t * mc.speed * if band % 2 == 0 { 1.0 } else { -0.8 } + (i % 12) as f32 / in_band as f32 * std::f32::consts::TAU;
                 let q = p + Vec2::new(a.cos() * r, a.sin() * r * 0.8);
-                gizmos.circle_2d(Isometry2d::from_translation(q), 1.6 * s, lin(c, dim));
+                // Y (06:20) saw GPU use climb as the deck fills: a backlog
+                // draws up to [moons] max circles per seat. These are a pixel
+                // or two wide, so 10 segments are indistinguishable from the
+                // default 32 — a third of the geometry for the same look.
+                gizmos.circle_2d(Isometry2d::from_translation(q), 1.6 * s, lin(c, dim)).resolution(10);
             }
         }
         if sc.show && view.moons {
@@ -2645,7 +2649,7 @@ fn draw_moons_and_marks(
                 let phase = (task_key(&sub.id) % 4096) as f32 / 4096.0 * std::f32::consts::TAU;
                 let a = t * sc.speed * (if band % 2 == 0 { 1.0 } else { -0.75 }) + phase;
                 let q = p + Vec2::new(a.cos() * r, a.sin() * r * 0.8);
-                gizmos.circle_2d(Isometry2d::from_translation(q), sc.size * s, seat_colour(&node.name, sc.bright * dim));
+                gizmos.circle_2d(Isometry2d::from_translation(q), sc.size * s, seat_colour(&node.name, sc.bright * dim)).resolution(10);
             }
         }
         if let Some((c, pulse)) = looks.0.get(&node.name).and_then(|l| l.beacon) {
@@ -2663,7 +2667,7 @@ fn draw_moons_and_marks(
         let Some((p, s)) = positions.get(sh.seat.as_str()) else { continue };
         let k = (t - sh.at) / 1.2;
         let r = (30.0 + k * 120.0 * sh.size) * s;
-        gizmos.circle_2d(Isometry2d::from_translation(*p), r, lin(sh.colour, 3.0 * (1.0 - k)));
+        gizmos.circle_2d(Isometry2d::from_translation(*p), r, lin(sh.colour, 3.0 * (1.0 - k))).resolution(20);
     }
 }
 
