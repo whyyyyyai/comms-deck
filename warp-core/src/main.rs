@@ -1817,8 +1817,8 @@ fn layout_held_tasks(
     assets: Res<Assets2d>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     time: Res<Time>,
-    seats: Query<(&SeatNode, &Transform)>,
-    mut nodes: Query<(Entity, &mut HeldTask, &mut Transform, &mut Visibility)>,
+    seats: Query<(&SeatNode, &Transform), Without<HeldTask>>,
+    mut nodes: Query<(Entity, &mut HeldTask, &mut Transform, &mut Visibility), Without<SeatNode>>,
 ) {
     let tc = &mods.cfg.tasks;
     let held: Vec<TaskInfo> = deck.tasks.iter().filter(|t| !t.open).cloned().collect();
@@ -3306,6 +3306,23 @@ fn draw_chat(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Bevy refuses, at start, two queries in one system that could touch
+    /// the same component mutably (B0001): 1.32 died in a restart loop on
+    /// exactly that. Initialising the systems catches it without a GPU.
+    #[test]
+    fn the_systems_queries_do_not_clash() {
+        let mut world = World::new();
+        let mut init = |mut s: Box<dyn System<In = (), Out = ()>>| {
+            s.initialize(&mut world);
+        };
+        init(Box::new(IntoSystem::into_system(layout_held_tasks)));
+        init(Box::new(IntoSystem::into_system(layout_tasks)));
+        init(Box::new(IntoSystem::into_system(layout_seats)));
+        init(Box::new(IntoSystem::into_system(drive_planets)));
+        init(Box::new(IntoSystem::into_system(draw_moons_and_marks)));
+        init(Box::new(IntoSystem::into_system(hud)));
+    }
 
     fn rules(toml: &str) -> Vec<Rule> {
         mods::load_config(toml).unwrap().1
