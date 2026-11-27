@@ -753,17 +753,35 @@ fn watch_visibility() {
 }
 
 /// After a start (a restart, an install), show the warp core in front once
-/// its window is up (Y, 06:19): focusing it opens its scratchpad if needed.
+/// its window is up (Y, 06:19). Hyprland 0.57 takes Lua dispatchers: the old
+/// `focuswindow class:...` form is a parse error there, which is why 1.36's
+/// version never worked. A scratchpad is opened the way Super+S does it.
 fn bring_forward() {
     for _ in 0..30 {
-        let up = hyprctl_json("clients")
-            .and_then(|c| c.as_array().map(|cs| cs.iter().any(|c| c["class"] == "warp-core")))
-            .unwrap_or(false);
-        if up {
-            let _ = std::process::Command::new("hyprctl").args(["dispatch", "focuswindow", "class:^(warp-core)$"]).output();
+        let clients = hyprctl_json("clients");
+        let monitors = hyprctl_json("monitors");
+        let ws = clients.as_ref().and_then(|c| {
+            c.as_array()?.iter().find(|c| c["class"] == "warp-core").and_then(|c| c["workspace"]["name"].as_str().map(String::from))
+        });
+        if let (Some(ws), Some(clients), Some(monitors)) = (ws, clients, monitors) {
+            if !shown(&clients, &monitors) {
+                if let Some(cmd) = show_dispatch(&ws) {
+                    let _ = std::process::Command::new("hyprctl").args(["dispatch", &cmd]).output();
+                }
+            }
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
+/// The Lua dispatcher that shows workspace `ws`.
+fn show_dispatch(ws: &str) -> Option<String> {
+    let safe = |n: &str| n.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-');
+    match ws.strip_prefix("special:") {
+        Some(name) if safe(name) => Some(format!("hl.dsp.workspace.toggle_special(\"{name}\")")),
+        Some(_) => None,
+        None => ws.parse::<i64>().ok().map(|n| format!("hl.dsp.focus({{ workspace = {n} }})")),
     }
 }
 
@@ -3480,6 +3498,13 @@ mod tests {
     fn sixty_and_up_is_paced_by_vsync_not_a_timer() {
         assert_eq!(frame_mode(60.0), UpdateMode::Continuous);
         assert!(matches!(frame_mode(24.0), UpdateMode::Reactive { .. }));
+    }
+
+    #[test]
+    fn bringing_it_forward_speaks_hyprlands_lua() {
+        assert_eq!(show_dispatch("special:magic").as_deref(), Some("hl.dsp.workspace.toggle_special(\"magic\")"));
+        assert_eq!(show_dispatch("4").as_deref(), Some("hl.dsp.focus({ workspace = 4 })"));
+        assert_eq!(show_dispatch("special:a\")b"), None, "nothing odd reaches the Lua");
     }
 
     #[test]
