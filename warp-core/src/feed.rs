@@ -88,6 +88,18 @@ pub struct Notice {
     pub text: String,
 }
 
+/// One task from the load balancer's board (tasks/<id>.json): who asked for
+/// it and who holds it. The summary never leaves the feed, like note text.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TaskInfo {
+    pub id: String,
+    /// The seat that asked for it: the ring colours tasks by this.
+    pub from: String,
+    /// The seat carrying it, if any (None while it orbits unassigned).
+    pub holder: Option<String>,
+    pub open: bool,
+}
+
 pub enum Msg {
     Seats(Vec<SeatInfo>),
     /// `true` when it just happened (it ripples the ring), false from the backlog.
@@ -95,6 +107,7 @@ pub enum Msg {
     Notice(Notice),
     Note(NoteInfo),
     Chat(ChatNote),
+    Tasks(Vec<TaskInfo>),
     Problem(String),
 }
 
@@ -323,6 +336,40 @@ fn add_usage(seats: &mut [SeatInfo], dir: &std::path::Path) {
     }
 }
 
+/// One tasks/<id>.json from the load balancer: t1, its assigner and holder.
+/// Done tasks and unreadable files are skipped; a task with no holder is
+/// open (orbiting), one with a holder is carried (a bolt to the core).
+pub fn parse_task(v: &Value) -> Option<TaskInfo> {
+    let id = v.get("id").and_then(Value::as_str)?.to_string();
+    if v.get("state").and_then(Value::as_str) == Some("done") {
+        return None;
+    }
+    let from = seat_id(v.get("from").and_then(Value::as_str).unwrap_or("owner"));
+    let holder = v.get("holder").and_then(Value::as_str).filter(|h| !h.is_empty()).map(seat_id);
+    Some(TaskInfo { id, from, open: holder.is_none(), holder })
+}
+
+/// Every task on the board, in id order. The board is the balancer's own
+/// state dir, so this shows exactly what `load-balancer tasks` shows.
+pub fn read_tasks(dir: &std::path::Path) -> Vec<TaskInfo> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut tasks: Vec<TaskInfo> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+        .filter_map(|text| serde_json::from_str::<Value>(&text).ok())
+        .filter_map(|v| parse_task(&v))
+        .collect();
+    tasks.sort_by(|a, b| nat_id(&a.id).cmp(&nat_id(&b.id)));
+    tasks
+}
+
+/// "t2" < "t10": the board's ids sort by their number, not byte-wise.
+fn nat_id(id: &str) -> (String, u64) {
+    let digits: String = id.chars().filter(|c| c.is_ascii_digit()).collect();
+    (id.trim_end_matches(|c: char| c.is_ascii_digit()).to_string(), digits.parse().unwrap_or(0))
+}
+
 fn status() -> Result<Vec<SeatInfo>, String> {
     let out = Command::new(program())
         .args(["status", "--json"])
@@ -397,6 +444,8 @@ pub fn run(tx: Sender<Msg>) {
     let mut act_tail = LogTail::new(act_path);
     let mut note_tail = LogTail::new(note_path);
     let mut last_status = Instant::now() - Duration::from_secs(10);
+    let tasks_dir = data_dir().join("tasks");
+    let mut last_tasks = Vec::new();
     loop {
         if last_status.elapsed() >= Duration::from_secs(2) {
             last_status = Instant::now();
@@ -410,6 +459,13 @@ pub fn run(tx: Sender<Msg>) {
             if tx.send(msg).is_err() {
                 return;
             }
+            // The board only matters when it changes, so it is read on the
+            // same slow clock and compared before it is sent.
+            let tasks = read_tasks(&tasks_dir);
+            if tasks != last_tasks && tx.send(Msg::Tasks(tasks.clone())).is_err() {
+                return;
+            }
+            last_tasks = tasks;
         }
         for v in tail.read_new() {
             if let Some(chat) = parse_chat(&v) {
@@ -551,6 +607,36 @@ mod tests {
     fn private_notes_and_commentary_never_fly() {
         assert!(parse_note(&json!({"kind": "message", "from": "a", "to": "b", "private": true})).is_none());
         assert!(parse_note(&json!({"kind": "commentary", "from": "a", "to": "b"})).is_none());
+    }
+
+    #[test]
+    fn a_task_keeps_its_assigner_and_holder() {
+        let t = parse_task(&json!({
+            "id": "t1", "from": "owner", "state": "held", "holder": "vibe",
+            "summary": "an we also have, while tasks are orbiting, the bolts…"
+        })).unwrap();
+        assert_eq!((t.id.as_str(), t.from.as_str()), ("t1", "owner"));
+        assert_eq!(t.holder.as_deref(), Some("vibe"));
+        assert!(!t.open);
+        assert!(parse_task(&json!({"id": "t2", "from": "Y", "state": "open"})).unwrap().open, "no holder: open");
+        assert_eq!(parse_task(&json!({"id": "t3", "from": "owner", "state": "done"})), None, "done tasks are gone");
+        assert!(parse_task(&json!({"state": "open"})).is_none(), "no id, no task");
+        assert_eq!(parse_task(&json!({"id": "t4", "from": "y", "state": "held", "holder": ""})).unwrap().from, "owner");
+    }
+
+    #[test]
+    fn the_board_reads_in_id_order_and_skips_junk() {
+        let dir = std::env::temp_dir().join(format!("warp-core-tasks-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("t10.json"), r#"{"id": "t10", "from": "owner", "state": "open"}"#).unwrap();
+        std::fs::write(dir.join("t2.json"), r#"{"id": "t2", "from": "Y", "state": "held", "holder": "claude"}"#).unwrap();
+        std::fs::write(dir.join("t1.json"), r#"{"id": "t1", "from": "owner", "state": "done"}"#).unwrap();
+        std::fs::write(dir.join("notes.txt"), "not a task").unwrap();
+        std::fs::write(dir.join("bad.json"), "{oops").unwrap();
+        let got: Vec<String> = read_tasks(&dir).into_iter().map(|t| t.id).collect();
+        assert_eq!(got, ["t2", "t10"], "the board's numeric order, done and junk left out");
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(read_tasks(&dir.join("missing")).is_empty());
     }
 
     #[test]
