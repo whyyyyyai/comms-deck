@@ -87,8 +87,8 @@ fn main() {
         // 30 fps until the mods say otherwise ([look] fps): it is a display,
         // not a game, and half the CPU of drawing at the refresh rate.
         .insert_resource(WinitSettings {
-            focused_mode: UpdateMode::reactive(std::time::Duration::from_millis(33)),
-            unfocused_mode: UpdateMode::reactive(std::time::Duration::from_millis(33)),
+            focused_mode: UpdateMode::Continuous,
+            unfocused_mode: UpdateMode::Continuous,
         })
         .add_plugins(
             DefaultPlugins
@@ -797,17 +797,28 @@ fn shown(clients: &serde_json::Value, monitors: &serde_json::Value) -> bool {
 
 /// Sets the frame rate each frame: the mods' fps while shown, fps_hidden
 /// while hidden.
+///
+/// At 60 fps or more it draws continuously and the display's vsync paces it:
+/// a 16.7 ms timer on top of a 60 Hz vsync slips past every other refresh,
+/// and 1.35 ran at 33 fps shown for exactly that reason (health log, 06:27).
 fn pace_frames(mods: Res<Mods>, mut winit: ResMut<WinitSettings>) {
-    let frame = |fps: f32| std::time::Duration::from_secs_f32(1.0 / fps.clamp(1.0, 120.0));
     let (focused, unfocused) = if VISIBLE.load(std::sync::atomic::Ordering::Relaxed) {
-        (frame(mods.cfg.look.fps), frame(mods.cfg.look.fps_unfocused))
+        (frame_mode(mods.cfg.look.fps), frame_mode(mods.cfg.look.fps_unfocused))
     } else {
-        (frame(mods.cfg.look.fps_hidden), frame(mods.cfg.look.fps_hidden))
+        (frame_mode(mods.cfg.look.fps_hidden), frame_mode(mods.cfg.look.fps_hidden))
     };
-    let want = (UpdateMode::reactive(focused), UpdateMode::reactive(unfocused));
+    let want = (focused, unfocused);
     if winit.focused_mode != want.0 || winit.unfocused_mode != want.1 {
         winit.focused_mode = want.0;
         winit.unfocused_mode = want.1;
+    }
+}
+
+fn frame_mode(fps: f32) -> UpdateMode {
+    if fps >= 59.0 {
+        UpdateMode::Continuous
+    } else {
+        UpdateMode::reactive(std::time::Duration::from_secs_f32(1.0 / fps.clamp(1.0, 120.0)))
     }
 }
 
@@ -1367,9 +1378,8 @@ fn watch_mods(
                 m.notice = Some((format!("warp-core.toml loaded ({n} rules)"), now));
                 let c = &m.cfg;
                 clear.0 = Color::linear_rgb(c.look.background[0], c.look.background[1], c.look.background[2]);
-                let frame = |fps: f32| std::time::Duration::from_secs_f32(1.0 / fps.clamp(5.0, 120.0));
-                winit.focused_mode = UpdateMode::reactive(frame(c.look.fps));
-                winit.unfocused_mode = UpdateMode::reactive(frame(c.look.fps_unfocused));
+                winit.focused_mode = frame_mode(c.look.fps);
+                winit.unfocused_mode = frame_mode(c.look.fps_unfocused);
                 for mut b in &mut bloom {
                     b.intensity = c.look.bloom;
                 }
@@ -3420,6 +3430,12 @@ mod tests {
         assert!(shows_change("workspacev2>>2,nav\n"));
         assert!(!shows_change("activewindow>>kitty,claude\n"));
         assert_eq!(mods::Look::default().fps_hidden, 24.0);
+    }
+
+    #[test]
+    fn sixty_and_up_is_paced_by_vsync_not_a_timer() {
+        assert_eq!(frame_mode(60.0), UpdateMode::Continuous);
+        assert!(matches!(frame_mode(24.0), UpdateMode::Reactive { .. }));
     }
 
     #[test]
