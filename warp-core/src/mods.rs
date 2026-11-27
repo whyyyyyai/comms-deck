@@ -183,8 +183,8 @@ impl Default for OrbitCfg {
 
 /// The planets' motion (t13): each seat is a body in a simplified physics
 /// sim — gravity pulls it towards the singularity, an agent at work has
-/// thrust enough to climb to a higher orbit, an idle one keeps orbiting and
-/// drifts inwards, and no planet is ever lost over the screen's edge.
+/// thrust enough to climb to a higher orbit, an idle one keeps a fairly
+/// stable orbit (t18), and no planet is ever lost over the screen's edge.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PhysicsCfg {
@@ -195,9 +195,25 @@ pub struct PhysicsCfg {
     /// pull at the planet's radius, fading to nothing near the screen's
     /// edge so a working agent parks on the highest orbit there is room for.
     pub thrust: f32,
-    /// Inward drift while a seat isn't working (px/s²): it keeps orbiting
-    /// but sinks slowly towards the core.
+    /// Inward drift while a seat isn't working (px/s²). 0 keeps every
+    /// planet on a fairly stable orbit (Y, t18); raise it to have idle
+    /// planets sink slowly towards the core again.
     pub drift: f32,
+    /// The planets' pull on each other (t18): the acceleration between two
+    /// planets is `mutual * mass / dist²`, mass from the context pool.
+    pub mutual: f32,
+    /// Pairs closer than this (px) pull with the strength at this distance,
+    /// so a close pass can't sling a planet away.
+    pub soften: f32,
+    /// How strongly a body's share of the context pool drives its drawn
+    /// size, for planets and stars alike (t18). An even split draws at 1.0;
+    /// the span is how far a body may shrink or grow from that, as a
+    /// fraction (0.5 = half to one and a half times).
+    pub size_span: f32,
+    /// How much of the ring's turning rides on top of each planet's own
+    /// circular speed (t18): the planets mostly hold Keplerian orbits,
+    /// and the notes' spin kicks still stir them round the ring.
+    pub turn_share: f32,
     /// How hard the planets are steered onto the ring's turning, as a
     /// rate (per second) on the gap between their tangential speed and the
     /// ring's; this is what the notes' spin kicks and warp swing ride on.
@@ -219,7 +235,11 @@ impl Default for PhysicsCfg {
         PhysicsCfg {
             gravity: 530_000.0,
             thrust: 1.6,
-            drift: 1.2,
+            drift: 0.0,
+            mutual: 60_000.0,
+            soften: 60.0,
+            size_span: 0.5,
+            turn_share: 0.3,
             steering: 2.0,
             max_steer: 120.0,
             min_radius: 90.0,
@@ -448,13 +468,10 @@ pub struct TasksCfg {
     pub radius: f32,
     pub size: f32,
     pub bright: f32,
-    /// How bright a holder's bolt to the core burns; 0 (the default, Y's
-    /// t19) draws none.
-    pub bolt_bright: f32,
 }
 impl Default for TasksCfg {
     fn default() -> Self {
-        TasksCfg { show: true, speed: 0.22, radius: 0.42, size: 0.5, bright: 1.1, bolt_bright: 0.0 }
+        TasksCfg { show: true, speed: 0.22, radius: 0.42, size: 0.5, bright: 1.1 }
     }
 }
 

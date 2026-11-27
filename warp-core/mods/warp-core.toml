@@ -51,14 +51,19 @@ max_spin = 1.5
 # The planets' motion is a simplified physics sim (t13, vibe): gravity pulls
 # each one towards the singularity (acceleration falls off as 1/r², so inner
 # orbits run faster); an agent at work has thrust enough to climb to a
-# higher orbit away from the warp core; an agent with nothing to do keeps
-# orbiting but sinks slowly in; and no planet is ever lost over the screen's
-# edge — it is reflected back in, keeping some of its speed.
+# higher orbit away from the warp core; an agent with nothing to do keeps a
+# fairly stable orbit; the planets pull on each other, each weighing its
+# share of the crew's context pool, and no planet is ever lost over the
+# screen's edge — it is reflected back in, keeping some of its speed.
 [physics]
 gravity = 530000.0            # the core's pull, px³/s² (a = gravity / r²)
 thrust = 1.6                  # outward push while busy, as a multiple of the local pull (fades near the edge)
-drift = 1.2                   # inward sink while not busy, px/s²
-steering = 2.0                # how fast tangential speed settles onto the ring's turning
+drift = 0.0                   # inward sink while not busy, px/s² (0 = fairly stable orbits, Y t18)
+mutual = 60000.0              # the planets' pull on each other, px³/s²
+soften = 60.0                 # close pairs pull at this distance, px
+size_span = 0.5               # how far context share stretches a body's drawn size
+turn_share = 0.3              # the ring's turning on top of each orbit's circular speed
+steering = 2.0                # how fast tangential speed settles onto its target
 max_steer = 120.0             # the hardest the steering may push, px/s²
 min_radius = 90.0             # nothing falls closer to the core than this, px
 bounce = 0.5                  # speed kept on a bounce off the screen's edge
@@ -124,16 +129,17 @@ dock = true                   # the line of seats that aren't on the ring
 hover_card = false            # the seat card under the pointer (off for now)
 
 # The load balancer's task board, read live from ~/.local/share/comms-deck/.
-# Open tasks orbit the core on their own ring; a held task draws no line to
-# the core (Y, t19), only the packet it fires when done. Both are coloured by the seat that assigned the task
-# (Y's tasks burn gold), and t toggles the whole thing.
+# Open tasks orbit the core on their own ring, passing behind and in front
+# of it; a held task is an electron on a fast own orbit of its holder's
+# planet, in front of and behind it (Y, t20). Both are coloured by the seat
+# that assigned the task (Y's tasks burn gold), and t toggles the whole
+# thing.
 [tasks]
 show = true
 speed = 0.22                  # radians a second the task ring turns
 radius = 0.42                 # the ring's radius, as a share of the seat ring's
 size = 0.5
 bright = 1.1
-bolt_bright = 0.0             # no standing bolt to the core (Y, t19)
 
 # The chat panel on the right: the notes, and a chat box that sends as Y.
 # The terminal chat screen keeps working alongside it.

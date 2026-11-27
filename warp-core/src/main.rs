@@ -106,6 +106,7 @@ fn main() {
                 // than they saved. WARP_CORE_THREADS overrides.
                 .set(TaskPoolPlugin { task_pool_options: TaskPoolOptions::with_num_threads(worker_threads()) }),
         )
+        .add_plugins(DrainOnStop)
         .add_plugins((
             Material2dPlugin::<RingMaterial>::default(),
             Material2dPlugin::<CoreMaterial>::default(),
@@ -115,7 +116,7 @@ fn main() {
         .add_systems(
             Update,
             (
-                (watch_mods, pace_frames, read_feed, layout_view, apply_rules, layout_seats, layout_tasks, pointer, chat_input, keys).chain(),
+                (watch_mods, pace_frames, read_feed, layout_view, apply_rules, layout_seats, layout_tasks, layout_held_tasks, pointer, chat_input, keys).chain(),
                 (
                     glow_seats,
                     draw_rings,
@@ -126,7 +127,6 @@ fn main() {
                     draw_splash,
                     draw_links,
                     drive_planets,
-                    draw_task_bolts,
                     draw_moons_and_marks,
                     hud,
                     tooltip,
@@ -138,6 +138,49 @@ fn main() {
                 .chain(),
         )
         .run();
+}
+
+// ---------------------------------------------------------------- stopping
+
+/// Set by SIGTERM/SIGINT; the render thread sees it after its next submit.
+static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn on_stop(_: libc::c_int) {
+    STOP.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Stop without crashing the GPU. A `systemctl stop` used to kill the warp
+/// core mid-frame, its GPU jobs still in flight, and the M1's driver faulted
+/// on the torn-down memory: 2026-11-27 05:19 (then a restart loop and a
+/// reboot at 05:31) and 05:58, both at the moment the old copy was stopped.
+/// Now a stop waits for the frame in hand to be submitted and the GPU to go
+/// idle, then leaves at once, before anything is freed under the GPU.
+struct DrainOnStop;
+
+impl Plugin for DrainOnStop {
+    fn build(&self, app: &mut App) {
+        // SAFETY: the handler only stores to an atomic.
+        unsafe {
+            libc::signal(libc::SIGTERM, on_stop as *const () as libc::sighandler_t);
+            libc::signal(libc::SIGINT, on_stop as *const () as libc::sighandler_t);
+        }
+        if let Some(render) = app.get_sub_app_mut(bevy::render::RenderApp) {
+            render.add_systems(bevy::render::Render, drain_on_stop.in_set(bevy::render::RenderSystems::Cleanup));
+        }
+    }
+}
+
+fn drain_on_stop(device: Res<bevy::render::renderer::RenderDevice>) {
+    if !STOP.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let wait = bevy::render::render_resource::PollType::Wait {
+        submission_index: None,
+        timeout: Some(std::time::Duration::from_secs(3)),
+    };
+    let idle = device.poll(wait);
+    eprintln!("warp-core: stopping; GPU drained: {}", idle.is_ok());
+    std::process::exit(0);
 }
 
 // ---------------------------------------------------------------- materials
@@ -337,12 +380,15 @@ struct Deck {
     disk_rate: f32,
     /// Each seat's last state from activity, to see a job finish.
     last_state: HashMap<String, String>,
-    /// The load balancer's board: open tasks orbit, held ones are bolts.
+    /// The load balancer's board: open tasks orbit the core, held ones are
+    /// electrons on their holder's planet (t20).
     tasks: Vec<TaskInfo>,
     /// How far round the task ring has turned (radians).
     task_orbit: f32,
     /// The task ids the ring was last built from.
     tasks_built: Vec<String>,
+    /// The held task ids the electron orbits were last built from (t20).
+    held_built: Vec<String>,
     problem: Option<String>,
     pending: Vec<NoteInfo>,
     shocks: Vec<Shock>,
@@ -727,16 +773,44 @@ struct Body {
     vel: Vec2,
 }
 
+/// One planet's mass (t18): its share of the crew's context pool, scaled so
+/// an even split weighs 1 a head. A seat on the ring that reports no
+/// context weighs the average; with no figures at all everyone weighs 1.
+fn body_mass(shares: &[(String, f32)], name: &str) -> f32 {
+    let n = shares.len();
+    if n == 0 {
+        return 1.0;
+    }
+    match shares.iter().find(|(s, _)| s == name) {
+        Some((_, share)) => share * n as f32,
+        None => 1.0,
+    }
+}
+
+/// How big a body holding `share` of the context pool is drawn (t18), for
+/// planets and stars alike. Relative to the crew: an even split draws at
+/// 1.0, and `span` is how far a body may shrink or grow from that (as a
+/// fraction). With no figures at all everything draws at 1.0.
+fn body_size(share: f32, seats: usize, span: f32) -> f32 {
+    let even = 1.0 / seats.max(1) as f32;
+    if seats == 0 || even <= 0.0 {
+        return 1.0;
+    }
+    (1.0 + span * (share / even - 1.0)).clamp(1.0 - span * 0.5, 1.0 + span * 0.5)
+}
+
 /// One step of the planets' physics (t13). The core is a singularity: its
 /// pull is `gravity / r²` towards the centre. A busy seat has thrust enough
-/// to climb to a higher orbit; an idle one keeps orbiting and drifts in
-/// towards the core. The ring's turning (drift, traffic, warp, the notes'
-/// spin kicks) steers each planet's tangential speed towards `turning * r`,
-/// so the whole ring still answers the deck the way it did. No planet is
-/// ever lost over the screen's edge: past the margin it is reflected back
-/// in, keeping `bounce` of its speed. Inside `min_radius` nothing falls
-/// further in: the planet skims the singularity and keeps circling.
-fn step_body(body: &mut Body, busy: bool, turning: f32, scene: Vec2, dt: f32, cfg: &mods::PhysicsCfg) {
+/// to climb to a higher orbit; an idle one keeps a fairly stable orbit
+/// (t18). The ring's turning (drift, traffic, warp, the notes' spin kicks)
+/// rides on top of each planet's own circular speed (`turn_share` of
+/// `turning * r`), so the whole ring still answers the deck the way it
+/// did. `pull` is what the other planets' gravity
+/// adds for this one (t18). No planet is ever lost over the screen's edge:
+/// past the margin it is reflected back in, keeping `bounce` of its speed.
+/// Inside `min_radius` nothing falls further in: the planet skims the
+/// singularity and keeps circling.
+fn step_body(body: &mut Body, busy: bool, turning: f32, scene: Vec2, dt: f32, cfg: &mods::PhysicsCfg, pull: Vec2) {
     let dt = dt.min(0.1); // a stall mustn't fling anything
     let p = body.pos;
     let r = p.length().max(1.0);
@@ -755,11 +829,14 @@ fn step_body(body: &mut Body, busy: bool, turning: f32, scene: Vec2, dt: f32, cf
     let fade = 1.0 - ((r - 0.75 * edge) / (0.25 * edge.max(1.0))).clamp(0.0, 1.0);
     let thrust = if busy { cfg.thrust * g * fade } else { 0.0 };
     let sink = if busy { 0.0 } else { cfg.drift };
-    // Steer the tangential speed onto the ring's turning, capped, so the
-    // spin kicks and warp swing are felt but can't throw a planet.
+    // Steer the tangential speed onto the orbit's own circular speed plus
+    // a share of the ring's turning (t18: fairly stable orbits, still
+    // stirred by the deck), capped, so the spin kicks and warp swing are
+    // felt but can't throw a planet.
     let v_t = body.vel.dot(tang);
-    let steer = ((turning * r - v_t) * cfg.steering).clamp(-cfg.max_steer, cfg.max_steer);
-    body.vel += (out * (thrust - sink - g) + tang * steer) * dt;
+    let target = (g * r).sqrt() + turning * r * cfg.turn_share;
+    let steer = ((target - v_t) * cfg.steering).clamp(-cfg.max_steer, cfg.max_steer);
+    body.vel += (out * (thrust - sink - g) + tang * steer + pull) * dt;
     body.pos += body.vel * dt;
     // Skim, don't fall in: on the floor of the core's well the inward part
     // of the speed is taken away, leaving the planet to circle.
@@ -797,6 +874,15 @@ struct TaskNode {
     from: String,
 }
 
+/// A held task waiting on its holder: an electron on its own fast orbit of
+/// the planet, passing in front of and behind it (t20, Y). `key` is hashed
+/// from the id once, so the task always flies the same way.
+#[derive(Component)]
+struct HeldTask {
+    holder: String,
+    key: u32,
+}
+
 #[derive(Component)]
 struct SeatLabel;
 
@@ -826,6 +912,8 @@ struct Star {
     speed: f32,
     /// 0..1, fixed: which seat's share of the sky this star falls in.
     slot: f32,
+    /// Drawn size: how much of the context pool the star's seat holds (t18).
+    size: f32,
     /// Its colour (linear), for the light it leaves on the wall.
     colour: Vec3,
 }
@@ -1075,7 +1163,7 @@ fn setup(
         let a = rng.next() * std::f32::consts::TAU;
         let dir = Vec2::from_angle(a);
         commands.spawn((
-            Star { dir, dist: 40.0 + rng.next() * 1400.0, speed: 0.4 + rng.next() * 1.2, slot: rng.next(), colour: Vec3::new(0.9, 0.95, 1.4) },
+            Star { dir, dist: 40.0 + rng.next() * 1400.0, speed: 0.4 + rng.next() * 1.2, slot: rng.next(), size: 1.0, colour: Vec3::new(0.9, 0.95, 1.4) },
             Mesh2d(assets.star.clone()),
             MeshMaterial2d(star_mat.clone()),
             Transform::from_xyz(0.0, 0.0, 0.0),
@@ -1581,15 +1669,37 @@ fn layout_seats(
         deck.built = names;
         return;
     }
-    // The planets fly the sim now (t13): gravity, thrust, drift, steering —
-    // each one on its own, so working agents climb to higher orbits while
-    // the idle ones sink towards the core. Depth follows the sim too: the
-    // higher a planet stands on the screen (the far side of the tilted
-    // orbit), the further behind the core it slides.
+    // The planets fly the sim now (t13): gravity, thrust, steering — each
+    // one on its own, so working agents climb to higher orbits while idle
+    // ones hold a fairly stable circle. On top of the core's pull the
+    // planets pull on each other (t18), each weighing its share of the
+    // crew's context pool.
+    let shares = context_shares(&deck.seats);
+    let pc = &mods.cfg.physics;
+    let gathered: Vec<(Body, bool, f32)> = nodes
+        .iter()
+        .map(|(_, node, _)| {
+            let busy = deck.seat(&node.name).is_some_and(|s| s.shown == "busy");
+            (node.body, busy, body_mass(&shares, &node.name))
+        })
+        .collect();
+    let mut pull = vec![Vec2::ZERO; gathered.len()];
+    for i in 0..gathered.len() {
+        for j in (i + 1)..gathered.len() {
+            let d = gathered[j].0.pos - gathered[i].0.pos;
+            let d2 = d.length_squared().max(pc.soften * pc.soften);
+            let a = pc.mutual / d2 / d2.sqrt();
+            pull[i] += d * (a * gathered[j].2);
+            pull[j] -= d * (a * gathered[i].2);
+        }
+    }
+    // Depth follows the sim too: the higher a planet stands on the screen
+    // (the far side of the tilted orbit), the further behind the core it
+    // slides.
     let ry = layout.scene.y * 0.30;
-    for (_, mut node, mut tf) in &mut nodes {
-        let busy = deck.seat(&node.name).is_some_and(|s| s.shown == "busy");
-        step_body(&mut node.body, busy, turning, layout.scene, dt, &mods.cfg.physics);
+    for (i, (_, mut node, mut tf)) in nodes.iter_mut().enumerate() {
+        let (_, busy, _) = gathered[i];
+        step_body(&mut node.body, busy, turning, layout.scene, dt, pc, pull[i]);
         let p = node.body.pos;
         node.depth = (0.5 - 0.5 * (p.y / ry)).clamp(0.0, 1.0);
         tf.translation.x = p.x;
@@ -1610,6 +1720,14 @@ fn task_positions(n: usize, scene: Vec2, orbit: f32, radius: f32) -> Vec<Vec2> {
             Vec2::new(a.cos() * seat_rx, a.sin() * seat_ry)
         })
         .collect()
+}
+
+/// A task dot's z on the core ring (t20): behind the core on the far side
+/// of the ellipse, in front on the near side — the same slide the planets
+/// make, so waiting tasks pass both ways.
+fn task_z(p: Vec2, scene: Vec2, radius: f32) -> f32 {
+    let ry = scene.y * 0.30 * radius;
+    seat_z((0.5 - 0.5 * (p.y / ry.max(1.0))).clamp(0.0, 1.0))
 }
 
 /// Open tasks orbit the core on their own ring; each burns in the colour of
@@ -1647,7 +1765,7 @@ fn layout_tasks(
                     TaskNode { id: task.id.clone(), from: task.from.clone() },
                     Mesh2d(assets.dot.clone()),
                     MeshMaterial2d(materials.add(colour)),
-                    Transform::from_xyz(p.x, p.y, 1.5).with_scale(Vec3::splat(tc.size)),
+                    Transform::from_xyz(p.x, p.y, task_z(*p, layout.scene, tc.radius)).with_scale(Vec3::splat(tc.size)),
                 ))
                 .with_children(|task_node| {
                     task_node.spawn((
@@ -1667,7 +1785,7 @@ fn layout_tasks(
         if let Some(p) = pos.get(i) {
             tf.translation.x = p.x;
             tf.translation.y = p.y;
-            tf.translation.z = 1.5;
+            tf.translation.z = task_z(*p, layout.scene, tc.radius);
         }
         if let Some(task) = open.get(i) {
             node.from = task.from.clone();
@@ -1675,43 +1793,87 @@ fn layout_tasks(
     }
 }
 
-/// A held task is a bolt from its holder's seat to the core, in the
-/// assigner's colour, with a packet of light running down it — the task
-/// literally travelling from where it was asked into the work.
-fn draw_task_bolts(
-    deck: Res<Deck>,
+/// A stable hash of a task id (FNV-1a): the electron's phase, pace,
+/// direction and radius all come off it, so a task always flies the same
+/// way while it waits (t20).
+fn task_key(id: &str) -> u32 {
+    let mut h = 2166136261u32;
+    for b in id.bytes() {
+        h = (h ^ u32::from(b)).wrapping_mul(16777619);
+    }
+    h
+}
+
+/// Held tasks are electrons (t20, Y): each waits on its own fast orbit of
+/// its holder's planet, passing in front of and behind it — the orbit is
+/// tipped so the dot slides under the planet on the far side and over it
+/// on the near side. Rebuilt when the board's held set changes, like the
+/// open ring; a holder that leaves the ring takes its electron with it.
+fn layout_held_tasks(
+    mut commands: Commands,
+    mut deck: ResMut<Deck>,
     mods: Res<Mods>,
     view: Res<View>,
+    assets: Res<Assets2d>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
     time: Res<Time>,
-    nodes: Query<(&SeatNode, &Transform)>,
-    mut gizmos: Gizmos,
+    seats: Query<(&SeatNode, &Transform)>,
+    mut nodes: Query<(Entity, &mut HeldTask, &mut Transform, &mut Visibility)>,
 ) {
     let tc = &mods.cfg.tasks;
-    // No standing lines to the core (Y, t19): bolts are off unless a mod
-    // turns them back up.
-    if !tc.show || !view.tasks || tc.bolt_bright <= 0.0 {
+    let held: Vec<TaskInfo> = deck.tasks.iter().filter(|t| !t.open).cloned().collect();
+    let ids: Vec<String> = held.iter().map(|t| t.id.clone()).collect();
+    let shown = tc.show && view.tasks;
+    if ids != deck.held_built || !shown {
+        for (e, _, _, _) in &nodes {
+            commands.entity(e).despawn();
+        }
+        deck.held_built = if shown { ids.clone() } else { Vec::new() };
+        if !shown {
+            return;
+        }
+        for task in &held {
+            let Some(holder) = task.holder.clone() else { continue };
+            commands
+                .spawn((
+                    HeldTask { holder, key: task_key(&task.id) },
+                    Mesh2d(assets.dot.clone()),
+                    MeshMaterial2d(materials.add(seat_colour(&task.from, tc.bright))),
+                    Transform::from_xyz(0.0, 0.0, 1.0).with_scale(Vec3::splat(tc.size)),
+                    Visibility::Inherited,
+                ))
+                .with_children(|task_node| {
+                    task_node.spawn((
+                        Text2d::new(task.id.clone()),
+                        TextFont { font_size: FontSize::Px(12.0), ..default() },
+                        TextColor(seat_colour(&task.from, 0.9)),
+                        Anchor::TOP_CENTER,
+                        Transform::from_xyz(0.0, -9.0, 0.1),
+                    ));
+                });
+        }
         return;
     }
     let t = time.elapsed_secs();
-    let bend = conduit_bend(&mods.cfg.conduits, deck.turning);
-    let positions: HashMap<&str, Vec2> =
-        nodes.iter().map(|(n, tf)| (n.name.as_str(), tf.translation.truncate())).collect();
-    for task in deck.tasks.iter().filter(|t| !t.open) {
-        let Some(holder) = task.holder.as_deref().and_then(|h| positions.get(h)) else { continue };
-        let dim = if deck.focus.as_ref().is_some_and(|f| *f != task.holder.as_deref().unwrap_or("")) {
-            0.25
-        } else {
-            1.0
+    for (_, node, mut tf, mut vis) in &mut nodes {
+        let holder = seats.iter().find(|(n, _)| n.name == node.holder).map(|(_, tf)| *tf);
+        let Some(htf) = holder else {
+            *vis = Visibility::Hidden;
+            continue;
         };
-        // Along the holder's conduit, bent by the spin like it, in the
-        // colour of whoever asked. No packet until the task is done (Y):
-        // that one is fired when it leaves the board (read_feed).
-        let path = conduit_path(*holder, bend, 18);
-        let n = path.len() as f32;
-        let _ = t;
-        gizmos.linestrip_gradient_2d(path.iter().enumerate().map(|(i, p)| {
-            (*p, seat_colour(&task.from, tc.bolt_bright * dim * (1.0 - 0.7 * i as f32 / n)))
-        }));
+        *vis = Visibility::Inherited;
+        let h = node.key;
+        let phase = (h % 4096) as f32 / 4096.0 * std::f32::consts::TAU;
+        let pace = (1.1 + ((h >> 12) % 2048) as f32 / 2048.0 * 1.9) * if (h >> 23) & 1 == 0 { 1.0 } else { -1.0 };
+        let s = htf.scale.x.max(0.1);
+        let rad = (44.0 + (h >> 24) as f32 / 255.0 * 20.0) * s;
+        let a = phase + pace * t;
+        let p = htf.translation.truncate() + Vec2::new(a.cos() * rad, a.sin() * rad * 0.35);
+        tf.translation.x = p.x;
+        tf.translation.y = p.y;
+        // Behind the planet's face on the far side of the orbit, in front on
+        // the near side — like an electron dipping under and over.
+        tf.translation.z = htf.translation.z - 0.55 * s * a.sin();
     }
 }
 
@@ -1813,6 +1975,8 @@ fn glow_seats(
 ) {
     let t = time.elapsed_secs();
     let cfg = &mods.cfg;
+    // A planet is as big as its seat's share of the context pool (t18).
+    let shares = context_shares(&deck.seats);
     for (mut node, mat, mut tf, children) in &mut nodes {
         let Some(seat) = deck.seat(&node.name) else { continue };
         let look = looks.0.get(&node.name).cloned().unwrap_or_default();
@@ -1830,8 +1994,11 @@ fn glow_seats(
             m.color = lin(look.tint.unwrap_or_else(|| seat_rgb(&node.name)), b);
         }
         let hovered = cfg.hud.hover_card && deck.hover.as_ref() == Some(&node.name);
+        let share = shares.iter().find(|(n, _)| n == &node.name).map(|(_, s)| *s).unwrap_or(1.0 / shares.len().max(1) as f32);
         tf.scale = Vec3::splat(
-            cfg.seats.size * (0.72 + 0.4 * node.depth) * (1.0 + node.flash * 0.35) * if hovered { 1.12 } else { 1.0 },
+            cfg.seats.size * body_size(share, shares.len(), cfg.physics.size_span) * (0.72 + 0.4 * node.depth)
+                * (1.0 + node.flash * 0.35)
+                * if hovered { 1.12 } else { 1.0 },
         );
         for child in children.iter() {
             if let Ok(mut text) = labels.get_mut(child) {
@@ -2333,7 +2500,7 @@ fn move_stars(
         let stretch = 1.0 + (deck.warp * sc.stretch + deck.thrust * tc.stretch) * near + pace * 0.1;
         tf.translation = Vec3::new(p.x, p.y, 0.0);
         tf.rotation = Quat::from_rotation_z(star.dir.to_angle());
-        tf.scale = Vec3::new(stretch * (1.0 + near), 0.6 + near, 1.0);
+        tf.scale = Vec3::new(stretch * (1.0 + near) * star.size, (0.6 + near) * star.size, 1.0);
     }
 }
 
@@ -2690,6 +2857,13 @@ fn colour_stars(
             Some(n) => Vec3::from(seat_rgb(n)) * sc.context_bright,
             None => Vec3::from(sc.colour),
         };
+        // The stars weigh in too (t18): the more of the context pool a
+        // seat holds, the bigger its stars burn, updating as the shares do.
+        let share = match seat.and_then(|n| shares.iter().find(|(s, _)| s == n)) {
+            Some((_, s)) => *s,
+            None => 1.0 / shares.len().max(1) as f32,
+        };
+        star.size = body_size(share, shares.len(), mods.cfg.physics.size_span);
         let want = seat.and_then(|n| mats.seats.get(n)).unwrap_or(&mats.default).clone();
         if mat.0 != want {
             mat.0 = want;
@@ -3198,7 +3372,7 @@ mod tests {
         let (mut lo, mut hi) = (r, r);
         let (mut went_down, mut went_left) = (false, false);
         for _ in 0..5400 {
-            step_body(&mut b, false, 0.0, scene, 1.0 / 60.0, &cfg);
+            step_body(&mut b, false, 0.0, scene, 1.0 / 60.0, &cfg, Vec2::ZERO);
             lo = lo.min(b.pos.length());
             hi = hi.max(b.pos.length());
             went_down |= b.pos.y < -100.0;
@@ -3209,28 +3383,33 @@ mod tests {
     }
 
     #[test]
-    fn busy_planets_climb_and_idle_ones_sink() {
+    fn busy_planets_ride_higher_and_idle_ones_hold() {
         let cfg = mods::PhysicsCfg::default();
         let scene = Vec2::new(1280.0, 800.0);
-        // A planet circling steadily at the old ring's radius, steered onto
-        // a slow turn.
+        // A planet circling at the old ring's radius, steered onto a slow
+        // turn (t18: the target is the circular speed plus a share of the
+        // ring's turning, so idle planets hold fairly stable orbits).
         let start = Body { pos: Vec2::new(0.0, 240.0), vel: Vec2::new(24.0, 0.0) };
         let circling = |busy| {
             let mut b = start;
-            let r0 = b.pos.length();
+            let mut sum = 0.0;
+            let mut lo = f32::MAX;
             for _ in 0..600 {
-                step_body(&mut b, busy, 0.1, scene, 1.0 / 60.0, &cfg);
+                step_body(&mut b, busy, 0.1, scene, 1.0 / 60.0, &cfg, Vec2::ZERO);
+                let r = b.pos.length();
+                sum += r;
+                lo = lo.min(r);
             }
-            (r0, b.pos.length())
+            (sum / 600.0, lo)
         };
-        let (r0, busy_r) = circling(true);
-        assert!(busy_r > r0 + 30.0, "thrust carries a working planet to a higher orbit: {r0} -> {busy_r}");
-        let (_, idle_r) = circling(false);
-        assert!(idle_r < 150.0, "an idle planet keeps orbiting but drifts in: {r0} -> {idle_r}");
+        let (idle_mean, idle_lo) = circling(false);
+        assert!(idle_lo > 150.0, "an idle planet keeps a fairly stable orbit, never sinking in: lo {idle_lo}");
+        let (busy_mean, _) = circling(true);
+        assert!(busy_mean > idle_mean + 20.0, "a working planet rides higher on average: idle {idle_mean:.0} busy {busy_mean:.0}");
         // Even one that sank all the way in can climb back out at work.
         let mut sunken = Body { pos: Vec2::new(0.0, cfg.min_radius), vel: Vec2::new(9.0, 0.0) };
         for _ in 0..1800 {
-            step_body(&mut sunken, true, 0.1, scene, 1.0 / 60.0, &cfg);
+            step_body(&mut sunken, true, 0.1, scene, 1.0 / 60.0, &cfg, Vec2::ZERO);
         }
         assert!(sunken.pos.length() > 200.0, "thrust is a multiple of the local pull, so it escapes: {}", sunken.pos.length());
     }
@@ -3243,20 +3422,28 @@ mod tests {
         // whatever sideways motion it had.
         let mut falling = Body { pos: Vec2::new(200.0, 0.0), vel: Vec2::new(-80.0, 30.0) };
         for _ in 0..1200 {
-            step_body(&mut falling, false, 0.1, scene, 1.0 / 60.0, &cfg);
+            step_body(&mut falling, false, 0.1, scene, 1.0 / 60.0, &cfg, Vec2::ZERO);
         }
         assert!(falling.pos.length() >= cfg.min_radius - 0.5, "stops at the floor: {}", falling.pos.length());
         // Flung at the screen's edge: reflected back into the scene.
+        // (Checked at the bounce itself: ten seconds on, it has settled into
+        // an orbit and its y speed may point either way.)
         let mut flung = Body { pos: Vec2::new(0.0, 100.0), vel: Vec2::new(0.0, 400.0) };
+        let wall = scene.y * 0.5 - cfg.edge_margin;
+        let mut bounced = None;
         for _ in 0..600 {
-            step_body(&mut flung, false, 0.1, scene, 1.0 / 60.0, &cfg);
+            step_body(&mut flung, false, 0.1, scene, 1.0 / 60.0, &cfg, Vec2::ZERO);
+            assert!(flung.pos.y <= wall + 0.5, "never over the edge: {}", flung.pos.y);
+            if bounced.is_none() && flung.pos.y >= wall - 1e-3 {
+                bounced = Some(flung.vel.y);
+            }
         }
-        assert!(flung.pos.y <= scene.y * 0.5 - cfg.edge_margin + 0.5, "never over the edge: {}", flung.pos.y);
-        assert!(flung.vel.y < 0.0, "it bounces back in, not stuck at the wall");
+        let v = bounced.expect("flung at 400 px/s it reaches the wall");
+        assert!(v < 0.0, "it bounces back in, not stuck at the wall: {v}");
         // Whatever happens, a planet stays inside the scene's margins.
         let mut wild = Body { pos: Vec2::new(-500.0, 300.0), vel: Vec2::new(600.0, -600.0) };
         for _ in 0..3600 {
-            step_body(&mut wild, true, 1.5, scene, 1.0 / 60.0, &cfg);
+            step_body(&mut wild, true, 1.5, scene, 1.0 / 60.0, &cfg, Vec2::ZERO);
         }
         assert!(wild.pos.x.abs() <= scene.x * 0.5 && wild.pos.y.abs() <= scene.y * 0.5);
     }
@@ -3432,6 +3619,17 @@ mod tests {
         assert_eq!(seat_for_slot(&shares, 1.0), Some("devin"), "the top edge belongs to the last seat");
         assert!(context_shares(&[seat("grok", None)]).is_empty(), "nobody reporting: plain stars");
         assert_eq!(seat_for_slot(&[], 0.5), None);
+    }
+
+    #[test]
+    fn the_context_pool_sets_mass_and_size() {
+        let shares = vec![("claude".to_string(), 0.6), ("vibe".to_string(), 0.2), ("devin".to_string(), 0.2)];
+        assert!((body_mass(&shares, "claude") - 1.8).abs() < 1e-6, "share of the pool, scaled to an even split");
+        assert!((body_mass(&shares, "grok") - 1.0).abs() < 1e-6, "no figure: the average");
+        assert_eq!(body_mass(&[], "claude"), 1.0);
+        assert!(body_size(0.6, 3, 0.5) > body_size(0.2, 3, 0.5), "the bigger share draws bigger");
+        assert!((body_size(1.0 / 3.0, 3, 0.5) - 1.0).abs() < 1e-6, "an even split draws at 1.0");
+        assert_eq!(body_size(0.9, 0, 0.5), 1.0, "no figures at all: plain size");
     }
 
     #[test]

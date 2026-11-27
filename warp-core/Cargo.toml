@@ -12,6 +12,8 @@ bevy = { version = "0.20.1", default-features = false, features = [
     "default_font", "2d_bevy_render", "bevy_text", "hdr", "tonemapping_luts", "zstd_rust", "png",
 ] }
 serde_json = "1"
+# SIGTERM handling, so a stop drains the GPU first (already in the tree).
+libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 # The live mods: settings and rules in toml, shaders checked by naga (the
 # same version wgpu uses, so nothing new to build) before the GPU sees them.
