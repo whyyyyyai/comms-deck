@@ -61,15 +61,13 @@ pub fn draw_half(f: &mut Frame, area: Rect, app: &App) {
     draw_crew_titled(f, activity, app, "02 ACTIVITY · ready order");
 
     let inner_w = right.width.saturating_sub(2) as usize;
-    let usage_lines = usage_line_count(app);
     let ws_lines = workspace_lines(app, inner_w).len() as u16;
     let vit_lines = vitals_lines(app, inner_w).len() as u16;
     let nt_lines = nav_time_lines(app, inner_w).len() as u16;
     let pulse_n = pulse_lines(app, inner_w).len() as u16;
     let split_n = split_lines(app, inner_w).len() as u16;
-    // 10 CONTEXT SPLIT is sized by its box and legend; 03 USAGE, the
-    // longest list, takes what's left.
-    let _ = usage_lines;
+    // 10 CONTEXT SPLIT is sized by its box and legend; 03 USAGE (None) is
+    // the longest list, so it takes whatever rows are left.
     let needs = [
         None,
         Some(ws_lines + 2),
@@ -174,15 +172,13 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
 
     // right: 03 USAGE, 06 WORKSPACES, 07 VITALS, 10 CONTEXT SPLIT, 08 NAV-TIME, 09 DECK PULSE
     let inner_w = rw.saturating_sub(2) as usize;
-    let usage_lines = usage_line_count(app);
     let ws_lines = workspace_lines(app, inner_w).len() as u16;
     let vit_lines = vitals_lines(app, inner_w).len() as u16;
     let nt_lines = nav_time_lines(app, inner_w).len() as u16;
     let pulse_n = pulse_lines(app, inner_w).len() as u16;
     let split_n = split_lines(app, inner_w).len() as u16;
-    // 10 CONTEXT SPLIT is sized by its box and legend; 03 USAGE, the
-    // longest list, takes what's left.
-    let _ = usage_lines;
+    // 10 CONTEXT SPLIT is sized by its box and legend; 03 USAGE (None) is
+    // the longest list, so it takes whatever rows are left.
     let needs = [
         None,
         Some(ws_lines + 2),
