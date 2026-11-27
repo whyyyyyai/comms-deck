@@ -19,13 +19,25 @@ size = 1.0
 breath = 0.07                 # how far it swells each breath
 ring_spin = 1.0               # containment ring speed
 
+# The ring's spin comes from the agents' notes to each other: each one
+# kicks it in the direction it travels round the ring, and it slows to a
+# stop without them.
 [orbit]
-drift = 0.05                  # radians a second when quiet
-traffic = 0.006               # added per note in the last 10 minutes (up to 30)
+drift = 0.0                   # a steady turn on top (radians a second)
+traffic = 0.0                 # (old) per note in the last 10 minutes
 warp_swing = 1.2              # added at full warp
+spin_kick = 0.08              # spin one note between agents adds
+friction = 0.12               # spin lost per second, proportionally
+max_spin = 1.5
 
+# The stars' speed comes from the agents: still when nobody is working,
+# slow with a few at it, a boost when an agent writes to Y.
 [stars]
-speed = 18
+speed = 0                     # with nobody working
+per_busy = 7                  # added per agent at work
+boost_per_note = 0.4          # an agent's note to Y
+boost_speed = 160             # speed at a boost of 1
+boost_decay = 0.3             # boost lost per second
 warp_speed = 900
 stretch = 40
 colour = [0.9, 0.95, 1.4]       # used when by_context is off, or nobody reports context
@@ -119,6 +131,19 @@ spread = 1.5                  # how fast it spreads along the wall
 spill = 2                     # neighbouring cells a splash reaches at once
 cells = 64                    # cells per edge
 glow = 1.0                    # on-screen brightness; above 1 blooms
+
+# Conduits from the planets to the core bend with the ring's spin, and send a
+# packet of light only when a job is finished.
+[conduits]
+bend = 2.2                    # bend per radian a second of spin
+max_bend = 1.4
+packet_seconds = 1.4
+
+# Inside each planet (mods/shaders/planet.wgsl): calm idle, churning busy,
+# more the longer it has been working.
+[planets]
+show = true
+full_minutes = 20
 
 # ---------------------------------------------------------------- rules
 #

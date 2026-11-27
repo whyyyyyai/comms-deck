@@ -63,6 +63,7 @@ use std::sync::{mpsc, Mutex};
 const STARS: usize = 260;
 const CORE_SHADER: Handle<Shader> = uuid_handle!("6f1d2c3a-6b0e-4c55-9a1e-2f4c8d7b9e01");
 const RING_SHADER: Handle<Shader> = uuid_handle!("0b9e3f4d-1a2c-4e6f-8b7d-5c3a2e1f0d02");
+const PLANET_SHADER: Handle<Shader> = uuid_handle!("3c7a1e9b-5d2f-4a8c-9e6b-1f0d2c3a4b03");
 /// Fuel ring diameters around a seat: context, 5-hour, week.
 const FUEL_D: [f32; 3] = [70.0, 82.0, 94.0];
 const HALO_D: f32 = 116.0;
@@ -97,7 +98,11 @@ fn main() {
             }),
             ..default()
         }))
-        .add_plugins((Material2dPlugin::<RingMaterial>::default(), Material2dPlugin::<CoreMaterial>::default()))
+        .add_plugins((
+            Material2dPlugin::<RingMaterial>::default(),
+            Material2dPlugin::<CoreMaterial>::default(),
+            Material2dPlugin::<PlanetMaterial>::default(),
+        ))
         .add_systems(Startup, setup)
         .add_systems(
             Update,
@@ -112,6 +117,7 @@ fn main() {
                     colour_stars,
                     draw_splash,
                     draw_links,
+                    drive_planets,
                     draw_task_bolts,
                     draw_moons_and_marks,
                     hud,
@@ -176,6 +182,39 @@ impl Material2d for CoreMaterial {
     }
 }
 
+#[derive(ShaderType, Clone, Copy, Debug, Default)]
+struct PlanetUniform {
+    colour: Vec4,
+    /// time, work, busy, seed
+    params: Vec4,
+}
+
+/// mods/shaders/planet.wgsl: inside a seat, what it's doing.
+#[derive(Asset, TypePath, AsBindGroup, Clone, Debug, Default)]
+struct PlanetMaterial {
+    #[uniform(0)]
+    u: PlanetUniform,
+}
+
+impl Material2d for PlanetMaterial {
+    fn fragment_shader() -> ShaderRef {
+        PLANET_SHADER.into()
+    }
+    fn alpha_mode(&self) -> AlphaMode2d {
+        AlphaMode2d::Blend
+    }
+}
+
+#[derive(Component)]
+struct PlanetFace;
+
+/// A packet of light running down a conduit: a job just finished.
+struct Packet {
+    seat: String,
+    at: f32,
+    colour: [f32; 3],
+}
+
 fn v4(c: [f32; 3], a: f32) -> Vec4 {
     Vec4::new(c[0], c[1], c[2], a)
 }
@@ -216,6 +255,15 @@ struct Deck {
     orbit: f32,
     /// 0..1, built by typing in the chat box, draining on its own.
     thrust: f32,
+    /// The ring's spin (radians a second), kicked by notes between agents.
+    spin: f32,
+    /// What the ring is turning at this frame, spin and warp together.
+    turning: f32,
+    /// 0.., kicked by agents writing to Y, decaying: the stars' boost.
+    boost: f32,
+    packets: Vec<Packet>,
+    /// Each seat's last state from activity, to see a job finish.
+    last_state: HashMap<String, String>,
     /// The load balancer's board: open tasks orbit, held ones are bolts.
     tasks: Vec<TaskInfo>,
     /// How far round the task ring has turned (radians).
@@ -944,6 +992,7 @@ fn watch_mods(
     for (name, handle, default) in [
         ("core.wgsl", CORE_SHADER, mods::DEFAULT_CORE_SHADER),
         ("ring.wgsl", RING_SHADER, mods::DEFAULT_RING_SHADER),
+        ("planet.wgsl", PLANET_SHADER, mods::DEFAULT_PLANET_SHADER),
     ] {
         let path = dir.join("shaders").join(name);
         let first = !m.shaders_ok.iter().any(|s| s == name);
@@ -1024,9 +1073,14 @@ fn read_feed(
             }
             Msg::Problem(p) => deck.problem = Some(p),
             Msg::Activity(a, live) => {
-                // A seat changing state ripples the ring in its colour.
+                // A seat changing state ripples the ring in its colour; a
+                // seat that stops being busy has finished a job: a packet.
+                let was = deck.last_state.insert(a.seat.clone(), a.state.clone());
                 if live {
                     deck.shocks.push(Shock { seat: a.seat.clone(), at: now, colour: seat_rgb(&a.seat), size: 0.45 });
+                    if finished_job(was.as_deref(), &a.state) {
+                        deck.packets.push(Packet { seat: a.seat.clone(), at: now, colour: seat_rgb(&a.seat) });
+                    }
                 }
                 chat.activity.push_back(a);
                 let over = chat.activity.len().saturating_sub(200);
@@ -1055,7 +1109,16 @@ fn read_feed(
                 deck.history.truncate(300);
                 deck.pending.push(n);
             }
-            Msg::Tasks(tasks) => deck.tasks = tasks,
+            Msg::Tasks(tasks) => {
+                // A held task gone from the board is done: its holder sends a
+                // packet in the colour of whoever asked for it.
+                let fired: Vec<Packet> = finished_tasks(&deck.tasks, &tasks)
+                    .into_iter()
+                    .filter_map(|d| Some(Packet { seat: d.holder.clone()?, at: now, colour: seat_rgb(&d.from) }))
+                    .collect();
+                deck.packets.extend(fired);
+                deck.tasks = tasks;
+            }
         }
     }
     // With no ring to fly between, notes wait, but not without end.
@@ -1066,6 +1129,9 @@ fn read_feed(
     }
     deck.warp = (deck.warp - time.delta_secs() * mods.cfg.warp.decay).max(0.0);
     deck.thrust = (deck.thrust - time.delta_secs() * mods.cfg.typing.decay).max(0.0);
+    deck.boost = (deck.boost - time.delta_secs() * mods.cfg.stars.boost_decay).max(0.0);
+    let gone = mods.cfg.conduits.packet_seconds.max(0.1);
+    deck.packets.retain(|p| now - p.at < gone);
 }
 
 fn apply_rules(deck: Res<Deck>, mods: Res<Mods>, mut looks: ResMut<Looks>) {
@@ -1098,8 +1164,58 @@ fn ring_positions(names: &[String], window: Vec2, orbit: f32) -> HashMap<String,
 
 /// The orbit's speed in radians a second: a slow drift when quiet, faster
 /// with traffic, and a hard swing in warp.
-fn orbit_speed(cfg: &mods::OrbitCfg, notes_10min: usize, warp: f32) -> f32 {
-    cfg.drift + (notes_10min.min(30) as f32) * cfg.traffic + warp * cfg.warp_swing
+fn orbit_speed(cfg: &mods::OrbitCfg, notes_10min: usize, warp: f32, spin: f32) -> f32 {
+    cfg.drift + (notes_10min.min(30) as f32) * cfg.traffic + warp * cfg.warp_swing + spin
+}
+
+/// The spin a note from `from` to `to` adds: `kick` in the direction it
+/// travels round the ring the short way (positive = clockwise, the way the
+/// ring turns as its angle grows), nothing between seats not on the ring.
+fn spin_kick(ring: &[String], from: &str, to: &str, kick: f32) -> f32 {
+    let (Some(i), Some(j)) = (ring.iter().position(|s| s == from), ring.iter().position(|s| s == to)) else {
+        return 0.0;
+    };
+    let n = ring.len() as i64;
+    let d = (j as i64 - i as i64).rem_euclid(n);
+    if d == 0 || 2 * d == n {
+        0.0
+    } else if 2 * d < n {
+        kick
+    } else {
+        -kick
+    }
+}
+
+/// A job finished: the seat was busy and now isn't (stuck or spent aren't
+/// finishing).
+fn finished_job(was: Option<&str>, now: &str) -> bool {
+    was == Some("busy") && matches!(now, "idle" | "ready" | "away")
+}
+
+/// Tasks held on the old board that are gone from (or reopened on) the new.
+fn finished_tasks<'a>(old: &'a [feed::TaskInfo], new: &[feed::TaskInfo]) -> Vec<&'a feed::TaskInfo> {
+    old.iter()
+        .filter(|t| t.holder.is_some() && !t.open)
+        .filter(|t| !new.iter().any(|n| n.id == t.id && !n.open))
+        .collect()
+}
+
+/// Points along a conduit, seat (first) to core (last), bent by the ring's
+/// turning: the inner end leads, the way a rotating mass drags space round
+/// with it.
+fn conduit_path(seat: Vec2, bend: f32, n: usize) -> Vec<Vec2> {
+    let (r0, r1) = (seat.length() * 0.9, 70.0);
+    let a0 = seat.to_angle();
+    (0..=n)
+        .map(|i| {
+            let s = i as f32 / n as f32;
+            Vec2::from_angle(a0 - bend * s * s) * (r0 + (r1 - r0) * s)
+        })
+        .collect()
+}
+
+fn conduit_bend(cfg: &mods::ConduitsCfg, turning: f32) -> f32 {
+    (turning * cfg.bend).clamp(-cfg.max_bend, cfg.max_bend)
 }
 
 /// A seat's z: behind the core (1.0) at the back of the orbit, in front at
@@ -1144,13 +1260,19 @@ fn layout_seats(
     assets: Res<Assets2d>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut rings: ResMut<Assets<RingMaterial>>,
+    mut planets: ResMut<Assets<PlanetMaterial>>,
     layout: Res<Layout>,
     time: Res<Time>,
     mut nodes: Query<(Entity, &mut SeatNode, &mut Transform)>,
 ) {
     let pace = deck.notes_last(time.elapsed_secs(), 600.0);
     let warp = deck.warp;
-    deck.orbit = (deck.orbit + time.delta_secs() * orbit_speed(&mods.cfg.orbit, pace, warp)) % std::f32::consts::TAU;
+    let oc = &mods.cfg.orbit;
+    let dt = time.delta_secs();
+    deck.spin = (deck.spin * (-oc.friction.max(0.0) * dt).exp()).clamp(-oc.max_spin, oc.max_spin);
+    let turning = orbit_speed(oc, pace, warp, deck.spin);
+    deck.turning = turning;
+    deck.orbit = (deck.orbit + dt * turning).rem_euclid(std::f32::consts::TAU);
     let names: Vec<String> = deck.seats.iter().filter(|s| s.online()).map(|s| s.name.clone()).collect();
     let pos = ring_positions(&names, layout.scene, deck.orbit);
     if names != deck.built {
@@ -1184,6 +1306,12 @@ fn layout_seats(
                             Visibility::Hidden,
                         ));
                     }
+                    seat.spawn((
+                        PlanetFace,
+                        Mesh2d(assets.quad.clone()),
+                        MeshMaterial2d(planets.add(PlanetMaterial::default())),
+                        Transform::from_xyz(0.0, 0.0, 0.05).with_scale(Vec3::new(52.0, 52.0, 1.0)),
+                    ));
                     seat.spawn((
                         HaloRing,
                         Mesh2d(assets.quad.clone()),
@@ -1299,6 +1427,7 @@ fn draw_task_bolts(
         return;
     }
     let t = time.elapsed_secs();
+    let bend = conduit_bend(&mods.cfg.conduits, deck.turning);
     let positions: HashMap<&str, Vec2> =
         nodes.iter().map(|(n, tf)| (n.name.as_str(), tf.translation.truncate())).collect();
     for task in deck.tasks.iter().filter(|t| !t.open) {
@@ -1308,13 +1437,15 @@ fn draw_task_bolts(
         } else {
             1.0
         };
-        // From the seat's edge inward, so it reads as leaving the seat.
-        let from = *holder * 0.85;
-        gizmos.line_gradient_2d(from, Vec2::ZERO, seat_colour(&task.from, tc.bolt_bright * dim), seat_colour(&task.from, tc.bolt_bright * 0.3 * dim));
-        // The packet runs seat -> core, one pulse per bolt.
-        let k = (t * 0.9 + task.id.len() as f32 * 0.31).fract();
-        let q = from * (1.0 - k);
-        gizmos.circle_2d(Isometry2d::from_translation(q), 2.5, seat_colour(&task.from, 3.0 * dim));
+        // Along the holder's conduit, bent by the spin like it, in the
+        // colour of whoever asked. No packet until the task is done (Y):
+        // that one is fired when it leaves the board (read_feed).
+        let path = conduit_path(*holder, bend, 18);
+        let n = path.len() as f32;
+        let _ = t;
+        gizmos.linestrip_gradient_2d(path.iter().enumerate().map(|(i, p)| {
+            (*p, seat_colour(&task.from, tc.bolt_bright * dim * (1.0 - 0.7 * i as f32 / n)))
+        }));
     }
 }
 
@@ -1565,21 +1696,62 @@ fn crew_heat(seats: &[SeatInfo]) -> f32 {
 }
 
 /// Faint conduits from each seat to the core; busy ones carry light.
+/// Conduits from each planet to the core, bent by the ring's turning. A
+/// packet of light runs down one only when that seat finishes a job.
 fn draw_links(deck: Res<Deck>, mods: Res<Mods>, nodes: Query<(&SeatNode, &Transform)>, time: Res<Time>, mut gizmos: Gizmos) {
     let t = time.elapsed_secs();
+    let bend = conduit_bend(&mods.cfg.conduits, deck.turning);
+    let secs = mods.cfg.conduits.packet_seconds.max(0.1);
     for (node, tf) in &nodes {
         let Some(seat) = deck.seat(&node.name) else { continue };
-        let p = tf.translation.truncate();
-        let inner = p.normalize_or_zero() * 70.0;
+        let path = conduit_path(tf.translation.truncate(), bend, 18);
         let dim = if deck.focus.as_ref().is_some_and(|f| *f != node.name) { 0.25 } else { 1.0 };
         let b = ((mods.cfg.brightness(&seat.shown) * 0.18).min(0.6) + node.flash) * dim;
-        gizmos.line_gradient_2d(inner, p * 0.9, seat_colour(&node.name, b), seat_colour(&node.name, b * 0.4));
-        if seat.shown == "busy" {
-            // A packet of light running down the conduit.
-            let k = (t * 0.7 + node.name.len() as f32 * 0.13).fract();
-            gizmos.circle_2d(Isometry2d::from_translation(p * 0.9 - (p * 0.9 - inner) * k), 2.5, seat_colour(&node.name, 3.0 * dim));
+        let n = path.len() as f32;
+        gizmos.linestrip_gradient_2d(
+            path.iter().enumerate().map(|(i, p)| (*p, seat_colour(&node.name, b * (1.0 - 0.6 * i as f32 / n)))),
+        );
+        for pk in deck.packets.iter().filter(|pk| pk.seat == node.name) {
+            let k = ((t - pk.at) / secs).clamp(0.0, 1.0);
+            let at = |k: f32| path[((k * (path.len() - 1) as f32).round() as usize).min(path.len() - 1)];
+            gizmos.circle_2d(Isometry2d::from_translation(at(k)), 3.0, lin(pk.colour, 5.0 * dim));
+            gizmos.line_2d(at((k - 0.12).max(0.0)), at(k), lin(pk.colour, 2.5 * dim));
         }
     }
+}
+
+/// Drives each planet's inside: work grows the longer it has been busy.
+fn drive_planets(
+    deck: Res<Deck>,
+    mods: Res<Mods>,
+    time: Res<Time>,
+    nodes: Query<(&SeatNode, &Children)>,
+    mut faces: Query<(&MeshMaterial2d<PlanetMaterial>, &mut Visibility), With<PlanetFace>>,
+    mut mats: ResMut<Assets<PlanetMaterial>>,
+) {
+    let pc = &mods.cfg.planets;
+    let t = time.elapsed_secs();
+    for (node, children) in &nodes {
+        let Some(seat) = deck.seat(&node.name) else { continue };
+        for child in children.iter() {
+            let Ok((mat, mut vis)) = faces.get_mut(child) else { continue };
+            *vis = if pc.show { Visibility::Inherited } else { Visibility::Hidden };
+            let busy = seat.shown == "busy";
+            let work = if busy { planet_work(seat.since_s, pc.full_minutes) } else { 0.0 };
+            let seed = (node.name.bytes().map(|b| b as u32).sum::<u32>() % 97) as f32 / 97.0;
+            if let Some(mut m) = mats.get_mut(&mat.0) {
+                m.u = PlanetUniform {
+                    colour: v4(seat_rgb(&node.name), 1.0),
+                    params: Vec4::new(t, work, if busy { 1.0 } else { 0.0 }, seed),
+                };
+            }
+        }
+    }
+}
+
+/// 0..1: how much a seat has been working, from how long it's been busy.
+fn planet_work(busy_secs: f64, full_minutes: f32) -> f32 {
+    (1.0 - (-(busy_secs as f32) / (full_minutes.max(0.1) * 60.0)).exp()).clamp(0.0, 1.0)
 }
 
 /// Backlog moons, rule beacons and shockwaves.
@@ -1662,6 +1834,17 @@ fn fly_comets(
         for note in pending {
             let look = note_look(&mods.rules, &mods.cfg, &note);
             deck.warp = deck.warp.max(look.warp);
+            // An agent writing to Y boosts the stars; notes between agents
+            // spin the ring the way they travel.
+            if note.from != "owner" && note.to.iter().any(|t| t == "owner") {
+                deck.boost += mods.cfg.stars.boost_per_note;
+            }
+            if !note.all && note.from != "owner" {
+                let ring = deck.built.clone();
+                for to in note.to.iter().filter(|t| *t != "owner") {
+                    deck.spin += spin_kick(&ring, &note.from, to, mods.cfg.orbit.spin_kick);
+                }
+            }
             let from = positions.get(&note.from).copied().unwrap_or(Vec2::ZERO);
             let targets: Vec<String> = if note.all {
                 positions.keys().filter(|k| **k != note.from).cloned().collect()
@@ -1752,7 +1935,9 @@ fn move_stars(
     let reach = half.length() + 20.0;
     let pace = (deck.notes_last(time.elapsed_secs(), 600.0) as f32).min(30.0);
     let tc = &mods.cfg.typing;
-    let speed = sc.speed + pace * 2.0 + deck.warp * sc.warp_speed + deck.thrust * tc.star_speed;
+    // Still when nobody works, slow with a few at it, boosted by notes to Y.
+    let busy = deck.seats.iter().filter(|s| s.online() && s.shown == "busy").count() as f32;
+    let speed = sc.speed + busy * sc.per_busy + deck.boost * sc.boost_speed + deck.warp * sc.warp_speed + deck.thrust * tc.star_speed;
     let dt = time.delta_secs();
     for (mut star, mut tf) in &mut stars {
         star.dist += speed * star.speed * dt * (0.3 + star.dist / reach);
@@ -2574,9 +2759,9 @@ mod tests {
     #[test]
     fn the_orbit_drifts_when_quiet_and_swings_in_warp() {
         let cfg = mods::OrbitCfg::default();
-        assert!(orbit_speed(&cfg, 0, 0.0) > 0.0, "never quite still");
-        assert!(orbit_speed(&cfg, 20, 0.0) > orbit_speed(&cfg, 0, 0.0));
-        assert!(orbit_speed(&cfg, 0, 1.0) > 10.0 * orbit_speed(&cfg, 0, 0.0));
+        assert_eq!(orbit_speed(&cfg, 0, 0.0, 0.0), 0.0, "still with no notes between agents");
+        assert!(orbit_speed(&cfg, 0, 0.0, 0.3) > 0.0 && orbit_speed(&cfg, 0, 0.0, -0.3) < 0.0, "spin either way");
+        assert!(orbit_speed(&cfg, 0, 1.0, 0.0) > 1.0, "warp swings it");
     }
 
     #[test]
@@ -2809,6 +2994,53 @@ mod tests {
             s.settle(0.1, &cfg);
         }
         assert!(total(&s) < 0.01, "and is gone after a while");
+    }
+
+    #[test]
+    fn notes_spin_the_ring_the_way_they_travel() {
+        let ring: Vec<String> = ["owner", "claude", "grok", "vibe", "devin"].map(String::from).to_vec();
+        assert_eq!(spin_kick(&ring, "claude", "grok", 0.1), 0.1, "one step clockwise");
+        assert_eq!(spin_kick(&ring, "grok", "claude", 0.1), -0.1, "and back");
+        assert_eq!(spin_kick(&ring, "devin", "claude", 0.1), 0.1, "the short way round wraps");
+        assert_eq!(spin_kick(&ring, "claude", "codex", 0.1), 0.0, "off the ring: no spin");
+        assert_eq!(spin_kick(&ring, "claude", "claude", 0.1), 0.0);
+    }
+
+    #[test]
+    fn packets_fire_only_when_work_is_done() {
+        assert!(finished_job(Some("busy"), "idle"));
+        assert!(!finished_job(Some("idle"), "busy"), "starting isn't finishing");
+        assert!(!finished_job(Some("busy"), "stuck"));
+        assert!(!finished_job(None, "idle"));
+        let t = |id: &str, holder: Option<&str>, open: bool| feed::TaskInfo {
+            id: id.into(),
+            from: "owner".into(),
+            holder: holder.map(String::from),
+            open,
+        };
+        let old = [t("t1", Some("vibe"), false), t("t2", None, true), t("t3", Some("claude"), false)];
+        let new = [t("t3", Some("claude"), false)];
+        let done: Vec<&str> = finished_tasks(&old, &new).iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(done, ["t1"], "held and gone: done; unheld or still held: not");
+    }
+
+    #[test]
+    fn conduits_bend_with_the_spin_and_end_at_the_core() {
+        let seat = Vec2::new(300.0, 0.0);
+        let straight = conduit_path(seat, 0.0, 10);
+        assert!((straight[0] - seat * 0.9).length() < 0.01 && (straight[10] - Vec2::new(70.0, 0.0)).length() < 0.01);
+        let bent = conduit_path(seat, 0.8, 10);
+        assert!((bent[10].length() - 70.0).abs() < 0.01, "still reaches the core");
+        assert!(bent[10].y < 0.0, "a clockwise spin drags the inner end clockwise");
+        let cfg = mods::ConduitsCfg::default();
+        assert_eq!(conduit_bend(&cfg, 100.0), cfg.max_bend, "capped");
+    }
+
+    #[test]
+    fn planets_work_up_the_longer_they_are_busy() {
+        assert_eq!(planet_work(0.0, 20.0), 0.0);
+        assert!(planet_work(600.0, 20.0) > 0.3 && planet_work(600.0, 20.0) < planet_work(3600.0, 20.0));
+        assert!(planet_work(1e9, 20.0) <= 1.0);
     }
 
     #[test]

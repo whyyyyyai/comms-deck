@@ -24,6 +24,7 @@ use std::time::SystemTime;
 pub const DEFAULT_CONFIG: &str = include_str!("../mods/warp-core.toml");
 pub const DEFAULT_CORE_SHADER: &str = include_str!("../mods/shaders/core.wgsl");
 pub const DEFAULT_RING_SHADER: &str = include_str!("../mods/shaders/ring.wgsl");
+pub const DEFAULT_PLANET_SHADER: &str = include_str!("../mods/shaders/planet.wgsl");
 
 pub fn mods_dir() -> PathBuf {
     match std::env::var("WARP_CORE_MODS") {
@@ -130,10 +131,16 @@ pub struct OrbitCfg {
     pub drift: f32,
     pub traffic: f32,
     pub warp_swing: f32,
+    /// Spin a note between two agents adds, in the direction it travels
+    /// round the ring (radians a second).
+    pub spin_kick: f32,
+    /// How fast the spin dies away without notes (per second).
+    pub friction: f32,
+    pub max_spin: f32,
 }
 impl Default for OrbitCfg {
     fn default() -> Self {
-        OrbitCfg { drift: 0.05, traffic: 0.006, warp_swing: 1.2 }
+        OrbitCfg { drift: 0.0, traffic: 0.0, warp_swing: 1.2, spin_kick: 0.08, friction: 0.12, max_spin: 1.5 }
     }
 }
 
@@ -144,6 +151,12 @@ pub struct StarsCfg {
     pub warp_speed: f32,
     pub stretch: f32,
     pub colour: [f32; 3],
+    /// Speed added for each agent at work: still when nobody is.
+    pub per_busy: f32,
+    /// A note from an agent to Y boosts the stars by this (0..), decaying.
+    pub boost_per_note: f32,
+    pub boost_speed: f32,
+    pub boost_decay: f32,
     /// Colour the stars by how the crew's context is split: each seat gets
     /// its share of the stars in its own colour.
     pub by_context: bool,
@@ -152,7 +165,11 @@ pub struct StarsCfg {
 impl Default for StarsCfg {
     fn default() -> Self {
         StarsCfg {
-            speed: 18.0,
+            speed: 0.0,
+            per_busy: 7.0,
+            boost_per_note: 0.4,
+            boost_speed: 160.0,
+            boost_decay: 0.3,
             warp_speed: 900.0,
             stretch: 40.0,
             colour: [0.9, 0.95, 1.4],
@@ -180,6 +197,37 @@ pub struct TypingCfg {
 impl Default for TypingCfg {
     fn default() -> Self {
         TypingCfg { kick: 0.02, decay: 0.05, star_speed: 420.0, stretch: 14.0, jump_on_send: true, jump_per_char: 0.004, jump_max: 2.0 }
+    }
+}
+
+/// The conduits from the planets to the core: bent by the ring's spin, and
+/// carrying a packet of light only when a job is finished.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ConduitsCfg {
+    /// How far the spin bends them (radians of bend per radian a second).
+    pub bend: f32,
+    pub max_bend: f32,
+    pub packet_seconds: f32,
+}
+impl Default for ConduitsCfg {
+    fn default() -> Self {
+        ConduitsCfg { bend: 2.2, max_bend: 1.4, packet_seconds: 1.4 }
+    }
+}
+
+/// The planets' insides (mods/shaders/planet.wgsl): calm when idle, churning
+/// while working, more the longer they've been at it.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PlanetsCfg {
+    pub show: bool,
+    /// Minutes busy to reach most of full churn.
+    pub full_minutes: f32,
+}
+impl Default for PlanetsCfg {
+    fn default() -> Self {
+        PlanetsCfg { show: true, full_minutes: 20.0 }
     }
 }
 
@@ -372,6 +420,8 @@ pub struct Config {
     pub chat: ChatCfg,
     pub typing: TypingCfg,
     pub splash: SplashCfg,
+    pub conduits: ConduitsCfg,
+    pub planets: PlanetsCfg,
     pub rule: Vec<RuleSpec>,
 }
 
@@ -787,6 +837,7 @@ mod tests {
         assert_eq!(cfg.look.fps, 30.0);
         check_wgsl(DEFAULT_CORE_SHADER).expect("core.wgsl validates");
         check_wgsl(DEFAULT_RING_SHADER).expect("ring.wgsl validates");
+        check_wgsl(DEFAULT_PLANET_SHADER).expect("planet.wgsl validates");
     }
 
     #[test]
