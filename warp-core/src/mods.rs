@@ -81,10 +81,14 @@ pub struct Look {
     /// Frames a second while the window is hidden (in the scratchpad or on
     /// a workspace no monitor shows): 24, so tabbing back is snappy (Y, 06:18).
     pub fps_hidden: f32,
+    /// Multisampling: 1 (off), 2 or 4. Each step multiplies the GPU's
+    /// memory traffic on the 4480x2520 display; the shapes are drawn smooth
+    /// by their shaders, so only thin lines gain from it.
+    pub msaa: u32,
 }
 impl Default for Look {
     fn default() -> Self {
-        Look { background: [0.01, 0.012, 0.03], bloom: 0.28, fps: 60.0, fps_unfocused: 60.0, fps_hidden: 24.0 }
+        Look { background: [0.01, 0.012, 0.03], bloom: 0.28, fps: 60.0, fps_unfocused: 60.0, fps_hidden: 24.0, msaa: 1 }
     }
 }
 

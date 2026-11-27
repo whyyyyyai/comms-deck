@@ -11,6 +11,7 @@ background = [0.01, 0.012, 0.03]
 bloom = 0.28
 fps = 60                      # frames a second while shown: 60 at least (Y, 05:26)
 fps_unfocused = 60            # the same with another window focused (Y, 05:26)
+msaa = 1                      # multisampling 1 (off), 2 or 4: off is far lighter on the GPU at 4480x2520
 fps_hidden = 24               # while hidden in the scratchpad: low, but tabbing back is snappy (Y, 06:18)
 
 [core]

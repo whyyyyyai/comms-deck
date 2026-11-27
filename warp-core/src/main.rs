@@ -826,6 +826,15 @@ fn pace_frames(mods: Res<Mods>, mut winit: ResMut<WinitSettings>) {
     }
 }
 
+fn msaa_for(n: u32) -> bevy::render::view::Msaa {
+    use bevy::render::view::Msaa;
+    match n {
+        0 | 1 => Msaa::Off,
+        2 | 3 => Msaa::Sample2,
+        _ => Msaa::Sample4,
+    }
+}
+
 fn frame_mode(fps: f32) -> UpdateMode {
     if fps >= 59.0 {
         UpdateMode::Continuous
@@ -1252,6 +1261,7 @@ fn setup(
         Tonemapping::TonyMcMapface,
         Bloom { intensity: 0.28, ..Bloom::NATURAL },
         DebandDither::Enabled,
+        msaa_for(mods::Look::default().msaa),
     ));
 
     commands.insert_resource(load_logos(&mods::mods_dir().join("logos"), &mut images));
@@ -1366,6 +1376,7 @@ fn watch_mods(
     mut clear: ResMut<ClearColor>,
     mut winit: ResMut<WinitSettings>,
     mut bloom: Query<&mut Bloom>,
+    mut msaa: Query<&mut bevy::render::view::Msaa>,
     star_mats: Option<Res<StarMats>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut chat: ResMut<Chat>,
@@ -1394,6 +1405,12 @@ fn watch_mods(
                 winit.unfocused_mode = frame_mode(c.look.fps_unfocused);
                 for mut b in &mut bloom {
                     b.intensity = c.look.bloom;
+                }
+                for mut ms in &mut msaa {
+                    let want = msaa_for(c.look.msaa);
+                    if *ms != want {
+                        *ms = want;
+                    }
                 }
                 let sc = c.stars.colour;
                 if let Some(sm) = &star_mats {
