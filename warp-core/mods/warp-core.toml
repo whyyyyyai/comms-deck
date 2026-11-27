@@ -123,6 +123,17 @@ old = [2.5, 0.25, 0.1]
 old_hours = 6
 speed = 0.6
 
+# t30: subagents an agent spawns (hooks in comms-deck) orbit it as a closer
+# band, in the seat's colour. `m` toggles them with the backlog moons.
+[subagents]
+show = true
+speed = 1.6
+radius = 34
+spacing = 7
+size = 2.0
+bright = 1.2
+max = 8
+
 [hud]
 show = true
 dock = true                   # the line of seats that aren't on the ring

@@ -55,7 +55,7 @@ use bevy::{
     sprite_render::{AlphaMode2d, Material2d, Material2dPlugin},
     winit::{UpdateMode, WinitSettings},
 };
-use feed::{Activity, ChatNote, Msg, Notice, NoteInfo, SeatInfo, TaskInfo};
+use feed::{Activity, ChatNote, Msg, Notice, NoteInfo, SeatInfo, SubagentInfo, TaskInfo};
 use mods::{Config, Rule, Val};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{mpsc, Mutex};
@@ -383,6 +383,8 @@ struct Deck {
     /// The load balancer's board: open tasks orbit the core, held ones are
     /// electrons on their holder's planet (t20).
     tasks: Vec<TaskInfo>,
+    /// Subagents seats say they spawned (t30), drawn as moons of their parent.
+    subagents: Vec<SubagentInfo>,
     /// How far round the task ring has turned (radians).
     task_orbit: f32,
     /// The task ids the ring was last built from.
@@ -1420,6 +1422,7 @@ fn read_feed(
                 deck.history.truncate(300);
                 deck.pending.push(n);
             }
+            Msg::Subagents(subs) => deck.subagents = subs,
             Msg::Tasks(tasks) => {
                 // A held task gone from the board is done: its holder sends a
                 // packet in the colour of whoever asked for it.
@@ -2300,6 +2303,7 @@ fn draw_moons_and_marks(
 ) {
     let t = time.elapsed_secs();
     let mc = &mods.cfg.moons;
+    let sc = &mods.cfg.subagents;
     let positions: HashMap<&str, (Vec2, f32)> =
         nodes.iter().map(|(n, tf)| (n.name.as_str(), (tf.translation.truncate(), tf.scale.x))).collect();
     for (node, tf) in &nodes {
@@ -2319,6 +2323,19 @@ fn draw_moons_and_marks(
                 let a = t * mc.speed * if band % 2 == 0 { 1.0 } else { -0.8 } + (i % 12) as f32 / in_band as f32 * std::f32::consts::TAU;
                 let q = p + Vec2::new(a.cos() * r, a.sin() * r * 0.8);
                 gizmos.circle_2d(Isometry2d::from_translation(q), 1.6 * s, lin(c, dim));
+            }
+        }
+        if sc.show && view.moons {
+            let mut subs: Vec<&SubagentInfo> =
+                deck.subagents.iter().filter(|s| s.parent == node.name && s.active).collect();
+            subs.sort_by(|a, b| a.id.cmp(&b.id));
+            for (i, sub) in subs.iter().take(sc.max).enumerate() {
+                let band = i / 8;
+                let r = (sc.radius + band as f32 * sc.spacing + (i % 8) as f32 * 2.0) * s;
+                let phase = (task_key(&sub.id) % 4096) as f32 / 4096.0 * std::f32::consts::TAU;
+                let a = t * sc.speed * (if band % 2 == 0 { 1.0 } else { -0.75 }) + phase;
+                let q = p + Vec2::new(a.cos() * r, a.sin() * r * 0.8);
+                gizmos.circle_2d(Isometry2d::from_translation(q), sc.size * s, seat_colour(&node.name, sc.bright * dim));
             }
         }
         if let Some((c, pulse)) = looks.0.get(&node.name).and_then(|l| l.beacon) {
