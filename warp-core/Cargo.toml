@@ -1,0 +1,30 @@
+[package]
+name = "warp-core"
+version = "0.1.0"
+edition = "2021"
+description = "The warp core: the comms-deck's seats and notes drawn on the GPU. A read-only client of the comms-deck service."
+
+# Only the parts of Bevy a 2D scene needs: no 3D, audio, gamepads, scenes or
+# X11. Keeps the build within the iMac's 7 GB (build with -j 3).
+[dependencies]
+bevy = { version = "0.20.1", default-features = false, features = [
+    "default_app", "std", "multi_threaded", "bevy_winit", "wayland",
+    "default_font", "2d_bevy_render", "bevy_text", "hdr", "tonemapping_luts", "zstd_rust",
+] }
+serde_json = "1"
+# Load libwayland at run time, so building needs no pkg-config (none on the iMac).
+wayland-sys = { version = "0.31", features = ["dlopen"] }
+
+[features]
+# Faster rebuilds while developing: cargo run --features dev
+dev = ["bevy/dynamic_linking"]
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+opt-level = 3
+codegen-units = 4
