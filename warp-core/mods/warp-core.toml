@@ -17,6 +17,23 @@ cool = [0.25, 0.9, 3.2]       # the core's colour when the crew has room
 hot = [5.0, 2.2, 0.8]         # ... and as their meters fill up
 size = 1.0
 breath = 0.07                 # how far it swells each breath
+# t29 (Y): the core's size and oscillation are governed by what it takes
+# in. Each packet that reaches it adds energy and kicks it outward; it rings
+# down like a spring. Energy, busy agents, note traffic and heat set how big
+# it rests and how fast and deep it breathes.
+per_packet = 0.35             # energy a packet brings
+energy_decay = 0.08           # energy lost per second (fraction)
+max_energy = 3.0
+grow_per_energy = 0.08        # resting size per unit of energy
+grow_busy = 0.12              # resting size with the whole crew busy
+breath_rate = 0.8             # radians a second at rest
+rate_per_energy = 0.9
+rate_per_note = 0.25          # per note in the last 10 minutes (up to 30)
+rate_per_heat = 0.6           # as the crew's context meters fill
+depth_per_energy = 0.5        # each breath deeper with energy
+kick = 1.6                    # outward kick per packet (the gulp)
+ring_freq = 1.4               # the gulp rings down at this many Hz
+ring_damping = 0.25           # 1 = settles without overshoot
 
 # The ring's spin comes from the agents' notes to each other: each one
 # kicks it on clockwise, the way the core's disk turns (a note never
@@ -107,8 +124,8 @@ dock = true                   # the line of seats that aren't on the ring
 hover_card = false            # the seat card under the pointer (off for now)
 
 # The load balancer's task board, read live from ~/.local/share/comms-deck/.
-# Open tasks orbit the core on their own ring; a held task is a bolt from its
-# holder to the core. Both are coloured by the seat that assigned the task
+# Open tasks orbit the core on their own ring; a held task draws no line to
+# the core (Y, t19), only the packet it fires when done. Both are coloured by the seat that assigned the task
 # (Y's tasks burn gold), and t toggles the whole thing.
 [tasks]
 show = true
@@ -116,7 +133,7 @@ speed = 0.22                  # radians a second the task ring turns
 radius = 0.42                 # the ring's radius, as a share of the seat ring's
 size = 0.5
 bright = 1.1
-bolt_bright = 0.5
+bolt_bright = 0.0             # no standing bolt to the core (Y, t19)
 
 # The chat panel on the right: the notes, and a chat box that sends as Y.
 # The terminal chat screen keeps working alongside it.

@@ -187,6 +187,8 @@ struct PlanetUniform {
     colour: Vec4,
     /// time, work, busy, seed
     params: Vec4,
+    /// has a logo, paint it in the seat's colour, brightness
+    logo: Vec4,
 }
 
 /// mods/shaders/planet.wgsl: inside a seat, what it's doing.
@@ -194,6 +196,53 @@ struct PlanetUniform {
 struct PlanetMaterial {
     #[uniform(0)]
     u: PlanetUniform,
+    /// The seat's logo, drawn on the surface (mods/logos/<seat>.png).
+    #[texture(1)]
+    #[sampler(2)]
+    logo: Option<Handle<Image>>,
+}
+
+/// The seats' logos from mods/logos/<seat>.png, read once at start. `true`
+/// when the logo is one colour, so the planet paints it in the seat's own.
+#[derive(Resource, Default)]
+struct Logos(HashMap<String, (Handle<Image>, bool)>);
+
+/// Every mods/logos/*.png that decodes, by seat name.
+fn load_logos(dir: &std::path::Path, images: &mut Assets<Image>) -> Logos {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
+    let mut logos = Logos::default();
+    let Ok(entries) = std::fs::read_dir(dir) else { return logos };
+    for e in entries.flatten() {
+        let path = e.path();
+        if path.extension().and_then(|x| x.to_str()) != Some("png") {
+            continue;
+        }
+        let Some(seat) = path.file_stem().and_then(|x| x.to_str()).map(String::from) else { continue };
+        let Ok(bytes) = std::fs::read(&path) else { continue };
+        let Ok(img) = Image::from_buffer(
+            &bytes,
+            ImageType::Extension("png"),
+            CompressedImageFormats::NONE,
+            true,
+            ImageSampler::linear(),
+            RenderAssetUsages::RENDER_WORLD,
+        ) else {
+            continue;
+        };
+        let mono = img.data.as_deref().is_some_and(one_colour);
+        logos.0.insert(seat, (images.add(img), mono));
+    }
+    logos
+}
+
+/// True when every visible pixel of an RGBA8 image is grey: a one-colour
+/// logo, painted in the seat's colour rather than its own.
+fn one_colour(rgba: &[u8]) -> bool {
+    rgba.chunks_exact(4).filter(|p| p[3] > 32).all(|p| {
+        let (lo, hi) = (p[0].min(p[1]).min(p[2]), p[0].max(p[1]).max(p[2]));
+        hi - lo < 24
+    })
 }
 
 impl Material2d for PlanetMaterial {
@@ -213,6 +262,8 @@ struct Packet {
     seat: String,
     at: f32,
     colour: [f32; 3],
+    /// Has it reached the core and been taken in (t29)?
+    absorbed: bool,
 }
 
 fn v4(c: [f32; 3], a: f32) -> Vec4 {
@@ -264,6 +315,13 @@ struct Deck {
     /// 0.., kicked by agents writing to Y, decaying: the stars' boost.
     boost: f32,
     packets: Vec<Packet>,
+    /// The core (t29): energy fed by the packets it takes in, decaying; its
+    /// swell and swell speed (a damped spring each packet kicks); and the
+    /// phase of its breathing, carried on so a change of pace never jumps.
+    core_energy: f32,
+    core_swell: f32,
+    core_swell_v: f32,
+    core_phase: f32,
     /// Each seat's last state from activity, to see a job finish.
     last_state: HashMap<String, String>,
     /// The load balancer's board: open tasks orbit, held ones are bolts.
@@ -533,6 +591,19 @@ fn wall_hit(p: Vec2, half: Vec2) -> Option<(usize, f32)> {
 
 /// Panics go to ~/.local/state/warp-core/crash.log as well as stderr, so a
 /// crash leaves a reason behind even when nobody saw the terminal.
+/// "1.x", x the iteration: install.sh counts every install into
+/// `iteration` beside the binary (Y, 2026-11-27). "1.?" when it is missing.
+fn version() -> &'static str {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| {
+        let n = std::env::current_exe()
+            .ok()
+            .and_then(|e| std::fs::read_to_string(e.with_file_name("iteration")).ok())
+            .and_then(|t| t.trim().parse::<u32>().ok());
+        n.map_or_else(|| "1.?".to_string(), |n| format!("1.{n}"))
+    })
+}
+
 fn install_crash_log() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -895,6 +966,7 @@ fn note_look(rules: &[Rule], cfg: &Config, n: &NoteInfo) -> NoteLook {
 fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut core_materials: ResMut<Assets<CoreMaterial>>,
     mut rng: ResMut<Rng>,
@@ -906,6 +978,7 @@ fn setup(
         DebandDither::Enabled,
     ));
 
+    commands.insert_resource(load_logos(&mods::mods_dir().join("logos"), &mut images));
     let assets = Assets2d {
         dot: meshes.add(Circle::new(5.0)),
         star: meshes.add(Rectangle::new(1.0, 1.6)),
@@ -1153,7 +1226,7 @@ fn read_feed(
                 if live {
                     deck.shocks.push(Shock { seat: a.seat.clone(), at: now, colour: seat_rgb(&a.seat), size: 0.45 });
                     if finished_job(was.as_deref(), &a.state) {
-                        deck.packets.push(Packet { seat: a.seat.clone(), at: now, colour: seat_rgb(&a.seat) });
+                        deck.packets.push(Packet { seat: a.seat.clone(), at: now, colour: seat_rgb(&a.seat), absorbed: false });
                     }
                 }
                 chat.activity.push_back(a);
@@ -1188,7 +1261,7 @@ fn read_feed(
                 // packet in the colour of whoever asked for it.
                 let fired: Vec<Packet> = finished_tasks(&deck.tasks, &tasks)
                     .into_iter()
-                    .filter_map(|d| Some(Packet { seat: d.holder.clone()?, at: now, colour: seat_rgb(&d.from) }))
+                    .filter_map(|d| Some(Packet { seat: d.holder.clone()?, at: now, colour: seat_rgb(&d.from), absorbed: false }))
                     .collect();
                 deck.packets.extend(fired);
                 deck.tasks = tasks;
@@ -1205,7 +1278,8 @@ fn read_feed(
     deck.thrust = (deck.thrust - time.delta_secs() * mods.cfg.typing.decay).max(0.0);
     deck.boost = (deck.boost - time.delta_secs() * mods.cfg.stars.boost_decay).max(0.0);
     let gone = mods.cfg.conduits.packet_seconds.max(0.1);
-    deck.packets.retain(|p| now - p.at < gone);
+    // Kept a moment past arrival so the core can take each one in (t29).
+    deck.packets.retain(|p| now - p.at < gone + 1.0);
 }
 
 fn apply_rules(deck: Res<Deck>, mods: Res<Mods>, mut looks: ResMut<Looks>) {
@@ -1354,6 +1428,7 @@ fn layout_seats(
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut rings: ResMut<Assets<RingMaterial>>,
     mut planets: ResMut<Assets<PlanetMaterial>>,
+    logos: Res<Logos>,
     layout: Res<Layout>,
     time: Res<Time>,
     mut nodes: Query<(Entity, &mut SeatNode, &mut Transform)>,
@@ -1412,7 +1487,10 @@ fn layout_seats(
                     seat.spawn((
                         PlanetFace,
                         Mesh2d(assets.quad.clone()),
-                        MeshMaterial2d(planets.add(PlanetMaterial::default())),
+                        MeshMaterial2d(planets.add(PlanetMaterial {
+                            logo: logos.0.get(name).map(|l| l.0.clone()),
+                            ..default()
+                        })),
                         Transform::from_xyz(0.0, 0.0, 0.05).with_scale(Vec3::new(52.0, 52.0, 1.0)),
                     ));
                     seat.spawn((
@@ -1533,7 +1611,9 @@ fn draw_task_bolts(
     mut gizmos: Gizmos,
 ) {
     let tc = &mods.cfg.tasks;
-    if !tc.show || !view.tasks {
+    // No standing lines to the core (Y, t19): bolts are off unless a mod
+    // turns them back up.
+    if !tc.show || !view.tasks || tc.bolt_bright <= 0.0 {
         return;
     }
     let t = time.elapsed_secs();
@@ -1649,6 +1729,7 @@ fn glow_seats(
     deck: Res<Deck>,
     mods: Res<Mods>,
     looks: Res<Looks>,
+    logos: Res<Logos>,
     time: Res<Time>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut nodes: Query<(&mut SeatNode, &MeshMaterial2d<ColorMaterial>, &mut Transform, &Children)>,
@@ -1678,7 +1759,12 @@ fn glow_seats(
         );
         for child in children.iter() {
             if let Ok(mut text) = labels.get_mut(child) {
-                let mut line = format!("{}\n{}", label_for(&node.name), seat.shown);
+                // A seat with a logo wears it instead of its name (Y, 04:42).
+                let mut line = if logos.0.contains_key(&node.name) {
+                    seat.shown.clone()
+                } else {
+                    format!("{}\n{}", label_for(&node.name), seat.shown)
+                };
                 if seat.waiting > 0 {
                     line.push_str(&format!(" | {} waiting", seat.waiting));
                 }
@@ -1761,25 +1847,46 @@ fn draw_rings(
 /// The core breathes faster the more notes fly, and runs hotter as the
 /// crew's meters fill.
 fn pulse_core(
-    deck: Res<Deck>,
+    mut deck: ResMut<Deck>,
     mods: Res<Mods>,
     time: Res<Time>,
     mut core: Query<(&mut Transform, &MeshMaterial2d<CoreMaterial>), With<Core>>,
     mut core_materials: ResMut<Assets<CoreMaterial>>,
 ) {
-    let c = &mods.cfg.core;
+    let c = mods.cfg.core.clone();
     let t = time.elapsed_secs();
+    let dt = time.delta_secs().min(0.1);
     let pace = deck.notes_last(t, 600.0) as f32;
-    let rate = 0.8 + pace.min(30.0) * 0.25;
-    let s = c.size * (1.0 + c.breath * (t * rate).sin() + deck.warp * 0.25);
     let heat = crew_heat(&deck.seats);
+    let busy = deck.seats.iter().filter(|s| s.shown == "busy").count();
+    let online = deck.seats.iter().filter(|s| s.online()).count();
+    // Packets that reached the core this frame feed it (t29).
+    let secs = mods.cfg.conduits.packet_seconds.max(0.1);
+    let mut arrived = 0;
+    for pk in deck.packets.iter_mut().filter(|pk| !pk.absorbed && t - pk.at >= secs) {
+        pk.absorbed = true;
+        arrived += 1;
+    }
+    let warp = deck.warp;
+    let d = &mut *deck;
+    let shape = core_step(
+        &c,
+        CoreState { energy: d.core_energy, swell: d.core_swell, swell_v: d.core_swell_v, phase: d.core_phase },
+        CoreInputs { arrived, busy, online, pace, warp, heat },
+        dt,
+    );
+    d.core_energy = shape.state.energy;
+    d.core_swell = shape.state.swell;
+    d.core_swell_v = shape.state.swell_v;
+    d.core_phase = shape.state.phase;
     for (mut tf, mat) in &mut core {
-        tf.scale = Vec3::new(170.0 * s, 170.0 * s, 1.0);
+        tf.scale = Vec3::new(170.0 * shape.size, 170.0 * shape.size, 1.0);
         if let Some(mut m) = core_materials.get_mut(&mat.0) {
             m.u = CoreUniform {
                 cool: v4(c.cool, 1.0),
                 hot: v4(c.hot, 1.0),
-                params: Vec4::new(t, heat, deck.warp, pace.min(30.0) / 30.0),
+                // The shader's churn runs on the core's own energy too.
+                params: Vec4::new(t, heat, warp, (pace.min(30.0) / 30.0).max(shape.state.energy.min(1.0))),
             };
         }
     }
@@ -1790,6 +1897,56 @@ fn pulse_core(
 
 /// 0..1: the mean of the online seats' fullest meters (seats without
 /// usage files don't count either way).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct CoreState {
+    energy: f32,
+    swell: f32,
+    swell_v: f32,
+    phase: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct CoreInputs {
+    /// Packets taken in this frame.
+    arrived: usize,
+    busy: usize,
+    online: usize,
+    /// Notes in the last 10 minutes.
+    pace: f32,
+    warp: f32,
+    /// 0..1, how full the crew's context meters are.
+    heat: f32,
+}
+
+struct CoreShape {
+    state: CoreState,
+    /// The core's drawn size, 1.0 = `[core] size`.
+    size: f32,
+}
+
+/// One step of the core (t29): its size and oscillation are governed by
+/// what it takes in. Each packet that arrives adds energy (which decays)
+/// and kicks a damped spring, so the core visibly gulps it and rings down.
+/// Its resting size grows with that energy and with the share of the crew
+/// at work; its breathing quickens with energy, note traffic and heat, and
+/// deepens with energy. Warp swells it on top.
+fn core_step(c: &mods::CoreCfg, s: CoreState, i: CoreInputs, dt: f32) -> CoreShape {
+    let energy = (s.energy * (-c.energy_decay.max(0.0) * dt).exp() + i.arrived as f32 * c.per_packet).min(c.max_energy);
+    // The spring: pulled back to rest, damped, kicked outward per packet.
+    let w = c.ring_freq * std::f32::consts::TAU;
+    let mut swell_v = s.swell_v + i.arrived as f32 * c.kick;
+    swell_v += (-w * w * s.swell - 2.0 * c.ring_damping * w * swell_v) * dt;
+    let swell = (s.swell + swell_v * dt).clamp(-0.5, 1.0);
+    // Breathing: a carried phase, so a change of rate bends it smoothly.
+    let rate = c.breath_rate + c.rate_per_energy * energy + c.rate_per_note * i.pace.min(30.0) + c.rate_per_heat * i.heat;
+    let phase = (s.phase + rate * dt).rem_euclid(std::f32::consts::TAU * 64.0);
+    let depth = c.breath * (1.0 + c.depth_per_energy * energy);
+    let busy_share = if i.online == 0 { 0.0 } else { i.busy as f32 / i.online as f32 };
+    let rest = 1.0 + c.grow_per_energy * energy + c.grow_busy * busy_share;
+    let size = c.size * rest * (1.0 + depth * phase.sin() + swell + i.warp * 0.25);
+    CoreShape { state: CoreState { energy, swell, swell_v, phase }, size: size.max(0.05) }
+}
+
 fn crew_heat(seats: &[SeatInfo]) -> f32 {
     let full: Vec<f64> = seats.iter().filter(|s| s.online()).filter_map(|s| s.fullest()).collect();
     if full.is_empty() {
@@ -1798,29 +1955,43 @@ fn crew_heat(seats: &[SeatInfo]) -> f32 {
     (full.iter().sum::<f64>() / full.len() as f64 / 100.0).clamp(0.0, 1.0) as f32
 }
 
-/// Faint conduits from each seat to the core; busy ones carry light.
-/// Conduits from each planet to the core, bent by the ring's turning. A
-/// packet of light runs down one only when that seat finishes a job.
+/// No standing lines to the core (Y, t19): a planet's path in is drawn only
+/// while a packet is on it, as the packet's own fading tail. The path still
+/// bends with the ring's turning, so the packet curves in the way it did.
 fn draw_links(deck: Res<Deck>, mods: Res<Mods>, nodes: Query<(&SeatNode, &Transform)>, time: Res<Time>, mut gizmos: Gizmos) {
+    if deck.packets.is_empty() {
+        return;
+    }
     let t = time.elapsed_secs();
     let bend = conduit_bend(&mods.cfg.conduits, deck.turning);
     let secs = mods.cfg.conduits.packet_seconds.max(0.1);
     for (node, tf) in &nodes {
-        let Some(seat) = deck.seat(&node.name) else { continue };
-        let path = conduit_path(tf.translation.truncate(), bend, 18);
+        let mut flying = deck.packets.iter().filter(|pk| pk.seat == node.name && t - pk.at < secs).peekable();
+        if flying.peek().is_none() {
+            continue;
+        }
+        let path = conduit_path(tf.translation.truncate(), bend, 48);
         let dim = if deck.focus.as_ref().is_some_and(|f| *f != node.name) { 0.25 } else { 1.0 };
-        let b = ((mods.cfg.brightness(&seat.shown) * 0.18).min(0.6) + node.flash) * dim;
-        let n = path.len() as f32;
-        gizmos.linestrip_gradient_2d(
-            path.iter().enumerate().map(|(i, p)| (*p, seat_colour(&node.name, b * (1.0 - 0.6 * i as f32 / n)))),
-        );
-        for pk in deck.packets.iter().filter(|pk| pk.seat == node.name) {
+        for pk in flying {
             let k = ((t - pk.at) / secs).clamp(0.0, 1.0);
-            let at = |k: f32| path[((k * (path.len() - 1) as f32).round() as usize).min(path.len() - 1)];
-            gizmos.circle_2d(Isometry2d::from_translation(at(k)), 3.0, lin(pk.colour, 5.0 * dim));
-            gizmos.line_2d(at((k - 0.12).max(0.0)), at(k), lin(pk.colour, 2.5 * dim));
+            let (head, tail) = packet_span(path.len(), k, 0.3);
+            gizmos.linestrip_gradient_2d((tail..=head).map(|i| {
+                let f = if head == tail { 1.0 } else { (i - tail) as f32 / (head - tail) as f32 };
+                (path[i], lin(pk.colour, 3.0 * dim * f * f))
+            }));
+            gizmos.circle_2d(Isometry2d::from_translation(path[head]), 3.0, lin(pk.colour, 5.0 * dim));
         }
     }
+}
+
+/// Which points of an `n`-point path a packet `k` (0..1) of the way along
+/// covers: its head, and the start of a tail `len` (a fraction of the path)
+/// long behind it.
+fn packet_span(n: usize, k: f32, len: f32) -> (usize, usize) {
+    let last = n.saturating_sub(1);
+    let head = ((k.clamp(0.0, 1.0) * last as f32).round() as usize).min(last);
+    let tail = (((k - len).max(0.0) * last as f32).round() as usize).min(head);
+    (head, tail)
 }
 
 /// Drives each planet's inside: work grows the longer it has been busy.
@@ -1831,6 +2002,7 @@ fn drive_planets(
     nodes: Query<(&SeatNode, &Children)>,
     mut faces: Query<(&MeshMaterial2d<PlanetMaterial>, &mut Visibility), With<PlanetFace>>,
     mut mats: ResMut<Assets<PlanetMaterial>>,
+    logos: Res<Logos>,
 ) {
     let pc = &mods.cfg.planets;
     let t = time.elapsed_secs();
@@ -1842,10 +2014,20 @@ fn drive_planets(
             let busy = seat.shown == "busy";
             let work = if busy { planet_work(seat.since_s, pc.full_minutes) } else { 0.0 };
             let seed = (node.name.bytes().map(|b| b as u32).sum::<u32>() % 97) as f32 / 97.0;
+            // The logo dims with the planet: its state, the far side of the
+            // orbit, another seat in focus.
+            let mut bright = (mods.cfg.brightness(&seat.shown) / 2.0).clamp(0.25, 1.6) * (0.55 + 0.45 * node.depth);
+            if deck.focus.as_ref().is_some_and(|f| *f != node.name) {
+                bright *= 0.3;
+            }
             if let Some(mut m) = mats.get_mut(&mat.0) {
                 m.u = PlanetUniform {
                     colour: v4(seat_rgb(&node.name), 1.0),
                     params: Vec4::new(t, work, if busy { 1.0 } else { 0.0 }, seed),
+                    logo: match logos.0.get(&node.name) {
+                        Some((_, mono)) => Vec4::new(1.0, if *mono { 1.0 } else { 0.0 }, bright, 0.0),
+                        None => Vec4::ZERO,
+                    },
                 };
             }
         }
@@ -2123,7 +2305,8 @@ fn hud(
     let mut line = String::new();
     if mods.cfg.hud.show && view.hud {
         line = format!(
-            "WARP CORE    {} online | {} busy | {} waiting | {} notes in the last hour",
+            "WARP CORE {}    {} online | {} busy | {} waiting | {} notes in the last hour",
+            version(),
             online.len(),
             busy,
             waiting,
@@ -3046,6 +3229,48 @@ mod tests {
         assert!(look.shock.is_none() && look.warp == 0.0);
         let all = NoteInfo { from: "claude".into(), all: true, ..Default::default() };
         assert_eq!(note_look(&r, &cfg, &all).warp, 1.0, "broadcasts still warp");
+    }
+
+    fn run_core(c: &mods::CoreCfg, mut st: CoreState, i: CoreInputs, secs: f32) -> (CoreState, Vec<f32>) {
+        let mut sizes = Vec::new();
+        let mut first = true;
+        for _ in 0..(secs * 60.0) as usize {
+            let inputs = CoreInputs { arrived: if first { i.arrived } else { 0 }, ..i };
+            first = false;
+            let shape = core_step(c, st, inputs, 1.0 / 60.0);
+            st = shape.state;
+            sizes.push(shape.size);
+        }
+        (st, sizes)
+    }
+
+    #[test]
+    fn packets_feed_the_core_and_it_rings_down() {
+        let c = mods::CoreCfg::default();
+        let calm = CoreInputs { online: 4, ..Default::default() };
+        let (_, quiet) = run_core(&c, CoreState::default(), calm, 2.0);
+        let (st, fed) = run_core(&c, CoreState::default(), CoreInputs { arrived: 3, ..calm }, 2.0);
+        let peak = |v: &[f32]| v.iter().cloned().fold(0.0, f32::max);
+        assert!(peak(&fed) > peak(&quiet) * 1.2, "a gulp of packets swells it: {} vs {}", peak(&fed), peak(&quiet));
+        assert!(st.energy > 0.5, "and leaves it charged: {}", st.energy);
+        // Left alone it rings down and the energy fades.
+        let (st, _) = run_core(&c, st, calm, 60.0);
+        assert!(st.swell.abs() < 0.01 && st.swell_v.abs() < 0.05, "rang down: {st:?}");
+        assert!(st.energy < 0.05, "faded: {}", st.energy);
+    }
+
+    #[test]
+    fn energy_quickens_the_breath_and_a_busy_crew_makes_it_bigger() {
+        let c = mods::CoreCfg::default();
+        let base = CoreInputs { online: 4, ..Default::default() };
+        let still = core_step(&c, CoreState::default(), base, 1.0);
+        let charged = core_step(&c, CoreState { energy: 2.0, ..Default::default() }, base, 1.0);
+        assert!(charged.state.phase > still.state.phase * 2.0, "energy quickens the breathing");
+        let idle = core_step(&c, CoreState::default(), base, 0.0).size;
+        let busy = core_step(&c, CoreState::default(), CoreInputs { busy: 4, ..base }, 0.0).size;
+        assert!(busy > idle, "a working crew swells the core: {busy} vs {idle}");
+        let flood = core_step(&c, CoreState::default(), CoreInputs { arrived: 1000, ..base }, 0.016);
+        assert!(flood.state.energy <= c.max_energy && flood.state.swell <= 1.0, "a flood can't blow it up");
     }
 
     #[test]

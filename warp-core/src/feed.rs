@@ -370,7 +370,29 @@ fn nat_id(id: &str) -> (String, u64) {
     (id.trim_end_matches(|c: char| c.is_ascii_digit()).to_string(), digits.parse().unwrap_or(0))
 }
 
+/// The seats: from the service's snapshot (status.json, rewritten every
+/// 2 s) while it is fresh, which costs a file read; otherwise from
+/// `comms-deck status --json`, which starts Python (about 0.35 s of CPU).
 fn status() -> Result<Vec<SeatInfo>, String> {
+    if let Some(seats) = status_snapshot(&data_dir().join("status.json"), now_secs()) {
+        return Ok(seats);
+    }
+    status_command()
+}
+
+fn now_secs() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+}
+
+/// The snapshot's seats if it was written in the last 10 s, else None.
+fn status_snapshot(path: &std::path::Path, now: f64) -> Option<Vec<SeatInfo>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let v: Value = serde_json::from_str(&json_safe(&text)).ok()?;
+    let at = v.get("time")?.as_f64()?;
+    ((now - at).abs() < 10.0).then(|| parse_status(&v))
+}
+
+fn status_command() -> Result<Vec<SeatInfo>, String> {
     let out = Command::new(program())
         .args(["status", "--json"])
         .output()
@@ -378,8 +400,39 @@ fn status() -> Result<Vec<SeatInfo>, String> {
     if !out.status.success() {
         return Err(format!("{} status --json failed", program()));
     }
-    let v: Value = serde_json::from_slice(&out.stdout).map_err(|e| format!("bad json: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let v: Value = serde_json::from_str(&json_safe(&text)).map_err(|e| format!("bad json: {e}"))?;
     Ok(parse_status(&v))
+}
+
+/// Python's json writes infinity and NaN as bare `Infinity`/`NaN`, which
+/// isn't JSON: one such value (a spent seat with no known return) used to
+/// throw away the whole seat feed, leaving the ring empty. Outside strings
+/// they become null.
+fn json_safe(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let (mut in_str, mut esc) = (false, false);
+    let mut rest = text;
+    while let Some(c) = rest.chars().next() {
+        if in_str {
+            if esc {
+                esc = false;
+            } else if c == '\\' {
+                esc = true;
+            } else if c == '"' {
+                in_str = false;
+            }
+        } else if c == '"' {
+            in_str = true;
+        } else if let Some(word) = ["-Infinity", "Infinity", "NaN"].iter().find(|w| rest.starts_with(**w)) {
+            out.push_str("null");
+            rest = &rest[word.len()..];
+            continue;
+        }
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
 }
 
 /// Follows log.jsonl from its end: only notes sent after the warp core
@@ -654,5 +707,27 @@ mod tests {
         writeln!(f, "\"message\",\"from\":\"c\",\"to\":\"d\"}}").unwrap();
         assert_eq!(tail.read_new().len(), 1, "and arrives once finished");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_bare_infinity_no_longer_empties_the_ring() {
+        let text = r#"{"seats": {"vibe": {"state": "away", "shown": "spent", "rank": [1], "spent_until": Infinity, "x": -Infinity, "y": NaN, "note": "Infinity \"NaN\""}}}"#;
+        let v: Value = serde_json::from_str(&json_safe(text)).expect("parses");
+        assert!(v["seats"]["vibe"]["spent_until"].is_null());
+        assert!(v["seats"]["vibe"]["x"].is_null() && v["seats"]["vibe"]["y"].is_null());
+        assert_eq!(v["seats"]["vibe"]["note"], "Infinity \"NaN\"", "strings are left alone");
+        assert_eq!(parse_status(&v).len(), 1);
+    }
+
+    #[test]
+    fn a_fresh_snapshot_stands_in_for_the_command_and_a_stale_one_does_not() {
+        let dir = std::env::temp_dir().join(format!("warp-snap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("status.json");
+        std::fs::write(&path, r#"{"time": 1000.0, "seats": {"claude": {"state": "busy", "shown": "busy", "rank": [1]}}}"#).unwrap();
+        assert_eq!(status_snapshot(&path, 1005.0).map(|s| s.len()), Some(1));
+        assert!(status_snapshot(&path, 1020.0).is_none(), "stale: fall back to the command");
+        assert!(status_snapshot(&dir.join("missing.json"), 1005.0).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

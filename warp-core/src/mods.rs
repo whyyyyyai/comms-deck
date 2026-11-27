@@ -117,10 +117,48 @@ pub struct CoreCfg {
     pub hot: [f32; 3],
     pub size: f32,
     pub breath: f32,
+    /// t29: what the core takes in governs it. Energy each packet adds.
+    pub per_packet: f32,
+    /// How fast that energy fades (per second), and the most it holds.
+    pub energy_decay: f32,
+    pub max_energy: f32,
+    /// Resting size added per unit of energy, and with the whole crew busy.
+    pub grow_per_energy: f32,
+    pub grow_busy: f32,
+    /// Breathing: base rate (radians a second) and what quickens it.
+    pub breath_rate: f32,
+    pub rate_per_energy: f32,
+    pub rate_per_note: f32,
+    pub rate_per_heat: f32,
+    /// How much deeper each breath is per unit of energy.
+    pub depth_per_energy: f32,
+    /// The gulp: outward kick per packet, the ring-down's frequency (Hz)
+    /// and damping ratio (1 = no overshoot).
+    pub kick: f32,
+    pub ring_freq: f32,
+    pub ring_damping: f32,
 }
 impl Default for CoreCfg {
     fn default() -> Self {
-        CoreCfg { cool: [0.25, 0.9, 3.2], hot: [5.0, 2.2, 0.8], size: 1.0, breath: 0.07 }
+        CoreCfg {
+            cool: [0.25, 0.9, 3.2],
+            hot: [5.0, 2.2, 0.8],
+            size: 1.0,
+            breath: 0.07,
+            per_packet: 0.35,
+            energy_decay: 0.08,
+            max_energy: 3.0,
+            grow_per_energy: 0.08,
+            grow_busy: 0.12,
+            breath_rate: 0.8,
+            rate_per_energy: 0.9,
+            rate_per_note: 0.25,
+            rate_per_heat: 0.6,
+            depth_per_energy: 0.5,
+            kick: 1.6,
+            ring_freq: 1.4,
+            ring_damping: 0.25,
+        }
     }
 }
 
@@ -410,12 +448,13 @@ pub struct TasksCfg {
     pub radius: f32,
     pub size: f32,
     pub bright: f32,
-    /// How bright a holder's bolt to the core burns.
+    /// How bright a holder's bolt to the core burns; 0 (the default, Y's
+    /// t19) draws none.
     pub bolt_bright: f32,
 }
 impl Default for TasksCfg {
     fn default() -> Self {
-        TasksCfg { show: true, speed: 0.22, radius: 0.42, size: 0.5, bright: 1.1, bolt_bright: 0.5 }
+        TasksCfg { show: true, speed: 0.22, radius: 0.42, size: 0.5, bright: 1.1, bolt_bright: 0.0 }
     }
 }
 
