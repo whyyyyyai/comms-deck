@@ -114,7 +114,7 @@ pulse = 2.0
 on = "seat"
 when = "held_by_draft"
 effect = "label"
-text = "drafting…"
+text = "drafting..."
 
 [[rule]]
 on = "seat"

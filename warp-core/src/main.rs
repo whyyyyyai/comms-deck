@@ -892,7 +892,7 @@ fn glow_seats(
             if let Ok(mut text) = labels.get_mut(child) {
                 let mut line = format!("{}\n{}", label_for(&node.name), seat.shown);
                 if seat.waiting > 0 {
-                    line.push_str(&format!(" · {} waiting", seat.waiting));
+                    line.push_str(&format!(" | {} waiting", seat.waiting));
                 }
                 for l in &look.labels {
                     line.push('\n');
@@ -1234,20 +1234,20 @@ fn hud(
     let mut line = String::new();
     if mods.cfg.hud.show && view.hud {
         line = format!(
-            "WARP CORE    {} online · {} busy · {} waiting · {} notes in the last hour",
+            "WARP CORE    {} online | {} busy | {} waiting | {} notes in the last hour",
             online.len(),
             busy,
             waiting,
             deck.notes_last(now, 3600.0),
         );
         if deck.warp > 0.05 {
-            line.push_str("    ▶ WARP");
+            line.push_str("    >> WARP");
         }
         if vtime.is_paused() {
-            line.push_str("    ❚❚ FROZEN (f)");
+            line.push_str("    || FROZEN (f)");
         }
         if let Some(f) = &deck.focus {
-            line.push_str(&format!("    ◎ {} (click empty space to clear)", label_for(f)));
+            line.push_str(&format!("    * {} (click empty space to clear)", label_for(f)));
         }
         if let Some(p) = &deck.problem {
             line.push_str(&format!("\n{p}"));
@@ -1285,7 +1285,9 @@ fn hud(
         .collect();
     let show = mods.cfg.hud.dock && view.hud && !off.is_empty();
     let dock_line = if show {
-        format!("off the ring: {}\nhover a seat · click to focus · 1-9 · h c m f r · space: test", off.join("  ·  "))
+        // Three to a line, so it fits a half-width window.
+        let rows: Vec<String> = off.chunks(3).map(|c| c.join("   |   ")).collect();
+        format!("off the ring: {}\nhover a seat | click to focus | 1-9 | h c m f r | space: test", rows.join("\n              "))
     } else {
         String::new()
     };
@@ -1303,13 +1305,13 @@ fn hud(
 /// (who and when only; what they said stays in the deck).
 fn hover_card(deck: &Deck, name: &str, now: f32) -> Option<String> {
     let s = deck.seat(name)?;
-    let mut lines = vec![format!("{} · {} for {}", label_for(name), s.shown, ago(s.since_s))];
+    let mut lines = vec![format!("{} | {} for {}", label_for(name), s.shown, ago(s.since_s))];
     if s.waiting > 0 {
         lines.push(format!("{} waiting, oldest {}", s.waiting, ago(s.oldest_waiting_s)));
     }
-    let pct = |p: Option<f64>| p.map(|v| format!("{v:.0}%")).unwrap_or_else(|| "–".into());
+    let pct = |p: Option<f64>| p.map(|v| format!("{v:.0}%")).unwrap_or_else(|| "-".into());
     if s.fullest().is_some() {
-        lines.push(format!("ctx {} · 5h {} · week {}", pct(s.ctx), pct(s.five_hour), pct(s.week)));
+        lines.push(format!("ctx {} | 5h {} | week {}", pct(s.ctx), pct(s.five_hour), pct(s.week)));
     }
     if s.held_by_draft {
         lines.push("drafting a note".into());
@@ -1323,9 +1325,9 @@ fn hover_card(deck: &Deck, name: &str, now: f32) -> Option<String> {
             let when = ago((now - n.at) as f64);
             if n.from == name {
                 let to = if n.all { "all".into() } else { n.to.iter().map(|t| label_for(t)).collect::<Vec<_>>().join(", ") };
-                format!("  → {to}  {when} ago")
+                format!("  -> {to}  {when} ago")
             } else {
-                format!("  ← {}  {when} ago", label_for(&n.from))
+                format!("  <- {}  {when} ago", label_for(&n.from))
             }
         })
         .collect();
@@ -1550,10 +1552,10 @@ mod tests {
         deck.history.push_front(Seen { at: 40.0, from: "vibe".into(), to: vec!["owner".into()], all: false });
         deck.history.push_front(Seen { at: 50.0, from: "grok".into(), to: vec!["devin".into()], all: false });
         let card = hover_card(&deck, "vibe", 100.0).unwrap();
-        assert!(card.starts_with("vibe · busy for 1m"));
+        assert!(card.starts_with("vibe | busy for 1m"));
         assert!(card.contains("2 waiting, oldest 1h 20m"));
-        assert!(card.contains("ctx 45% · 5h – · week –"));
-        assert!(card.contains("→ Y  1m ago") && card.contains("← claude  1m ago"));
+        assert!(card.contains("ctx 45% | 5h - | week -"));
+        assert!(card.contains("-> Y  1m ago") && card.contains("<- claude  1m ago"));
         assert!(!card.contains("grok"), "other seats' notes aren't on it");
         assert!(hover_card(&deck, "nobody", 0.0).is_none());
     }
