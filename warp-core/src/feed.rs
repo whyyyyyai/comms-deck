@@ -22,14 +22,34 @@ pub struct SeatInfo {
     /// (`shown` can say "spent" for a seat whose state is away.)
     pub state: String,
     pub waiting: u64,
+    pub waiting_normal: u64,
+    pub oldest_waiting_s: f64,
+    pub since_s: f64,
+    pub held_by_draft: bool,
+    pub paused: bool,
+    /// The seat's meters from its usage file, as percentages.
+    pub ctx: Option<f64>,
+    pub five_hour: Option<f64>,
+    pub week: Option<f64>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+impl SeatInfo {
+    /// The fullest of the three meters, if the seat reports any.
+    pub fn fullest(&self) -> Option<f64> {
+        [self.ctx, self.five_hour, self.week].into_iter().flatten().reduce(f64::max)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct NoteInfo {
     pub from: String,
     /// The seats it goes to; empty with `all` set means everyone.
     pub to: Vec<String>,
     pub all: bool,
+    pub quiet: bool,
+    /// How long the note is, in characters. The text itself never leaves
+    /// the feed: the screen shows that notes fly, not what they say.
+    pub len: usize,
 }
 
 pub enum Msg {
@@ -73,8 +93,21 @@ pub fn parse_status(v: &Value) -> Vec<SeatInfo> {
                 .unwrap_or_default();
             let state = s.get("state").and_then(Value::as_str).unwrap_or("away").to_string();
             let shown = s.get("shown").and_then(Value::as_str).unwrap_or(&state).to_string();
-            let waiting = s.get("waiting").and_then(Value::as_u64).unwrap_or(0);
-            (rank, SeatInfo { name: seat_id(name), shown, state, waiting })
+            let num = |k: &str| s.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+            let flag = |k: &str| s.get(k).and_then(Value::as_bool).unwrap_or(false);
+            let seat = SeatInfo {
+                name: seat_id(name),
+                shown,
+                state,
+                waiting: s.get("waiting").and_then(Value::as_u64).unwrap_or(0),
+                waiting_normal: s.get("waiting_normal").and_then(Value::as_u64).unwrap_or(0),
+                oldest_waiting_s: num("oldest_waiting_s"),
+                since_s: num("since_s"),
+                held_by_draft: flag("held_by_draft"),
+                paused: flag("paused"),
+                ..Default::default()
+            };
+            (rank, seat)
         })
         .collect();
     seats.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.name.cmp(&b.1.name)));
@@ -115,7 +148,31 @@ pub fn parse_note(v: &Value) -> Option<NoteInfo> {
             }
         }
     }
-    Some(NoteInfo { from, to, all })
+    let quiet = v.get("quiet").and_then(Value::as_bool).unwrap_or(false);
+    let len = v.get("text").and_then(Value::as_str).map(|t| t.chars().count()).unwrap_or(0);
+    Some(NoteInfo { from, to, all, quiet, len })
+}
+
+/// A seat's meters from usage/<seat>.json (the statusline shape the
+/// terminal deck reads): context, 5-hour and weekly used percentages.
+pub fn parse_usage(v: &Value) -> (Option<f64>, Option<f64>, Option<f64>) {
+    let d = v.get("data").unwrap_or(&Value::Null);
+    let pct = |x: Option<&Value>| x.and_then(|x| x.get("used_percentage")).and_then(Value::as_f64);
+    let limits = d.get("rate_limits");
+    (
+        pct(d.get("context_window")),
+        pct(limits.and_then(|l| l.get("five_hour"))),
+        pct(limits.and_then(|l| l.get("seven_day"))),
+    )
+}
+
+fn add_usage(seats: &mut [SeatInfo], dir: &std::path::Path) {
+    for seat in seats {
+        let path = dir.join(format!("{}.json", seat.name));
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
+        (seat.ctx, seat.five_hour, seat.week) = parse_usage(&v);
+    }
 }
 
 fn status() -> Result<Vec<SeatInfo>, String> {
@@ -176,7 +233,10 @@ pub fn run(tx: Sender<Msg>) {
         if last_status.elapsed() >= Duration::from_secs(2) {
             last_status = Instant::now();
             let msg = match status() {
-                Ok(seats) => Msg::Seats(seats),
+                Ok(mut seats) => {
+                    add_usage(&mut seats, &data_dir().join("usage"));
+                    Msg::Seats(seats)
+                }
                 Err(e) => Msg::Problem(e),
             };
             if tx.send(msg).is_err() {
@@ -235,6 +295,26 @@ mod tests {
         let n = parse_note(&json!({"kind": "message", "from": "Y", "to": "all -grok"})).unwrap();
         assert!(n.all && n.to.is_empty());
         assert_eq!(n.from, "owner");
+    }
+
+    #[test]
+    fn queues_and_meters_come_through() {
+        let v = json!({"seats": {"codex": {"state": "away", "shown": "spent", "rank": [1],
+            "waiting": 103, "oldest_waiting_s": 241499.0, "held_by_draft": true}}});
+        let s = &parse_status(&v)[0];
+        assert_eq!((s.waiting, s.oldest_waiting_s, s.held_by_draft), (103, 241499.0, true));
+        let u = json!({"data": {"context_window": {"used_percentage": 45.0},
+            "rate_limits": {"five_hour": {"used_percentage": 30.0}, "seven_day": {"used_percentage": 92.5}}}});
+        assert_eq!(parse_usage(&u), (Some(45.0), Some(30.0), Some(92.5)));
+        let seat = SeatInfo { ctx: Some(45.0), week: Some(92.5), ..Default::default() };
+        assert_eq!(seat.fullest(), Some(92.5));
+        assert_eq!(SeatInfo::default().fullest(), None, "no meters is unknown, not zero");
+    }
+
+    #[test]
+    fn a_note_carries_its_length_not_its_text() {
+        let n = parse_note(&json!({"kind": "message", "from": "a", "to": "b", "text": "héllo", "quiet": true})).unwrap();
+        assert_eq!((n.len, n.quiet), (5, true));
     }
 
     #[test]

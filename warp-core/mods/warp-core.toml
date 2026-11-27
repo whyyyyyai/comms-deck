@@ -1,0 +1,145 @@
+# warp-core live mods. Save this file and the running warp core picks it up
+# within half a second: no rebuild, no restart. If something here doesn't
+# parse, the warp core keeps the last good version and says why in the HUD.
+#
+# Colours are linear [r, g, b]; values above 1 bloom. In rules a colour can
+# also be a name: white red amber gold green cyan blue violet pink, or "seat"
+# for the seat's own colour.
+
+[look]
+background = [0.01, 0.012, 0.03]
+bloom = 0.28
+fps = 30                      # frames a second; lower sips less power
+
+[core]
+cool = [0.25, 0.9, 3.2]       # the core's colour when the crew has room
+hot = [5.0, 2.2, 0.8]         # ... and as their meters fill up
+size = 1.0
+breath = 0.07                 # how far it swells each breath
+ring_spin = 1.0               # containment ring speed
+
+[orbit]
+drift = 0.05                  # radians a second when quiet
+traffic = 0.006               # added per note in the last 10 minutes (up to 30)
+warp_swing = 1.2              # added at full warp
+
+[stars]
+speed = 18
+warp_speed = 900
+stretch = 40
+colour = [0.9, 0.95, 1.4]
+
+[comets]
+seconds = 1.8
+trail = 28
+brightness = 5
+size = 1.0
+
+[warp]
+decay = 0.22                  # warp lost per second
+on_broadcast = 1.0            # warp a note to `all` kicks in (0 turns it off)
+
+[seats]
+size = 1.0
+other = 0.22                  # away, not set up, paused
+[seats.brightness]
+busy = 3.2
+stuck = 2.0
+ready = 1.1
+idle = 1.1
+spent = 0.35
+
+# Fuel rings: context (inner), 5-hour (middle), week (outer), from the
+# seats' usage files. A seat with no usage file has none.
+[fuel]
+show = true
+warn = 70
+danger = 90
+ok_colour = [0.2, 1.3, 0.55]
+warn_colour = [1.8, 1.0, 0.1]
+danger_colour = [3.0, 0.25, 0.15]
+empty = 0.08
+
+# Backlog moons: one per waiting note, white when fresh, red by old_hours.
+[moons]
+show = true
+max = 24
+fresh = [1.2, 1.2, 1.3]
+old = [2.5, 0.25, 0.1]
+old_hours = 6
+speed = 0.6
+
+[hud]
+show = true
+dock = true                   # the line of seats that aren't on the ring
+
+# ---------------------------------------------------------------- rules
+#
+# on = "seat": `when` is checked every frame for each seat on the ring.
+#   effects: halo (a ring around it: colour, pulse, size, bright)
+#            tint (its colour: colour, bright)
+#            glow (brightness times `bright`)
+#            beacon (a flashing marker above it: colour, pulse)
+#            label (adds `text` under its name)
+#   fields:  name state shown online busy idle ready stuck spent waiting
+#            waiting_normal oldest_waiting_s oldest_waiting_h since_s
+#            held_by_draft paused ctx five_hour week fullest has_usage focused
+#            (ctx / five_hour / week / fullest are percentages, -1 if unknown)
+#
+# on = "note": checked once for each note as it flies.
+#   effects: comet (colour, size, bright, seconds)
+#            warp (kicks the starfield by `strength`)
+#            shockwave (a ring bursts from the receiver: colour, size)
+#   fields:  from to all to_owner to_count quiet len
+#            (`to` is a comma list: to contains 'vibe')
+#
+# The language: numbers, 'strings', true/false, + - * /,
+# == != < <= > >=, && || ! (or and/or/not), and ( ).
+
+[[rule]]
+on = "seat"
+when = "oldest_waiting_h >= 1"
+effect = "halo"
+colour = "amber"
+pulse = 1.0
+
+[[rule]]
+on = "seat"
+when = "fullest >= 90"
+effect = "beacon"
+colour = "red"
+pulse = 2.0
+
+[[rule]]
+on = "seat"
+when = "held_by_draft"
+effect = "label"
+text = "drafting…"
+
+[[rule]]
+on = "seat"
+when = "stuck"
+effect = "halo"
+colour = "red"
+pulse = 2.5
+size = 1.15
+
+[[rule]]
+on = "note"
+when = "to_owner"
+effect = "comet"
+colour = "gold"
+size = 1.8
+bright = 1.5
+
+[[rule]]
+on = "note"
+when = "to_owner"
+effect = "shockwave"
+colour = "gold"
+
+[[rule]]
+on = "note"
+when = "len > 1500"
+effect = "comet"
+size = 1.6

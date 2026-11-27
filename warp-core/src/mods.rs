@@ -1,0 +1,724 @@
+//! Live mods: everything you would want to tune or extend without a rebuild.
+//!
+//! The mods folder ($WARP_CORE_MODS, else warp-core/mods next to the source)
+//! holds `warp-core.toml` (the settings and the effect rules) and
+//! `shaders/*.wgsl` (how the core and the rings are drawn). The running warp
+//! core looks at them twice a second and takes in whatever changed. A file
+//! that doesn't parse, a rule that doesn't compile, or a shader that doesn't
+//! validate is refused: the last good version stays on screen and the error
+//! goes in the HUD. A mod can never take the window down.
+//!
+//! Rules are `when` expressions in a small language of their own, so there
+//! is nothing to install and nothing that can run outside the warp core:
+//!   numbers, 'strings', true/false, fields (see SEAT_FIELDS / NOTE_FIELDS),
+//!   + - * /, == != < <= > >=, && || ! (or and/or/not), ( ), and
+//!   `list contains 'x'` for a comma list like a note's `to`.
+//!
+//! Written by: claude
+
+use serde::Deserialize;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+pub const DEFAULT_CONFIG: &str = include_str!("../mods/warp-core.toml");
+pub const DEFAULT_CORE_SHADER: &str = include_str!("../mods/shaders/core.wgsl");
+pub const DEFAULT_RING_SHADER: &str = include_str!("../mods/shaders/ring.wgsl");
+
+pub fn mods_dir() -> PathBuf {
+    match std::env::var("WARP_CORE_MODS") {
+        Ok(d) if !d.is_empty() => PathBuf::from(d),
+        _ => PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/mods")),
+    }
+}
+
+// ---------------------------------------------------------------- settings
+
+/// A colour in a mod: a name ("amber", "seat" for the seat's own colour)
+/// or linear [r, g, b], where values above 1 bloom.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum Colour {
+    Name(String),
+    Rgb([f32; 3]),
+}
+
+impl Colour {
+    /// Linear RGB; `seat` stands in for the seat's colour.
+    pub fn rgb(&self, seat: [f32; 3]) -> Result<[f32; 3], String> {
+        match self {
+            Colour::Rgb(c) => Ok(*c),
+            Colour::Name(n) => named(n, seat).ok_or_else(|| format!("unknown colour '{n}'")),
+        }
+    }
+}
+
+fn named(name: &str, seat: [f32; 3]) -> Option<[f32; 3]> {
+    Some(match name.to_lowercase().as_str() {
+        "seat" => seat,
+        "white" => [1.0, 1.0, 1.0],
+        "red" => [1.0, 0.12, 0.1],
+        "amber" => [1.0, 0.55, 0.05],
+        "gold" => [1.0, 0.78, 0.2],
+        "green" => [0.2, 1.0, 0.4],
+        "cyan" => [0.2, 0.9, 1.0],
+        "blue" => [0.2, 0.45, 1.0],
+        "violet" => [0.65, 0.35, 1.0],
+        "pink" => [1.0, 0.4, 0.75],
+        _ => return None,
+    })
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Look {
+    pub background: [f32; 3],
+    pub bloom: f32,
+    pub fps: f32,
+}
+impl Default for Look {
+    fn default() -> Self {
+        Look { background: [0.01, 0.012, 0.03], bloom: 0.28, fps: 30.0 }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CoreCfg {
+    pub cool: [f32; 3],
+    pub hot: [f32; 3],
+    pub size: f32,
+    pub breath: f32,
+    pub ring_spin: f32,
+}
+impl Default for CoreCfg {
+    fn default() -> Self {
+        CoreCfg { cool: [0.25, 0.9, 3.2], hot: [5.0, 2.2, 0.8], size: 1.0, breath: 0.07, ring_spin: 1.0 }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OrbitCfg {
+    pub drift: f32,
+    pub traffic: f32,
+    pub warp_swing: f32,
+}
+impl Default for OrbitCfg {
+    fn default() -> Self {
+        OrbitCfg { drift: 0.05, traffic: 0.006, warp_swing: 1.2 }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StarsCfg {
+    pub speed: f32,
+    pub warp_speed: f32,
+    pub stretch: f32,
+    pub colour: [f32; 3],
+}
+impl Default for StarsCfg {
+    fn default() -> Self {
+        StarsCfg { speed: 18.0, warp_speed: 900.0, stretch: 40.0, colour: [0.9, 0.95, 1.4] }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CometsCfg {
+    pub seconds: f32,
+    pub trail: usize,
+    pub brightness: f32,
+    pub size: f32,
+}
+impl Default for CometsCfg {
+    fn default() -> Self {
+        CometsCfg { seconds: 1.8, trail: 28, brightness: 5.0, size: 1.0 }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WarpCfg {
+    pub decay: f32,
+    pub on_broadcast: f32,
+}
+impl Default for WarpCfg {
+    fn default() -> Self {
+        WarpCfg { decay: 0.22, on_broadcast: 1.0 }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SeatsCfg {
+    pub size: f32,
+    /// How brightly each shown state burns; above 1 blooms.
+    pub brightness: HashMap<String, f32>,
+    pub other: f32,
+}
+impl Default for SeatsCfg {
+    fn default() -> Self {
+        let brightness = [("busy", 3.2), ("stuck", 2.0), ("ready", 1.1), ("idle", 1.1), ("spent", 0.35)]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        SeatsCfg { size: 1.0, brightness, other: 0.22 }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FuelCfg {
+    pub show: bool,
+    /// At or over this percentage a ring turns warn, then danger.
+    pub warn: f32,
+    pub danger: f32,
+    pub ok_colour: [f32; 3],
+    pub warn_colour: [f32; 3],
+    pub danger_colour: [f32; 3],
+    /// How bright the empty part of a ring is (0 hides it).
+    pub empty: f32,
+}
+impl Default for FuelCfg {
+    fn default() -> Self {
+        FuelCfg {
+            show: true,
+            warn: 70.0,
+            danger: 90.0,
+            ok_colour: [0.2, 1.3, 0.55],
+            warn_colour: [1.8, 1.0, 0.1],
+            danger_colour: [3.0, 0.25, 0.15],
+            empty: 0.08,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MoonsCfg {
+    pub show: bool,
+    pub max: usize,
+    pub fresh: [f32; 3],
+    pub old: [f32; 3],
+    /// How old (hours) the oldest waiting note is when moons are fully `old`.
+    pub old_hours: f32,
+    pub speed: f32,
+}
+impl Default for MoonsCfg {
+    fn default() -> Self {
+        MoonsCfg { show: true, max: 24, fresh: [1.2, 1.2, 1.3], old: [2.5, 0.25, 0.1], old_hours: 6.0, speed: 0.6 }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HudCfg {
+    pub show: bool,
+    /// The line of seats that aren't on the ring, with their queues.
+    pub dock: bool,
+}
+impl Default for HudCfg {
+    fn default() -> Self {
+        HudCfg { show: true, dock: true }
+    }
+}
+
+/// One effect rule as written in the toml.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RuleSpec {
+    /// "seat" (checked every frame for each seat on the ring) or "note"
+    /// (checked once for each note as it flies).
+    pub on: String,
+    pub when: String,
+    pub effect: String,
+    pub colour: Option<Colour>,
+    pub pulse: f32,
+    pub size: f32,
+    pub bright: f32,
+    pub text: String,
+    pub seconds: Option<f32>,
+    pub strength: f32,
+}
+impl Default for RuleSpec {
+    fn default() -> Self {
+        RuleSpec {
+            on: "seat".into(),
+            when: "true".into(),
+            effect: String::new(),
+            colour: None,
+            pulse: 0.0,
+            size: 1.0,
+            bright: 1.0,
+            text: String::new(),
+            seconds: None,
+            strength: 1.0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Config {
+    pub look: Look,
+    pub core: CoreCfg,
+    pub orbit: OrbitCfg,
+    pub stars: StarsCfg,
+    pub comets: CometsCfg,
+    pub warp: WarpCfg,
+    pub seats: SeatsCfg,
+    pub fuel: FuelCfg,
+    pub moons: MoonsCfg,
+    pub hud: HudCfg,
+    pub rule: Vec<RuleSpec>,
+}
+
+impl Config {
+    pub fn brightness(&self, shown: &str) -> f32 {
+        self.seats.brightness.get(shown).copied().unwrap_or(self.seats.other)
+    }
+}
+
+pub const SEAT_EFFECTS: &[&str] = &["halo", "tint", "glow", "beacon", "label"];
+pub const NOTE_EFFECTS: &[&str] = &["comet", "warp", "shockwave"];
+
+pub const SEAT_FIELDS: &[&str] = &[
+    "name", "state", "shown", "online", "busy", "idle", "ready", "stuck", "spent", "waiting",
+    "waiting_normal", "oldest_waiting_s", "oldest_waiting_h", "since_s", "held_by_draft",
+    "paused", "ctx", "five_hour", "week", "fullest", "has_usage", "focused",
+];
+pub const NOTE_FIELDS: &[&str] = &["from", "to", "all", "to_owner", "to_count", "quiet", "len"];
+
+#[derive(Clone, Debug)]
+pub struct Rule {
+    pub spec: RuleSpec,
+    pub when: Expr,
+}
+
+/// Parses the toml and compiles every rule; any mistake refuses the lot.
+pub fn load_config(text: &str) -> Result<(Config, Vec<Rule>), String> {
+    let cfg: Config = toml::from_str(text).map_err(|e| e.to_string())?;
+    let mut rules = Vec::new();
+    for (i, spec) in cfg.rule.iter().enumerate() {
+        let n = i + 1;
+        let (effects, fields) = match spec.on.as_str() {
+            "seat" => (SEAT_EFFECTS, SEAT_FIELDS),
+            "note" => (NOTE_EFFECTS, NOTE_FIELDS),
+            other => return Err(format!("rule {n}: on = '{other}', expected 'seat' or 'note'")),
+        };
+        if !effects.contains(&spec.effect.as_str()) {
+            return Err(format!(
+                "rule {n}: effect '{}' isn't one for {}s (try {})",
+                spec.effect,
+                spec.on,
+                effects.join(", ")
+            ));
+        }
+        if let Some(c) = &spec.colour {
+            c.rgb([1.0; 3]).map_err(|e| format!("rule {n}: {e}"))?;
+        }
+        let when = Expr::compile(&spec.when, fields).map_err(|e| format!("rule {n} when: {e}"))?;
+        rules.push(Rule { spec: spec.clone(), when });
+    }
+    Ok((cfg, rules))
+}
+
+/// Checks a WGSL shader the way the GPU driver will see it, so a broken
+/// edit is refused here instead of failing the pipeline on screen.
+pub fn check_wgsl(source: &str) -> Result<(), String> {
+    let module = naga::front::wgsl::parse_str(source).map_err(|e| e.emit_to_string(source))?;
+    naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+        .validate(&module)
+        .map_err(|e| e.emit_to_string(source))?;
+    Ok(())
+}
+
+/// The first line of an error, for the HUD; the whole thing goes to stderr.
+pub fn short(err: &str) -> String {
+    let line = err.lines().find(|l| !l.trim().is_empty()).unwrap_or(err).trim();
+    line.chars().take(140).collect()
+}
+
+/// Notices when a mod file has changed since it was last looked at.
+#[derive(Default)]
+pub struct Watch {
+    stamps: HashMap<PathBuf, Option<SystemTime>>,
+}
+
+impl Watch {
+    /// True the first time it sees a path, and whenever its mtime moves
+    /// (including the file appearing or disappearing).
+    pub fn changed(&mut self, path: &Path) -> bool {
+        let now = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        match self.stamps.insert(path.to_path_buf(), now) {
+            None => true,
+            Some(before) => before != now,
+        }
+    }
+}
+
+/// A mod file's text, or the built-in default when there is no such file.
+pub fn read_or(path: &Path, default: &'static str) -> String {
+    std::fs::read_to_string(path).unwrap_or_else(|_| default.to_string())
+}
+
+// ---------------------------------------------------------------- the rule language
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Val {
+    Num(f64),
+    Str(String),
+    Bool(bool),
+}
+
+impl Val {
+    pub fn truthy(&self) -> bool {
+        match self {
+            Val::Bool(b) => *b,
+            Val::Num(n) => *n != 0.0,
+            Val::Str(s) => !s.is_empty(),
+        }
+    }
+    fn num(&self) -> f64 {
+        match self {
+            Val::Num(n) => *n,
+            Val::Bool(b) => *b as u8 as f64,
+            Val::Str(_) => 0.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Op {
+    Or,
+    And,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Contains,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Expr {
+    Lit(Val),
+    Var(String),
+    Not(Box<Expr>),
+    Neg(Box<Expr>),
+    Bin(Op, Box<Expr>, Box<Expr>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Tok {
+    Num(f64),
+    Str(String),
+    Ident(String),
+    Sym(&'static str),
+}
+
+fn tokens(src: &str) -> Result<Vec<Tok>, String> {
+    let cs: Vec<char> = src.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < cs.len() {
+        let c = cs[i];
+        if c.is_whitespace() {
+            i += 1;
+        } else if c.is_ascii_digit() || (c == '.' && cs.get(i + 1).is_some_and(|d| d.is_ascii_digit())) {
+            let start = i;
+            while i < cs.len() && (cs[i].is_ascii_digit() || cs[i] == '.' || cs[i] == '_') {
+                i += 1;
+            }
+            let text: String = cs[start..i].iter().filter(|c| **c != '_').collect();
+            out.push(Tok::Num(text.parse().map_err(|_| format!("bad number '{text}'"))?));
+        } else if c.is_alphabetic() || c == '_' {
+            let start = i;
+            while i < cs.len() && (cs[i].is_alphanumeric() || cs[i] == '_') {
+                i += 1;
+            }
+            out.push(Tok::Ident(cs[start..i].iter().collect()));
+        } else if c == '\'' || c == '"' {
+            let start = i + 1;
+            i += 1;
+            while i < cs.len() && cs[i] != c {
+                i += 1;
+            }
+            if i >= cs.len() {
+                return Err("a string is missing its closing quote".into());
+            }
+            out.push(Tok::Str(cs[start..i].iter().collect()));
+            i += 1;
+        } else {
+            let two: String = cs[i..(i + 2).min(cs.len())].iter().collect();
+            let sym = ["||", "&&", "==", "!=", "<=", ">="]
+                .into_iter()
+                .find(|s| *s == two)
+                .or_else(|| ["!", "<", ">", "+", "-", "*", "/", "(", ")"].into_iter().find(|s| s.starts_with(c)));
+            let Some(sym) = sym else { return Err(format!("unexpected '{c}'")) };
+            i += sym.len();
+            out.push(Tok::Sym(sym));
+        }
+    }
+    Ok(out)
+}
+
+struct Parser<'a> {
+    toks: Vec<Tok>,
+    at: usize,
+    fields: &'a [&'a str],
+}
+
+impl Parser<'_> {
+    fn peek(&self) -> Option<&Tok> {
+        self.toks.get(self.at)
+    }
+    fn eat_sym(&mut self, syms: &[&str]) -> Option<&'static str> {
+        if let Some(Tok::Sym(s)) = self.peek() {
+            if syms.contains(s) {
+                let s = *s;
+                self.at += 1;
+                return Some(s);
+            }
+        }
+        None
+    }
+    fn eat_word(&mut self, word: &str) -> bool {
+        if matches!(self.peek(), Some(Tok::Ident(w)) if w == word) {
+            self.at += 1;
+            return true;
+        }
+        false
+    }
+    fn or(&mut self) -> Result<Expr, String> {
+        let mut e = self.and()?;
+        while self.eat_sym(&["||"]).is_some() || self.eat_word("or") {
+            e = Expr::Bin(Op::Or, Box::new(e), Box::new(self.and()?));
+        }
+        Ok(e)
+    }
+    fn and(&mut self) -> Result<Expr, String> {
+        let mut e = self.not()?;
+        while self.eat_sym(&["&&"]).is_some() || self.eat_word("and") {
+            e = Expr::Bin(Op::And, Box::new(e), Box::new(self.not()?));
+        }
+        Ok(e)
+    }
+    fn not(&mut self) -> Result<Expr, String> {
+        if self.eat_sym(&["!"]).is_some() || self.eat_word("not") {
+            return Ok(Expr::Not(Box::new(self.not()?)));
+        }
+        self.cmp()
+    }
+    fn cmp(&mut self) -> Result<Expr, String> {
+        let e = self.sum()?;
+        let op = match self.eat_sym(&["==", "!=", "<=", ">=", "<", ">"]) {
+            Some("==") => Op::Eq,
+            Some("!=") => Op::Ne,
+            Some("<=") => Op::Le,
+            Some(">=") => Op::Ge,
+            Some("<") => Op::Lt,
+            Some(">") => Op::Gt,
+            _ if self.eat_word("contains") => Op::Contains,
+            _ => return Ok(e),
+        };
+        Ok(Expr::Bin(op, Box::new(e), Box::new(self.sum()?)))
+    }
+    fn sum(&mut self) -> Result<Expr, String> {
+        let mut e = self.prod()?;
+        while let Some(s) = self.eat_sym(&["+", "-"]) {
+            let op = if s == "+" { Op::Add } else { Op::Sub };
+            e = Expr::Bin(op, Box::new(e), Box::new(self.prod()?));
+        }
+        Ok(e)
+    }
+    fn prod(&mut self) -> Result<Expr, String> {
+        let mut e = self.unary()?;
+        while let Some(s) = self.eat_sym(&["*", "/"]) {
+            let op = if s == "*" { Op::Mul } else { Op::Div };
+            e = Expr::Bin(op, Box::new(e), Box::new(self.unary()?));
+        }
+        Ok(e)
+    }
+    fn unary(&mut self) -> Result<Expr, String> {
+        if self.eat_sym(&["-"]).is_some() {
+            return Ok(Expr::Neg(Box::new(self.unary()?)));
+        }
+        self.atom()
+    }
+    fn atom(&mut self) -> Result<Expr, String> {
+        let Some(tok) = self.peek().cloned() else { return Err("the expression ends too soon".into()) };
+        self.at += 1;
+        match tok {
+            Tok::Num(n) => Ok(Expr::Lit(Val::Num(n))),
+            Tok::Str(s) => Ok(Expr::Lit(Val::Str(s))),
+            Tok::Ident(w) if w == "true" => Ok(Expr::Lit(Val::Bool(true))),
+            Tok::Ident(w) if w == "false" => Ok(Expr::Lit(Val::Bool(false))),
+            Tok::Ident(w) => {
+                if !self.fields.contains(&w.as_str()) {
+                    return Err(format!("no field '{w}' (there's {})", self.fields.join(", ")));
+                }
+                Ok(Expr::Var(w))
+            }
+            Tok::Sym("(") => {
+                let e = self.or()?;
+                if self.eat_sym(&[")"]).is_none() {
+                    return Err("a '(' is missing its ')'".into());
+                }
+                Ok(e)
+            }
+            Tok::Sym(s) => Err(format!("unexpected '{s}'")),
+        }
+    }
+}
+
+impl Expr {
+    /// Parses `src`, allowing only the named fields, so a typo is caught
+    /// when the mod loads rather than silently never matching.
+    pub fn compile(src: &str, fields: &[&str]) -> Result<Expr, String> {
+        let mut p = Parser { toks: tokens(src)?, at: 0, fields };
+        let e = p.or()?;
+        if let Some(t) = p.peek() {
+            return Err(format!("unexpected {t:?} after the expression"));
+        }
+        Ok(e)
+    }
+
+    pub fn eval(&self, get: &dyn Fn(&str) -> Val) -> Val {
+        match self {
+            Expr::Lit(v) => v.clone(),
+            Expr::Var(name) => get(name),
+            Expr::Not(e) => Val::Bool(!e.eval(get).truthy()),
+            Expr::Neg(e) => Val::Num(-e.eval(get).num()),
+            Expr::Bin(Op::Or, a, b) => Val::Bool(a.eval(get).truthy() || b.eval(get).truthy()),
+            Expr::Bin(Op::And, a, b) => Val::Bool(a.eval(get).truthy() && b.eval(get).truthy()),
+            Expr::Bin(op, a, b) => {
+                let (a, b) = (a.eval(get), b.eval(get));
+                match op {
+                    Op::Eq => Val::Bool(same(&a, &b)),
+                    Op::Ne => Val::Bool(!same(&a, &b)),
+                    Op::Lt => Val::Bool(a.num() < b.num()),
+                    Op::Le => Val::Bool(a.num() <= b.num()),
+                    Op::Gt => Val::Bool(a.num() > b.num()),
+                    Op::Ge => Val::Bool(a.num() >= b.num()),
+                    Op::Add => Val::Num(a.num() + b.num()),
+                    Op::Sub => Val::Num(a.num() - b.num()),
+                    Op::Mul => Val::Num(a.num() * b.num()),
+                    Op::Div => Val::Num(if b.num() == 0.0 { 0.0 } else { a.num() / b.num() }),
+                    Op::Contains => Val::Bool(match (&a, &b) {
+                        (Val::Str(list), Val::Str(x)) => list.split(',').any(|p| p.trim() == x),
+                        _ => false,
+                    }),
+                    Op::Or | Op::And => unreachable!(),
+                }
+            }
+        }
+    }
+
+    pub fn matches(&self, get: &dyn Fn(&str) -> Val) -> bool {
+        self.eval(get).truthy()
+    }
+}
+
+fn same(a: &Val, b: &Val) -> bool {
+    match (a, b) {
+        (Val::Str(x), Val::Str(y)) => x.eq_ignore_ascii_case(y),
+        (Val::Str(_), _) | (_, Val::Str(_)) => false,
+        _ => a.num() == b.num(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seat(name: &str) -> Val {
+        match name {
+            "name" => Val::Str("codex".into()),
+            "waiting" => Val::Num(103.0),
+            "oldest_waiting_h" => Val::Num(67.0),
+            "busy" => Val::Bool(false),
+            "spent" => Val::Bool(true),
+            _ => Val::Num(-1.0),
+        }
+    }
+
+    #[test]
+    fn rules_read_like_conditions() {
+        let t = |src: &str| Expr::compile(src, SEAT_FIELDS).unwrap().matches(&seat);
+        assert!(t("waiting > 100"));
+        assert!(t("spent && oldest_waiting_h >= 24"));
+        assert!(t("spent and not busy"));
+        assert!(!t("busy || waiting < 10"));
+        assert!(t("name == 'CODEX'"), "names compare without case");
+        assert!(t("waiting / 2 > 50 && (busy || spent)"));
+        assert!(t("-ctx == 1"), "unknown meters read as -1");
+    }
+
+    #[test]
+    fn typos_are_caught_at_load_not_silently_false() {
+        assert!(Expr::compile("wating > 3", SEAT_FIELDS).unwrap_err().contains("no field 'wating'"));
+        assert!(Expr::compile("waiting >", SEAT_FIELDS).is_err());
+        assert!(Expr::compile("(waiting > 3", SEAT_FIELDS).is_err());
+        assert!(Expr::compile("waiting > 3 3", SEAT_FIELDS).is_err());
+        assert!(Expr::compile("name == 'x", SEAT_FIELDS).is_err());
+    }
+
+    #[test]
+    fn contains_reads_comma_lists() {
+        let e = Expr::compile("to contains 'owner'", NOTE_FIELDS).unwrap();
+        let get = |f: &str| if f == "to" { Val::Str("vibe, owner".into()) } else { Val::Num(0.0) };
+        assert!(e.matches(&get));
+        let get = |f: &str| if f == "to" { Val::Str("ownerish".into()) } else { Val::Num(0.0) };
+        assert!(!e.matches(&get), "whole names only");
+    }
+
+    #[test]
+    fn the_shipped_mods_load_and_validate() {
+        let (cfg, rules) = load_config(DEFAULT_CONFIG).expect("the default toml loads");
+        assert!(!rules.is_empty(), "it ships with example rules");
+        assert_eq!(cfg.look.fps, 30.0);
+        check_wgsl(DEFAULT_CORE_SHADER).expect("core.wgsl validates");
+        check_wgsl(DEFAULT_RING_SHADER).expect("ring.wgsl validates");
+    }
+
+    #[test]
+    fn bad_mods_are_refused_with_a_reason() {
+        assert!(load_config("[look]\nbloom = 'lots'").is_err());
+        assert!(load_config("[look]\nblom = 0.3").unwrap_err().contains("blom"), "unknown keys are named");
+        let e = load_config("[[rule]]\nwhen = 'busy'\neffect = 'sparkle'").unwrap_err();
+        assert!(e.contains("sparkle") && e.contains("halo"));
+        let e = load_config("[[rule]]\nwhen = 'busy'\neffect = 'tint'\ncolour = 'mauve'").unwrap_err();
+        assert!(e.contains("mauve"));
+        assert!(check_wgsl("fn broken( {").is_err());
+    }
+
+    #[test]
+    fn an_empty_file_is_the_defaults() {
+        let (cfg, rules) = load_config("").unwrap();
+        assert!(rules.is_empty());
+        assert_eq!(cfg.comets.seconds, CometsCfg::default().seconds);
+    }
+
+    #[test]
+    fn the_watch_sees_a_file_change() {
+        let dir = std::env::temp_dir().join(format!("warp-core-watch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("a.toml");
+        let mut w = Watch::default();
+        assert!(w.changed(&p), "first look counts, even for a missing file");
+        assert!(!w.changed(&p));
+        std::fs::write(&p, "x").unwrap();
+        assert!(w.changed(&p), "appearing counts");
+        assert!(!w.changed(&p));
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(w.changed(&p), "disappearing counts");
+    }
+}
