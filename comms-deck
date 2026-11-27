@@ -1381,16 +1381,16 @@ def _is_hbar(line):
 
 
 def _after_marker(line):
-    """Text typed after a ❯, › (Codex) or '>' prompt marker, box drawing removed."""
+    """Text typed after a ❯, › (Codex), ❭ (Devin) or '>' prompt marker, box drawing removed."""
     text = line.replace("│", " ").replace("\u00a0", " ").strip()
-    for marker in ("❯", "›", ">"):
+    for marker in ("❯", "›", "❭", ">"):
         if text.startswith(marker):
             return text[len(marker):].strip()
     return text
 
 
 SGR = re.compile(r"\033\[([0-9;:]*)m")
-STRUCTURE = set("❯›>│─━═╭╮╰╯-|")
+STRUCTURE = set("❯›❭>│─━═╭╮╰╯-|")
 
 
 def drop_placeholders(ansi_screen):
@@ -1502,7 +1502,8 @@ def composer_text(screen):
     for i, line in enumerate(lines):
         stripped = line.strip().replace("\u00a0", " ")
         if (stripped.startswith("❯") or stripped == ">" or stripped.startswith("> ")
-                or stripped == "›" or stripped.startswith("› ")):
+                or stripped == "›" or stripped.startswith("› ")
+                or stripped == "❭" or stripped.startswith("❭ ")):
             marker = i
     if marker is None:
         return None
@@ -7407,6 +7408,18 @@ def self_test():
     check("an empty Codex composer is safe to paste into",
           composer_text(drop_placeholders(codex_screen)) == "", repr(drop_placeholders(codex_screen)))
     check("a Codex draft blocks the paste", composer_text("› old prompt\nwords\n› ship it\n  hints\n") == "ship it")
+    # Devin's composer, as its window drew it on 2026-11-27: a ❭ between two
+    # rules, with a grey (truecolour, colon form) placeholder; an earlier
+    # prompt of the owner's is still on screen above it.
+    devin_screen = ("❭ The chronophage told me you have notes\n\n"
+                    "────────────────────────────────────────\n"
+                    "\033[m❭ \033[38:2:124:124:124mGuide Devin while it works\n"
+                    "\033[m────────────────────────────────────────\n"
+                    "SWE-2 Flash Medium · bypass\n")
+    check("an empty Devin composer is safe to paste into",
+          composer_text(drop_placeholders(devin_screen)) == "", repr(drop_placeholders(devin_screen)))
+    check("a Devin draft blocks the paste",
+          composer_text("────────\n❭ ship it\n────────\nSWE-2\n") == "ship it")
     scrollback = ("│ ❯ old text from another screen │\n> a quoted line in a reply\n"
                   + "words\n" * 20 + claude_empty + "  status line\n")
     check("text in the scrollback above the prompt isn't a draft", composer_text(scrollback) == "",
