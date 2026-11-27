@@ -1694,10 +1694,12 @@ fn pulse_core(
             };
         }
     }
-    // Two containment rings turning against each other, coloured by heat.
+    // Two containment rings, coloured by heat. Both turn clockwise with the
+    // disk and the planets, the inner one faster (Kepler: angular speed
+    // ~ r^-1.5). They used to turn against each other (Y, t11).
     let shell = mix3(c.cool, c.hot, heat);
-    for (r, dir, k) in [(78.0, 1.0, 0.6), (96.0, -1.0, 0.35)] {
-        let spin = t * dir * (0.4 + rate * 0.2) * c.ring_spin;
+    for (r, k) in [(78.0f32, 0.6), (96.0f32, 0.35)] {
+        let spin = -t * (0.4 + rate * 0.2) * c.ring_spin * (r / 78.0).powf(-1.5);
         for i in 0..3 {
             let start = spin + i as f32 * std::f32::consts::TAU / 3.0;
             gizmos.arc_2d(Isometry2d::from_rotation(Rot2::radians(start)), 1.4, r * s, lin(shell, k * 0.75));
@@ -1855,14 +1857,15 @@ fn fly_comets(
             let look = note_look(&mods.rules, &mods.cfg, &note);
             deck.warp = deck.warp.max(look.warp);
             // An agent writing to Y boosts the stars; notes between agents
-            // spin the ring the way they travel.
+            // speed the ring up. Always clockwise, the way the core's disk
+            // turns: a note never reverses the orbit (Y, t11).
             if note.from != "owner" && note.to.iter().any(|t| t == "owner") {
                 deck.boost += mods.cfg.stars.boost_per_note;
             }
             if !note.all && note.from != "owner" {
                 let ring = deck.roster.clone();
                 for to in note.to.iter().filter(|t| *t != "owner") {
-                    deck.spin += spin_kick(&ring, &note.from, to, mods.cfg.orbit.spin_kick);
+                    deck.spin += spin_kick(&ring, &note.from, to, mods.cfg.orbit.spin_kick).abs();
                 }
             }
             let from = positions.get(&note.from).copied().unwrap_or(Vec2::ZERO);

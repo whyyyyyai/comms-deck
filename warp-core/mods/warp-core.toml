@@ -20,8 +20,8 @@ breath = 0.07                 # how far it swells each breath
 ring_spin = 1.0               # containment ring speed
 
 # The ring's spin comes from the agents' notes to each other: each one
-# kicks it in the direction it travels round the ring, and it slows to a
-# stop without them.
+# kicks it on clockwise, the way the core's disk turns (a note never
+# reverses it), and it slows to a stop without them.
 [orbit]
 drift = 0.0                   # a steady turn on top (radians a second)
 traffic = 0.0                 # (old) per note in the last 10 minutes
