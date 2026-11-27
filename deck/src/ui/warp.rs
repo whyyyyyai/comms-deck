@@ -149,7 +149,15 @@ pub fn star_counts(split: &[(String, f64)], n: usize) -> Vec<(String, usize)> {
         }
         return out;
     }
-    let raw: Vec<(String, f64)> = split.iter().map(|(s, share)| (s.clone(), share * n as f64)).collect();
+    // Shares are normalised here, so a caller can pass raw token counts:
+    // 10 CONTEXT SPLIT once did, and every seat was dealt millions of dots
+    // that the trim loop below took back one at a time (~0.5 s a frame).
+    let total: f64 = split.iter().map(|(_, v)| v.max(0.0)).sum();
+    if total <= 0.0 {
+        return split.iter().map(|(s, _)| (s.clone(), n / split.len())).collect();
+    }
+    let raw: Vec<(String, f64)> =
+        split.iter().map(|(s, v)| (s.clone(), v.max(0.0) / total * n as f64)).collect();
     let mut counts: Vec<(String, usize)> = raw.iter().map(|(s, r)| (s.clone(), (r.floor() as usize).max(1))).collect();
     let mut spare = n as i64 - counts.iter().map(|(_, c)| *c as i64).sum::<i64>();
     let mut order: Vec<usize> = (0..raw.len()).collect();
@@ -422,6 +430,16 @@ mod tests {
         f.set_split(&[("claude".into(), 300.0), ("grok".into(), 100.0)], true);
         assert_eq!(f.count_for("claude"), 150);
         assert_eq!(f.count_for("grok"), 50);
+    }
+
+    #[test]
+    fn star_counts_takes_raw_tokens_as_shares() {
+        let tokens = vec![("claude".to_string(), 150_000.0), ("vibe".to_string(), 50_000.0)];
+        let started = std::time::Instant::now();
+        let c = star_counts(&tokens, 312);
+        assert!(started.elapsed().as_millis() < 50, "dealt in {:?}", started.elapsed());
+        assert_eq!(c.iter().map(|(_, n)| n).sum::<usize>(), 312);
+        assert_eq!(c[0].1, 234, "75% of the dots");
     }
 
     #[test]
