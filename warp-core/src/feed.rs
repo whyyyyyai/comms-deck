@@ -18,6 +18,9 @@ pub struct SeatInfo {
     pub name: String,
     /// What the deck shows: busy, ready, idle, stuck, spent, away, ...
     pub shown: String,
+    /// What the seat is really doing: busy, idle, away, not set up, ...
+    /// (`shown` can say "spent" for a seat whose state is away.)
+    pub state: String,
     pub waiting: u64,
 }
 
@@ -68,14 +71,10 @@ pub fn parse_status(v: &Value) -> Vec<SeatInfo> {
                 .and_then(Value::as_array)
                 .map(|a| a.iter().filter_map(Value::as_i64).collect())
                 .unwrap_or_default();
-            let shown = s
-                .get("shown")
-                .or_else(|| s.get("state"))
-                .and_then(Value::as_str)
-                .unwrap_or("away")
-                .to_string();
+            let state = s.get("state").and_then(Value::as_str).unwrap_or("away").to_string();
+            let shown = s.get("shown").and_then(Value::as_str).unwrap_or(&state).to_string();
             let waiting = s.get("waiting").and_then(Value::as_u64).unwrap_or(0);
-            (rank, SeatInfo { name: seat_id(name), shown, waiting })
+            (rank, SeatInfo { name: seat_id(name), shown, state, waiting })
         })
         .collect();
     seats.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.name.cmp(&b.1.name)));
@@ -83,6 +82,14 @@ pub fn parse_status(v: &Value) -> Vec<SeatInfo> {
 }
 
 /// One log line, if it is a note the screen may show (private ones never are).
+impl SeatInfo {
+    /// Is the agent running at all? Away, not set up and paused seats are
+    /// not on the warp core; everyone else is, even if spent or stuck.
+    pub fn online(&self) -> bool {
+        !matches!(self.state.as_str(), "away" | "not set up" | "paused" | "offline" | "")
+    }
+}
+
 pub fn parse_note(v: &Value) -> Option<NoteInfo> {
     if v.get("kind").and_then(Value::as_str) != Some("message") {
         return None;
@@ -205,6 +212,18 @@ mod tests {
         assert_eq!(names, ["owner", "claude", "grok"]);
         assert_eq!(seats[0].shown, "ready", "state stands in when shown is missing");
         assert_eq!(seats[2].waiting, 12);
+    }
+
+    #[test]
+    fn only_running_seats_are_online() {
+        let v = json!({"seats": {
+            "claude": {"shown": "busy", "state": "busy", "rank": [1]},
+            "vibe": {"shown": "stuck", "state": "idle", "rank": [2]},
+            "codex": {"shown": "spent", "state": "away", "rank": [3]},
+            "lumo": {"shown": "not set up", "state": "not set up", "rank": [4]}
+        }});
+        let online: Vec<_> = parse_status(&v).into_iter().filter(|s| s.online()).map(|s| s.name).collect();
+        assert_eq!(online, ["claude", "vibe"], "spent-but-away codex stays off");
     }
 
     #[test]

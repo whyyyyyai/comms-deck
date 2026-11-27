@@ -316,7 +316,7 @@ fn layout_seats(
     windows: Query<&Window>,
     mut nodes: Query<(Entity, &SeatNode, &mut Transform)>,
 ) {
-    let names: Vec<String> = deck.seats.iter().map(|s| s.name.clone()).collect();
+    let names: Vec<String> = deck.seats.iter().filter(|s| s.online()).map(|s| s.name.clone()).collect();
     let pos = ring_positions(&names, window_size(&windows));
     if names != deck.built {
         for (e, _, _) in &nodes {
@@ -451,7 +451,11 @@ fn fly_comets(
     let positions: HashMap<String, Vec2> =
         nodes.iter().map(|(n, tf)| (n.name.clone(), tf.translation.truncate())).collect();
 
-    // Launch what arrived this frame.
+    // Launch what arrived this frame. Before the first status poll there is
+    // no ring yet, so notes wait rather than vanish (Vibe's review of #150).
+    if positions.is_empty() && deck.seats.is_empty() {
+        return;
+    }
     let pending = std::mem::take(&mut deck.pending);
     for note in pending {
         let from = positions.get(&note.from).copied().unwrap_or(Vec2::ZERO);
@@ -540,11 +544,12 @@ fn hud(
 ) {
     let half = window_size(&windows) * 0.5;
     let now = time.elapsed_secs();
-    let busy = deck.seats.iter().filter(|s| s.shown == "busy").count();
-    let waiting: u64 = deck.seats.iter().map(|s| s.waiting).sum();
+    let online: Vec<_> = deck.seats.iter().filter(|s| s.online()).collect();
+    let busy = online.iter().filter(|s| s.shown == "busy").count();
+    let waiting: u64 = online.iter().map(|s| s.waiting).sum();
     let mut line = format!(
-        "WARP CORE    {} seats · {} busy · {} waiting · {} notes in the last hour",
-        deck.seats.len(),
+        "WARP CORE    {} online · {} busy · {} waiting · {} notes in the last hour",
+        online.len(),
         busy,
         waiting,
         deck.notes_last(now, 3600.0),
