@@ -240,6 +240,14 @@ pub struct PhysicsCfg {
     pub bounce: f32,
     /// The gap a planet keeps from the screen's edge (px).
     pub edge_margin: f32,
+    /// The rim's own pull (t49): inside `edge_range` of the bounce walls
+    /// an extra inward acceleration grows as the square of the proximity,
+    /// so a planet is turned back towards the singularity before it can
+    /// reach the border. As a multiple of the core's pull at the planet's
+    /// own radius, so the ring keeps its shape; 0 disables it.
+    pub edge_gravity: f32,
+    /// How far inside the walls the rim pull reaches (px).
+    pub edge_range: f32,
     /// Two planets whose centres are closer than this (px) touch (t46):
     /// they are pushed apart and bounce, and don't pull on each other, so
     /// a pair can no longer clump into one and ride round stuck together.
@@ -263,6 +271,8 @@ impl Default for PhysicsCfg {
             min_radius: 90.0,
             bounce: 0.5,
             edge_margin: 90.0,
+            edge_gravity: 2.0,
+            edge_range: 100.0,
             contact: 100.0,
             restitution: 0.8,
         }

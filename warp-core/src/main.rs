@@ -1026,6 +1026,20 @@ fn step_body(body: &mut Body, busy: bool, turning: f32, scene: Vec2, dt: f32, cf
     let fade = 1.0 - ((r - 0.75 * edge) / (0.25 * edge.max(1.0))).clamp(0.0, 1.0);
     let thrust = if busy { cfg.thrust * g * fade } else { 0.0 };
     let sink = if busy { 0.0 } else { cfg.drift };
+    // t49: the closer a planet gets to the bounce walls, the harder the
+    // pull back towards the singularity — squared in from the band's edge,
+    // so it's gentle where the band begins and firm at the wall, and border
+    // collisions become rare. Measured as a multiple of the core's own pull
+    // at the planet's radius, so it can never dwarf the singularity and
+    // collapse the ring; past the wall it stays at full strength, so it
+    // also helps a planet already grazing the border climb back in.
+    let wall = half - cfg.edge_margin;
+    let rim = cfg.edge_range - (wall.x - p.x.abs()).min(wall.y - p.y.abs());
+    let edge_a = if cfg.edge_range > 0.0 && rim > 0.0 {
+        cfg.edge_gravity * g * (rim / cfg.edge_range).min(1.0).powi(2)
+    } else {
+        0.0
+    };
     // Steer the tangential speed onto the orbit's own circular speed plus
     // a share of the ring's turning (t18: fairly stable orbits, still
     // stirred by the deck), capped, so the spin kicks and warp swing are
@@ -1033,7 +1047,7 @@ fn step_body(body: &mut Body, busy: bool, turning: f32, scene: Vec2, dt: f32, cf
     let v_t = body.vel.dot(tang);
     let target = (g * r).sqrt() + turning * r * cfg.turn_share;
     let steer = ((target - v_t) * cfg.steering).clamp(-cfg.max_steer, cfg.max_steer);
-    body.vel += (out * (thrust - sink - g) + tang * steer + pull) * dt;
+    body.vel += (out * (thrust - sink - g - edge_a) + tang * steer + pull) * dt;
     body.pos += body.vel * dt;
     // Skim, don't fall in: on the floor of the core's well the inward part
     // of the speed is taken away, leaving the planet to circle.
@@ -3630,9 +3644,12 @@ mod tests {
         // integrator is symplectic (speed first, then position), so the
         // radius may breathe but mustn't run away or collapse.
         let mut cfg = mods::PhysicsCfg::default();
-        // Nothing but the core's pull: no steering, no sink, no thrust.
+        // Nothing but the core's pull: no steering, no sink, no thrust —
+        // and no rim pull (t49), which is a field of its own with its own
+        // test below. This orbit is the integrator's yardstick.
         cfg.drift = 0.0;
         cfg.steering = 0.0;
+        cfg.edge_range = 0.0;
         let scene = Vec2::new(1280.0, 800.0);
         let r = 300.0;
         let v = (cfg.gravity / r).sqrt();
@@ -3648,6 +3665,23 @@ mod tests {
         }
         assert!(lo > 250.0 && hi < 360.0, "the orbit breathes between {lo} and {hi}, it doesn't decay or escape");
         assert!(went_down && went_left, "it really went round, not just wobbled in place");
+    }
+
+    #[test]
+    fn the_rim_leaves_mid_screen_orbits_alone() {
+        // t49: the rim pull is for the border's neighbourhood. An orbit
+        // that never enters its band must keep the same fairly stable
+        // circle it had before the rim existed (t18).
+        let cfg = mods::PhysicsCfg::default();
+        let scene = Vec2::new(1280.0, 800.0);
+        let mut b = Body { pos: Vec2::new(200.0, 0.0), vel: Vec2::new(0.0, -(cfg.gravity / 200.0f32).sqrt()) };
+        let (mut lo, mut hi) = (200.0f32, 200.0f32);
+        for _ in 0..5400 {
+            step_body(&mut b, false, 0.0, scene, 1.0 / 60.0, &cfg, Vec2::ZERO);
+            lo = lo.min(b.pos.length());
+            hi = hi.max(b.pos.length());
+        }
+        assert!(lo > 160.0 && hi < 250.0, "a mid-screen orbit breathes between {lo} and {hi}, the rim doesn't drag it in");
     }
 
     #[test]
@@ -3779,6 +3813,36 @@ mod tests {
             step_body(&mut wild, true, 1.5, scene, 1.0 / 60.0, &cfg, Vec2::ZERO);
         }
         assert!(wild.pos.x.abs() <= scene.x * 0.5 && wild.pos.y.abs() <= scene.y * 0.5);
+    }
+
+    #[test]
+    fn the_rim_pulls_back_before_the_edge() {
+        // t49: inside edge_range of the bounce walls an extra inward pull
+        // grows, so a planet drifting out is turned back long before it
+        // can touch the border.
+        let cfg = mods::PhysicsCfg::default();
+        let scene = Vec2::new(1280.0, 800.0);
+        let wall = scene * 0.5 - cfg.edge_margin;
+        let closest_gap = |edge_gravity: f32, edge_range: f32, speed: f32| {
+            let mut c = cfg.clone();
+            c.edge_gravity = edge_gravity;
+            c.edge_range = edge_range;
+            let mut b = Body { pos: Vec2::new(0.0, wall.y - 100.0), vel: Vec2::new(0.0, speed) };
+            let mut gap = f32::MAX;
+            for _ in 0..1200 {
+                step_body(&mut b, false, 0.0, scene, 1.0 / 60.0, &c, Vec2::ZERO);
+                gap = gap.min((wall.x - b.pos.x.abs()).min(wall.y - b.pos.y.abs()));
+            }
+            gap
+        };
+        // An idle planet's own drift speed is what the rim must answer:
+        // orbital speeds here run ~15-45 px/s, so a 30 px/s shove outward
+        // is the honest test, not a 50 px/s fling (the wall's own bounce
+        // stays the last resort for those).
+        assert!(closest_gap(0.0, cfg.edge_range, 30.0) < 1.0, "without the rim pull the drift reaches the wall");
+        assert!(closest_gap(cfg.edge_gravity, cfg.edge_range, 30.0) > 10.0,
+                "with it the planet is turned back inside the band");
+        assert!(closest_gap(cfg.edge_gravity, 0.0, 30.0) < 1.0, "edge_range 0 disables it");
     }
 
     #[test]

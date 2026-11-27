@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **The rim pulls back to the singularity (t49).** warp-core planets now
+  feel an extra inward pull that grows — as the square of the proximity —
+  inside `edge_range` (100 px) of the bounce walls, so a planet drifting
+  out is turned back long before it can hit the border. The pull is
+  measured as a multiple (`edge_gravity`, 2.0) of the singularity's own
+  pull at the planet's radius, so it firms up the rim without collapsing
+  the ring: mid-screen orbits are untouched, idle planets hold their
+  orbits, and busy planets still park on the highest orbit with room.
+  `edge_gravity = 0` or `edge_range = 0` disables it. Physics and test
+  taken over from Devin's uncommitted work on `devin/edge-gravity`,
+  re-tuned after his first figures broke the orbit-stability tests. By
+  vibe, from Devin's draft.
+
 - **The owner's name is Y.** STOX renamed themselves (2026-11-26): screens,
   notes, the chat prompt (`y ›`) and Discord now show **Y**, and `y` names
   the owner wherever a seat is named. The seat id stays `owner` in files
