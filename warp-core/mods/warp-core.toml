@@ -83,6 +83,15 @@ width = 0.32                  # share of the window (300..600 px)
 font = 14
 keep = 200                    # notes kept for scrolling back
 
+# Typing in the chat box builds thrust: the longer the note, the faster the
+# stars stream. It drains away when you stop; sending jumps to warp.
+[typing]
+kick = 0.02                   # thrust per key (thrust runs 0..1)
+decay = 0.05                  # thrust lost per second
+star_speed = 420              # added star speed at full thrust
+stretch = 14                  # added streaking at full thrust
+jump_on_send = true
+
 # ---------------------------------------------------------------- rules
 #
 # on = "seat": `when` is checked every frame for each seat on the ring.

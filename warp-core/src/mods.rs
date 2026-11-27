@@ -135,6 +135,24 @@ impl Default for StarsCfg {
     }
 }
 
+/// Typing in the chat box builds thrust: each key adds `kick`, it drains at
+/// `decay` a second, so a long note gathers speed. Sending jumps to warp
+/// with whatever thrust was built.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TypingCfg {
+    pub kick: f32,
+    pub decay: f32,
+    pub star_speed: f32,
+    pub stretch: f32,
+    pub jump_on_send: bool,
+}
+impl Default for TypingCfg {
+    fn default() -> Self {
+        TypingCfg { kick: 0.02, decay: 0.05, star_speed: 420.0, stretch: 14.0, jump_on_send: true }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ChatCfg {
@@ -300,6 +318,7 @@ pub struct Config {
     pub moons: MoonsCfg,
     pub hud: HudCfg,
     pub chat: ChatCfg,
+    pub typing: TypingCfg,
     pub rule: Vec<RuleSpec>,
 }
 

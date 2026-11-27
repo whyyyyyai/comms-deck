@@ -207,6 +207,8 @@ struct Deck {
     warp: f32,
     /// How far round the orbit the ring has turned (radians).
     orbit: f32,
+    /// 0..1, built by typing in the chat box, draining on its own.
+    thrust: f32,
     problem: Option<String>,
     pending: Vec<NoteInfo>,
     shocks: Vec<Shock>,
@@ -867,6 +869,7 @@ fn read_feed(feed: Res<Feed>, mut deck: ResMut<Deck>, mut chat: ResMut<Chat>, mo
         deck.arrivals.pop_front();
     }
     deck.warp = (deck.warp - time.delta_secs() * mods.cfg.warp.decay).max(0.0);
+    deck.thrust = (deck.thrust - time.delta_secs() * mods.cfg.typing.decay).max(0.0);
 }
 
 fn apply_rules(deck: Res<Deck>, mods: Res<Mods>, mut looks: ResMut<Looks>) {
@@ -1405,7 +1408,8 @@ fn move_stars(
     let half = Vec2::new(layout.scene.x * 0.5 + layout.panel, window_size(&windows).y * 0.5);
     let reach = half.length() + 20.0;
     let pace = (deck.notes_last(time.elapsed_secs(), 600.0) as f32).min(30.0);
-    let speed = sc.speed + pace * 2.0 + deck.warp * sc.warp_speed;
+    let tc = &mods.cfg.typing;
+    let speed = sc.speed + pace * 2.0 + deck.warp * sc.warp_speed + deck.thrust * tc.star_speed;
     let dt = time.delta_secs();
     for (mut star, mut tf) in &mut stars {
         star.dist += speed * star.speed * dt * (0.3 + star.dist / reach);
@@ -1415,7 +1419,7 @@ fn move_stars(
         }
         let p = star.dir * star.dist;
         let near = (star.dist / reach).clamp(0.0, 1.0);
-        let stretch = 1.0 + deck.warp * sc.stretch * near + pace * 0.1;
+        let stretch = 1.0 + (deck.warp * sc.stretch + deck.thrust * tc.stretch) * near + pace * 0.1;
         tf.translation = Vec3::new(p.x, p.y, 0.0);
         tf.rotation = Quat::from_rotation_z(star.dir.to_angle());
         tf.scale = Vec3::new(stretch * (1.0 + near), 0.6 + near, 1.0);
@@ -1451,6 +1455,8 @@ fn hud(
         );
         if deck.warp > 0.05 {
             line.push_str("    >> WARP");
+        } else if deck.thrust > 0.05 {
+            line.push_str(&format!("    thrust {:.0}%", deck.thrust * 100.0));
         }
         if vtime.is_paused() {
             line.push_str("    || FROZEN (f)");
@@ -1720,7 +1726,8 @@ fn colour_stars(
 /// Typing in the chat box, and the keys that move between it and the ring.
 fn chat_input(
     mut chat: ResMut<Chat>,
-    deck: Res<Deck>,
+    mut deck: ResMut<Deck>,
+    mods: Res<Mods>,
     real: Res<Time<Real>>,
     keys: Res<ButtonInput<KeyCode>>,
     mut events: MessageReader<KeyboardInput>,
@@ -1758,7 +1765,15 @@ fn chat_input(
             continue;
         }
         match &ev.logical_key {
-            Key::Enter if !ev.repeat => send_line(&mut chat, &deck, real.elapsed_secs()),
+            Key::Enter if !ev.repeat => {
+                let before = chat.sending;
+                send_line(&mut chat, &deck, real.elapsed_secs());
+                // A note went out: the thrust built while typing it jumps to warp.
+                if chat.sending > before && mods.cfg.typing.jump_on_send {
+                    deck.warp = deck.warp.max(deck.thrust);
+                    deck.thrust = 0.0;
+                }
+            }
             Key::Escape => {
                 if chat.input.is_empty() {
                     chat.focus = false;
@@ -1788,12 +1803,18 @@ fn chat_input(
                 if let Some(text) = &ev.text {
                     if !ctrl {
                         let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+                        deck.thrust = add_thrust(deck.thrust, clean.chars().count(), mods.cfg.typing.kick);
                         chat.input.push_str(&clean);
                     }
                 }
             }
         }
     }
+}
+
+/// Thrust after typing `keys` characters: each adds `kick`, up to full.
+fn add_thrust(thrust: f32, keys: usize, kick: f32) -> f32 {
+    (thrust + keys as f32 * kick).clamp(0.0, 1.0)
 }
 
 /// Routes the line and sends it on its own thread; the outcome comes back
@@ -2194,6 +2215,15 @@ mod tests {
         assert_eq!(chat.input, "@nobody hi");
         assert!(chat.status.as_ref().is_some_and(|(m, err, _)| *err && m.contains("@nobody")));
         assert_eq!(chat.sending, 0, "nothing went out");
+    }
+
+    #[test]
+    fn typing_builds_thrust_up_to_full() {
+        assert!((add_thrust(0.0, 10, 0.02) - 0.2).abs() < 1e-6);
+        assert_eq!(add_thrust(0.9, 50, 0.02), 1.0, "capped at full");
+        // A steady typist (5 keys a second) out-runs the drain (0.05 a second).
+        let cfg = mods::TypingCfg::default();
+        assert!(5.0 * cfg.kick > cfg.decay);
     }
 
     #[test]
