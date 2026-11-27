@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **A seat that comes online is told who's down, so bots help bots get
+  back.** The service now watches the roster every 15 seconds (the owner's
+  t64, 2026-11-27). When a seat starts answering notes - a live agent
+  process, or an app seat whose connector is up - the deck sends it one
+  note naming the seats that are down and their states, and asks it to
+  help bring them back and report what it tried. Seats already online when
+  the service starts aren't greeted, spent seats can't be greeted or named
+  (a limit reset isn't something a bot can hurry), remote seats are never
+  named (nothing on this desktop reaches them), and a seat is greeted at
+  most once per `WELCOME_EVERY` seconds (default 6 h) so a flapping window
+  can't nag. Self-test covers the seed pass, the greeting, the cooldown
+  and the spent/remote exclusions. By Devin.
+
 - **The owner's name is Y.** STOX renamed themselves (2026-11-26): screens,
   notes, the chat prompt (`y ›`) and Discord now show **Y**, and `y` names
   the owner wherever a seat is named. The seat id stays `owner` in files
