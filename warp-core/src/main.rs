@@ -6,7 +6,10 @@
 //! sends one to everyone and throws the starfield into warp. Around each
 //! seat, fuel rings show its context / 5-hour / weekly meters and moons show
 //! its waiting notes, whitening to red as the oldest one ages. The core runs
-//! hotter as the crew's meters fill.
+//! hotter as the crew's meters fill. The load balancer's task board shows
+//! too: open tasks orbit the core on their own ring, a held task is a bolt
+//! from its holder to the core, and both burn in the colour of whoever
+//! assigned the task (feed.rs reads the board's state files directly).
 //!
 //! It is moddable while it runs: mods/warp-core.toml holds every setting and
 //! the effect rules, mods/shaders/*.wgsl how the core and the rings are
@@ -25,7 +28,7 @@
 //! panel scrolls the notes. Keys while typing: Enter sends, Esc clears (again
 //! to leave the box), Ctrl+U/W/V clear, delete a word, paste; Tab or Esc on
 //! an empty line hands the keys to the ring: 1-9 focus a seat, 0 clears, h
-//! HUD, c fuel rings, m moons, f freeze, r reload mods, Space a test
+//! HUD, c fuel rings, m moons, t tasks, f freeze, r reload mods, Space a test
 //! broadcast, PgUp/PgDn scroll, Enter or Tab back to the box, q quits.
 //! Ctrl+Q quits from either.
 //!
@@ -52,7 +55,7 @@ use bevy::{
     sprite_render::{AlphaMode2d, Material2d, Material2dPlugin},
     winit::{UpdateMode, WinitSettings},
 };
-use feed::{Activity, ChatNote, Msg, Notice, NoteInfo, SeatInfo};
+use feed::{Activity, ChatNote, Msg, Notice, NoteInfo, SeatInfo, TaskInfo};
 use mods::{Config, Rule, Val};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{mpsc, Mutex};
@@ -99,7 +102,7 @@ fn main() {
         .add_systems(
             Update,
             (
-                (watch_mods, read_feed, layout_view, apply_rules, layout_seats, pointer, chat_input, keys).chain(),
+                (watch_mods, read_feed, layout_view, apply_rules, layout_seats, layout_tasks, pointer, chat_input, keys).chain(),
                 (
                     glow_seats,
                     draw_rings,
@@ -109,6 +112,7 @@ fn main() {
                     colour_stars,
                     draw_splash,
                     draw_links,
+                    draw_task_bolts,
                     draw_moons_and_marks,
                     hud,
                     tooltip,
@@ -212,6 +216,12 @@ struct Deck {
     orbit: f32,
     /// 0..1, built by typing in the chat box, draining on its own.
     thrust: f32,
+    /// The load balancer's board: open tasks orbit, held ones are bolts.
+    tasks: Vec<TaskInfo>,
+    /// How far round the task ring has turned (radians).
+    task_orbit: f32,
+    /// The task ids the ring was last built from.
+    tasks_built: Vec<String>,
     problem: Option<String>,
     pending: Vec<NoteInfo>,
     shocks: Vec<Shock>,
@@ -250,10 +260,11 @@ struct View {
     hud: bool,
     fuel: bool,
     moons: bool,
+    tasks: bool,
 }
 impl Default for View {
     fn default() -> Self {
-        View { hud: true, fuel: true, moons: true }
+        View { hud: true, fuel: true, moons: true, tasks: true }
     }
 }
 
@@ -508,6 +519,13 @@ struct SeatNode {
     flash: f32,
     /// 0 at the back of the orbit (behind the core), 1 at the front.
     depth: f32,
+}
+
+/// One open task orbiting the core, coloured by who assigned it.
+#[derive(Component)]
+struct TaskNode {
+    id: String,
+    from: String,
 }
 
 #[derive(Component)]
@@ -1037,6 +1055,7 @@ fn read_feed(
                 deck.history.truncate(300);
                 deck.pending.push(n);
             }
+            Msg::Tasks(tasks) => deck.tasks = tasks,
         }
     }
     // With no ring to fly between, notes wait, but not without end.
@@ -1184,6 +1203,118 @@ fn layout_seats(
             tf.translation.z = seat_z(*depth);
             node.depth = *depth;
         }
+    }
+}
+
+/// Where an open task sits on its ring: evenly spaced, turning clockwise,
+/// the task ring inside the seat ring by `[tasks] radius`.
+fn task_positions(n: usize, scene: Vec2, orbit: f32, radius: f32) -> Vec<Vec2> {
+    let seat_rx = scene.x * 0.38 * radius;
+    let seat_ry = scene.y * 0.30 * radius;
+    let n = n.max(1) as f32;
+    (0..n as usize)
+        .map(|i| {
+            let a = std::f32::consts::FRAC_PI_2 - i as f32 / n * std::f32::consts::TAU - orbit;
+            Vec2::new(a.cos() * seat_rx, a.sin() * seat_ry)
+        })
+        .collect()
+}
+
+/// Open tasks orbit the core on their own ring; each burns in the colour of
+/// the seat that assigned it, and shows its id (t1, t2, ...) underneath.
+fn layout_tasks(
+    mut commands: Commands,
+    mut deck: ResMut<Deck>,
+    mods: Res<Mods>,
+    view: Res<View>,
+    layout: Res<Layout>,
+    assets: Res<Assets2d>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    time: Res<Time>,
+    mut nodes: Query<(Entity, &mut TaskNode, &mut Transform)>,
+) {
+    let tc = &mods.cfg.tasks;
+    let open: Vec<TaskInfo> = deck.tasks.iter().filter(|t| t.open).cloned().collect();
+    let ids: Vec<String> = open.iter().map(|t| t.id.clone()).collect();
+    let shown = tc.show && view.tasks;
+    if ids != deck.tasks_built || !shown {
+        // The board changed (or tasks were switched off): rebuild the ring.
+        for (e, _, _) in &nodes {
+            commands.entity(e).despawn();
+        }
+        deck.tasks_built = if shown { ids.clone() } else { Vec::new() };
+        if !shown {
+            return;
+        }
+        let pos = task_positions(open.len(), layout.scene, deck.task_orbit, tc.radius);
+        for (i, task) in open.iter().enumerate() {
+            let Some(p) = pos.get(i) else { continue };
+            let colour = seat_colour(&task.from, tc.bright);
+            commands
+                .spawn((
+                    TaskNode { id: task.id.clone(), from: task.from.clone() },
+                    Mesh2d(assets.dot.clone()),
+                    MeshMaterial2d(materials.add(colour)),
+                    Transform::from_xyz(p.x, p.y, 1.5).with_scale(Vec3::splat(tc.size)),
+                ))
+                .with_children(|task_node| {
+                    task_node.spawn((
+                        Text2d::new(task.id.clone()),
+                        TextFont { font_size: FontSize::Px(12.0), ..default() },
+                        TextColor(seat_colour(&task.from, 0.9)),
+                        Anchor::TOP_CENTER,
+                        Transform::from_xyz(0.0, -9.0, 0.1),
+                    ));
+                });
+        }
+        return;
+    }
+    deck.task_orbit = (deck.task_orbit + time.delta_secs() * tc.speed) % std::f32::consts::TAU;
+    let pos = task_positions(open.len(), layout.scene, deck.task_orbit, tc.radius);
+    for (i, (_, mut node, mut tf)) in nodes.iter_mut().enumerate() {
+        if let Some(p) = pos.get(i) {
+            tf.translation.x = p.x;
+            tf.translation.y = p.y;
+            tf.translation.z = 1.5;
+        }
+        if let Some(task) = open.get(i) {
+            node.from = task.from.clone();
+        }
+    }
+}
+
+/// A held task is a bolt from its holder's seat to the core, in the
+/// assigner's colour, with a packet of light running down it — the task
+/// literally travelling from where it was asked into the work.
+fn draw_task_bolts(
+    deck: Res<Deck>,
+    mods: Res<Mods>,
+    view: Res<View>,
+    time: Res<Time>,
+    nodes: Query<(&SeatNode, &Transform)>,
+    mut gizmos: Gizmos,
+) {
+    let tc = &mods.cfg.tasks;
+    if !tc.show || !view.tasks {
+        return;
+    }
+    let t = time.elapsed_secs();
+    let positions: HashMap<&str, Vec2> =
+        nodes.iter().map(|(n, tf)| (n.name.as_str(), tf.translation.truncate())).collect();
+    for task in deck.tasks.iter().filter(|t| !t.open) {
+        let Some(holder) = task.holder.as_deref().and_then(|h| positions.get(h)) else { continue };
+        let dim = if deck.focus.as_ref().is_some_and(|f| *f != task.holder.as_deref().unwrap_or("")) {
+            0.25
+        } else {
+            1.0
+        };
+        // From the seat's edge inward, so it reads as leaving the seat.
+        let from = *holder * 0.85;
+        gizmos.line_gradient_2d(from, Vec2::ZERO, seat_colour(&task.from, tc.bolt_bright * dim), seat_colour(&task.from, tc.bolt_bright * 0.3 * dim));
+        // The packet runs seat -> core, one pulse per bolt.
+        let k = (t * 0.9 + task.id.len() as f32 * 0.31).fract();
+        let q = from * (1.0 - k);
+        gizmos.circle_2d(Isometry2d::from_translation(q), 2.5, seat_colour(&task.from, 3.0 * dim));
     }
 }
 
@@ -1883,6 +2014,9 @@ fn keys(
     }
     if keys.just_pressed(KeyCode::KeyM) {
         view.moons = !view.moons;
+    }
+    if keys.just_pressed(KeyCode::KeyT) {
+        view.tasks = !view.tasks;
     }
     if keys.just_pressed(KeyCode::KeyF) {
         if vtime.is_paused() {

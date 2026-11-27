@@ -300,6 +300,25 @@ impl Default for HudCfg {
     }
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TasksCfg {
+    pub show: bool,
+    /// Radians a second the task ring turns.
+    pub speed: f32,
+    /// The ring's radius as a share of the seat ring's.
+    pub radius: f32,
+    pub size: f32,
+    pub bright: f32,
+    /// How bright a holder's bolt to the core burns.
+    pub bolt_bright: f32,
+}
+impl Default for TasksCfg {
+    fn default() -> Self {
+        TasksCfg { show: true, speed: 0.22, radius: 0.42, size: 0.5, bright: 1.1, bolt_bright: 0.5 }
+    }
+}
+
 /// One effect rule as written in the toml.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -347,6 +366,7 @@ pub struct Config {
     pub fuel: FuelCfg,
     pub moons: MoonsCfg,
     pub hud: HudCfg,
+    pub tasks: TasksCfg,
     pub chat: ChatCfg,
     pub typing: TypingCfg,
     pub splash: SplashCfg,

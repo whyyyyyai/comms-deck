@@ -76,6 +76,18 @@ speed = 0.6
 show = true
 dock = true                   # the line of seats that aren't on the ring
 
+# The load balancer's task board, read live from ~/.local/share/comms-deck/.
+# Open tasks orbit the core on their own ring; a held task is a bolt from its
+# holder to the core. Both are coloured by the seat that assigned the task
+# (Y's tasks burn gold), and t toggles the whole thing.
+[tasks]
+show = true
+speed = 0.22                  # radians a second the task ring turns
+radius = 0.42                 # the ring's radius, as a share of the seat ring's
+size = 0.5
+bright = 1.1
+bolt_bright = 0.5
+
 # The chat panel on the right: the notes, and a chat box that sends as Y.
 # The terminal chat screen keeps working alongside it.
 [chat]
