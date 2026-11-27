@@ -524,7 +524,6 @@ struct SeatNode {
 /// One open task orbiting the core, coloured by who assigned it.
 #[derive(Component)]
 struct TaskNode {
-    id: String,
     from: String,
 }
 
@@ -1252,7 +1251,7 @@ fn layout_tasks(
             let colour = seat_colour(&task.from, tc.bright);
             commands
                 .spawn((
-                    TaskNode { id: task.id.clone(), from: task.from.clone() },
+                    TaskNode { from: task.from.clone() },
                     Mesh2d(assets.dot.clone()),
                     MeshMaterial2d(materials.add(colour)),
                     Transform::from_xyz(p.x, p.y, 1.5).with_scale(Vec3::splat(tc.size)),
