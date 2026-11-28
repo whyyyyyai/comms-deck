@@ -630,6 +630,8 @@ def orbital_hyperdrive(plan, max_parallel=3, seat=None, log_dir=None, poll=0.2):
     seat = seat or find_agent(trust_env=False)[0]
     if seat not in AGENTS:
         return {"ok": False, "reason": "not run from a seat's agent"}
+    if not isinstance(max_parallel, int) or isinstance(max_parallel, bool) or max_parallel < 1:
+        return {"ok": False, "reason": "max_parallel must be a positive integer"}
     slices, briefs, commands, meta = [], {}, {}, {}
     try:
         for row in plan.get("slices") or []:
@@ -661,6 +663,10 @@ def orbital_hyperdrive(plan, max_parallel=3, seat=None, log_dir=None, poll=0.2):
             pending.remove(work)
             kind, task = meta[work.id]
             started = json.loads(orbital_cli("start", "", kind, task, seat=seat))
+            if not started.get("ok"):
+                failed.add(work.id)
+                results[work.id] = {"exit": None, "reason": started.get("reason", "orbital registration failed")}
+                continue
             log_path = log_dir / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', work.id)}.log"
             log = os.fdopen(os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb")
             try:
@@ -687,7 +693,7 @@ def orbital_hyperdrive(plan, max_parallel=3, seat=None, log_dir=None, poll=0.2):
         if not active:
             # Nothing running: whatever is still pending can never start
             # (a prerequisite failed): it's blocked, not silently dropped.
-            if not select_ready(pending, [], completed, max_parallel=max(1, max_parallel)):
+            if not select_ready(pending, [], completed, max_parallel=max_parallel):
                 for work in pending:
                     results[work.id] = {"exit": None, "blocked_by": [d for d in work.depends_on if d not in completed]}
                 break
@@ -8729,6 +8735,12 @@ def self_test():
         "snap = []",
         "real_sleep = x.time.sleep",
         "x.time.sleep = lambda s: (snap.append((x.DATA / 'subagents.json').read_text()), real_sleep(s))[1]",
+        "assert 'positive' in x.orbital_hyperdrive(plan, max_parallel=0, seat='devin')['reason']",
+        "bad = dict(plan['slices'][0], task='t999999')",
+        "waits = dict(plan['slices'][0], id='waits', depends_on=[bad['id']])",
+        "refused = x.orbital_hyperdrive({'slices': [bad, waits]}, max_parallel=2, seat='devin', log_dir=hd / 'refused', poll=0.05)",
+        "assert not refused['ok'] and refused['slices'][bad['id']] == {'exit': None, 'reason': 'unknown task'}, refused",
+        "assert refused['slices']['waits']['blocked_by'] == [bad['id']] and not list((hd / 'refused').glob('*.log'))",
         "out = x.orbital_hyperdrive(plan, max_parallel=3, seat='devin', log_dir=hd / 'logs', poll=0.05)",
         "x.time.sleep = real_sleep",
         "t = lambda sid, w: float((hd / f'{sid}.{w}').read_text())",
@@ -9696,7 +9708,7 @@ def main():
                 except (OSError, ValueError) as error:
                     print(json.dumps({"ok": False, "reason": f"can't read the plan: {error}"}), file=sys.stderr)
                     sys.exit(2)
-                out = orbital_hyperdrive(plan, max(1, args.max))
+                out = orbital_hyperdrive(plan, args.max)
                 print(json.dumps(out, indent=1))
                 sys.exit(0 if out.get("ok") else 1)
             if args.action == "run":
