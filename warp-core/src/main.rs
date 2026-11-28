@@ -1156,29 +1156,59 @@ struct Core;
 
 const WARP_ACTIVE: f32 = 0.05;
 const TICKER_STATIC_FRAME: f32 = 0.055;
+const WARP_R_AFTER_S: f32 = 3.0;
 
 #[derive(Component, Default)]
 struct CoreTicker {
     warped: bool,
+    warp_started: f32,
+    glyph: WarpGlyph,
     transition_at: Option<f32>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum WarpGlyph {
+    #[default]
+    Sol,
+    X,
+    R,
 }
 
 impl CoreTicker {
     fn frame(&mut self, warp: f32, now: f32) -> (&'static str, bool) {
         let warped = warp > WARP_ACTIVE;
-        if warped != self.warped {
-            self.warped = warped;
+        if warped && !self.warped {
+            self.warp_started = now;
+        }
+        self.warped = warped;
+        let glyph = if !warped {
+            WarpGlyph::Sol
+        } else if now - self.warp_started >= WARP_R_AFTER_S {
+            WarpGlyph::R
+        } else {
+            WarpGlyph::X
+        };
+        if glyph != self.glyph {
+            self.glyph = glyph;
             self.transition_at = Some(now);
         }
         if let Some(at) = self.transition_at {
-            let static_frames = if warped { ["S#L", "%/+", "X#P", "XR/"] } else { ["X#P", "+/%", "S#L", "SO/"] };
+            let static_frames = match glyph {
+                WarpGlyph::Sol => ["#", "/", "=", "-"],
+                WarpGlyph::X => ["X", "/", "#", "X"],
+                WarpGlyph::R => ["X", "#", "/", "R"],
+            };
             let frame = ((now - at).max(0.0) / TICKER_STATIC_FRAME) as usize;
-            if let Some(text) = static_frames.get(frame) {
+            if let Some(&text) = static_frames.get(frame) {
                 return (text, true);
             }
             self.transition_at = None;
         }
-        (if warped { "XRP" } else { "SOL" }, false)
+        (match glyph {
+            WarpGlyph::Sol => "SOL",
+            WarpGlyph::X => "X",
+            WarpGlyph::R => "R",
+        }, false)
     }
 }
 
@@ -1257,7 +1287,7 @@ fn update_core_ticker(
                 let slot = (now / TICKER_STATIC_FRAME) as u64;
                 let roll = (slot.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40) % 1000;
                 if strength > 0.0 && (roll as f32) < strength * strength * 180.0 {
-                    shown = glitch_frame(sym, strength, slot);
+                    shown = glitch_frame(frame, strength, slot);
                     flick = true;
                     // Up moves flash green, down moves red: the direction.
                     colour.0 = if dir >= 0.0 { Color::srgb(0.55, 1.0, 0.6) } else { Color::srgb(1.0, 0.45, 0.4) };
@@ -4159,15 +4189,19 @@ mod tests {
     /// the same component mutably (B0001): 1.32 died in a restart loop on
     /// exactly that. Initialising the systems catches it without a GPU.
     #[test]
-    fn core_ticker_switches_through_static_in_both_directions() {
+    fn core_ticker_moves_from_x_to_r_after_sustained_warp() {
         let mut ticker = CoreTicker::default();
         assert_eq!(ticker.frame(0.0, 0.0), ("SOL", false));
         assert_eq!(ticker.frame(WARP_ACTIVE, 1.0), ("SOL", false));
-        assert_eq!(ticker.frame(1.0, 2.0), ("S#L", true));
-        assert_eq!(ticker.frame(2.0, 2.1), ("%/+", true));
-        assert_eq!(ticker.frame(1.0, 2.3), ("XRP", false));
-        assert_eq!(ticker.frame(0.0, 3.0), ("X#P", true));
-        assert_eq!(ticker.frame(0.0, 3.3), ("SOL", false));
+        assert_eq!(ticker.frame(1.0, 2.0), ("X", true));
+        assert_eq!(ticker.frame(2.0, 2.3), ("X", false));
+        assert_eq!(ticker.frame(2.0, 4.9), ("X", false));
+        assert_eq!(ticker.frame(1.0, 5.0), ("X", true));
+        assert_eq!(ticker.frame(1.0, 5.3), ("R", false));
+        assert_eq!(ticker.frame(0.0, 6.0), ("#", true));
+        assert_eq!(ticker.frame(0.0, 6.3), ("SOL", false));
+        assert_eq!(ticker.frame(1.0, 8.0), ("X", true));
+        assert_eq!(ticker.frame(1.0, 8.3), ("X", false));
     }
 
     #[test]
