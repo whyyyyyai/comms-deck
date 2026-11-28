@@ -1371,9 +1371,14 @@ struct Comet {
     colour: Color,
     trail: VecDeque<Vec2>,
     shock: Option<([f32; 3], f32)>,
+    /// The laser lance entity, when [comets] style is "laser" (t138).
+    beam: Option<Entity>,
     /// The note's log id, so the kitten catches each note once (t78).
     note_id: String,
 }
+
+#[derive(Component)]
+struct LaserBeam;
 
 #[derive(Resource)]
 struct Assets2d {
@@ -3008,6 +3013,7 @@ fn fly_comets(
     mut materials: ResMut<Assets<ColorMaterial>>,
     time: Res<Time>,
     mut comets: Query<(Entity, &mut Comet, &mut Transform), Without<SeatNode>>,
+    mut beams: Query<&mut Transform, (With<LaserBeam>, Without<Comet>)>,
     mut nodes: Query<(&mut SeatNode, &Transform), Without<Comet>>,
     mut kit: ResMut<KittenView>,
     mut gizmos: Gizmos,
@@ -3060,9 +3066,35 @@ fn fly_comets(
                     0.0 => 1.0,
                     s => s,
                 };
-                let via = (from + to_pos) * 0.12 + (to_pos - from).perp().normalize_or_zero() * (40.0 * side);
+                let laser = mods.cfg.comets.style == "laser";
+                // Laser packets relay through the iris: the quadratic's
+                // midpoint lands on the core, so every message flashes
+                // into Sol before it reaches its agent (Y, t138). The
+                // flight is a time-bound orbital: farther messages take
+                // disproportionately longer, period ~ r^1.5 like a real
+                // orbit's.
+                let (via, seconds) = if laser {
+                    let r = (from + to_pos).length() * 0.5;
+                    (-(from + to_pos) * 0.5, look.seconds * (0.5 + (r / 500.0).powf(1.5)))
+                } else {
+                    ((from + to_pos) * 0.12 + (to_pos - from).perp().normalize_or_zero() * (40.0 * side), look.seconds)
+                };
                 let bright = look.bright * if involved(&to) { 1.0 } else { 0.12 };
                 let colour = lin(look.colour, bright);
+                // The bolt's lance: a quad stretched from tail to head,
+                // updated every frame in fly_comets. Hotter than the head
+                // so it blooms.
+                let beam = laser.then(|| {
+                    let lc = colour.to_linear();
+                    commands
+                        .spawn((
+                            LaserBeam,
+                            Mesh2d(assets.quad.clone()),
+                            MeshMaterial2d(materials.add(Color::linear_rgb(lc.red * 1.6, lc.green * 1.6, lc.blue * 1.6))),
+                            Transform::from_xyz(from.x, from.y, 2.9),
+                        ))
+                        .id()
+                });
                 commands.spawn((
                     Comet {
                         from,
@@ -3070,10 +3102,11 @@ fn fly_comets(
                         to: to.clone(),
                         to_pos,
                         t: 0.0,
-                        seconds: look.seconds,
+                        seconds,
                         colour,
                         trail: VecDeque::new(),
                         shock: look.shock,
+                        beam,
                         note_id: note.id.clone(),
                     },
                     Mesh2d(assets.dot.clone()),
@@ -3087,6 +3120,8 @@ fn fly_comets(
     let dt = time.delta_secs();
     let now = time.elapsed_secs();
     let trail = mods.cfg.comets.trail.clamp(2, 200);
+    let laser_len = mods.cfg.comets.laser_len.max(1.0);
+    let laser_width = mods.cfg.comets.laser_width.max(0.5);
     for (e, mut comet, mut tf) in &mut comets {
         // Follow the receiver round the orbit mid-flight. Lumo's electron
         // quantum-jumps, so a comet to her eases after her instead of
@@ -3105,11 +3140,35 @@ fn fly_comets(
         tf.translation.y = p.y;
         comet.trail.push_front(p);
         comet.trail.truncate(trail);
-        let n = comet.trail.len();
-        for (i, w) in comet.trail.iter().zip(comet.trail.iter().skip(1)).enumerate() {
-            let fade = 1.0 - i as f32 / n as f32;
-            let c = comet.colour.to_linear() * fade * 0.8;
-            gizmos.line_2d(*w.0, *w.1, Color::linear_rgb(c.red, c.green, c.blue));
+        if let Some(be) = comet.beam {
+            // The lance: tail is the trail point about laser_len behind the
+            // head (or the oldest one, early in the flight).
+            let mut tail = *comet.trail.back().unwrap_or(&p);
+            let mut acc = 0.0;
+            let mut prev = p;
+            for w in comet.trail.iter() {
+                acc += prev.distance(*w);
+                prev = *w;
+                if acc >= laser_len {
+                    tail = *w;
+                    break;
+                }
+            }
+            if let Ok(mut btf) = beams.get_mut(be) {
+                let mid = (p + tail) * 0.5;
+                let d = p - tail;
+                btf.translation.x = mid.x;
+                btf.translation.y = mid.y;
+                btf.rotation = Quat::from_rotation_z(d.y.atan2(d.x));
+                btf.scale = Vec3::new(d.length().max(0.001), laser_width, 1.0);
+            }
+        } else {
+            let n = comet.trail.len();
+            for (i, w) in comet.trail.iter().zip(comet.trail.iter().skip(1)).enumerate() {
+                let fade = 1.0 - i as f32 / n as f32;
+                let c = comet.colour.to_linear() * fade * 0.8;
+                gizmos.line_2d(*w.0, *w.1, Color::linear_rgb(c.red, c.green, c.blue));
+            }
         }
         if comet.t >= 1.0 {
             for (mut node, _) in &mut nodes {
@@ -3123,6 +3182,9 @@ fn fly_comets(
             }
             if let Some((colour, size)) = comet.shock {
                 deck.shocks.push(Shock { seat: comet.to.clone(), at: now, colour, size });
+            }
+            if let Some(be) = comet.beam {
+                commands.entity(be).despawn();
             }
             commands.entity(e).despawn();
         }
