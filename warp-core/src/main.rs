@@ -146,6 +146,9 @@ fn main() {
                     drive_planets,
                     draw_moons_and_marks,
                     draw_groups,
+                )
+                    .chain(),
+                (
                     hud,
                     sys_panel,
                     task_panel,
@@ -2252,7 +2255,7 @@ fn layout_seats(
         for (e, _, _) in &nodes {
             commands.entity(e).despawn();
         }
-        for (e, _) in &group_labels {
+        for e in &group_labels {
             commands.entity(e).despawn();
         }
         for gname in mods.cfg.groups.keys() {
@@ -3148,7 +3151,7 @@ fn fly_comets(
     mut materials: ResMut<Assets<ColorMaterial>>,
     time: Res<Time>,
     mut comets: Query<(Entity, &mut Comet, &mut Transform), Without<SeatNode>>,
-    mut beams: Query<&mut Transform, (With<LaserBeam>, Without<Comet>)>,
+    mut beams: Query<&mut Transform, (With<LaserBeam>, Without<Comet>, Without<SeatNode>)>,
     mut nodes: Query<(&mut SeatNode, &Transform), Without<Comet>>,
     mut kit: ResMut<KittenView>,
     mut gizmos: Gizmos,
@@ -4977,10 +4980,10 @@ mod tests {
         deck.history.push_front(Seen { at: 40.0, from: "vibe".into(), to: vec!["owner".into()], all: false });
         deck.history.push_front(Seen { at: 50.0, from: "grok".into(), to: vec!["devin".into()], all: false });
         let card = hover_card(&deck, "vibe", 100.0).unwrap();
-        assert!(card.starts_with("vibe | busy for 1m"));
+        assert!(card.starts_with("Mercury | busy for 1m"));
         assert!(card.contains("2 waiting, oldest 1h 20m"));
         assert!(card.contains("ctx 45% | 5h - | week -"));
-        assert!(card.contains("-> Y  1m ago") && card.contains("<- claude  1m ago"));
+        assert!(card.contains("-> Y  1m ago") && card.contains("<- Jupiter  1m ago"));
         assert!(!card.contains("grok"), "other seats' notes aren't on it");
         assert!(hover_card(&deck, "nobody", 0.0).is_none());
     }
@@ -5053,11 +5056,11 @@ mod tests {
             });
         }
         let text: String = chat_spans(&notes, 0, 60).into_iter().map(|(t, _)| t).collect();
-        assert_eq!(text, "03:00 claude -> all  note 0\n03:01 Y -> vibe, devin  note 1\n03:02 vibe -> Y  (quiet) note 2");
+        assert_eq!(text, "03:00 Jupiter -> all  note 0\n03:01 Y -> Mercury, devin  note 1\n03:02 Mercury -> Y  (quiet) note 2");
         let back: String = chat_spans(&notes, 1, 60).into_iter().map(|(t, _)| t).collect();
         assert!(back.ends_with("note 1"), "scrolled back one note");
         let capped: String = chat_spans(&notes, 0, 1).into_iter().map(|(t, _)| t).collect();
-        assert_eq!(capped, "03:02 vibe -> Y  (quiet) note 2");
+        assert_eq!(capped, "03:02 Mercury -> Y  (quiet) note 2");
     }
 
     #[test]
@@ -5105,7 +5108,7 @@ mod tests {
         rows.push_back(Activity { time: 1000.0, seat: "vibe".into(), state: "busy".into(), doing: "note from Y: hi\u{2026}".into() });
         rows.push_back(Activity { time: 1090.0, seat: "owner".into(), state: "idle".into(), doing: String::new() });
         let text: String = activity_spans(&rows, 0, 80, 1100.0).into_iter().map(|(t, _)| t).collect();
-        assert_eq!(text, "     1m vibe busy  note from Y: hi...\n    10s Y idle");
+        assert_eq!(text, "     1m Mercury busy  note from Y: hi...\n    10s Y idle");
         let mut notes = VecDeque::new();
         notes.push_back(Notice { time: 40.0, text: "Note from claude \u{2014} done".into() });
         let text: String = notice_spans(&notes, 0, 50, 100.0).into_iter().map(|(t, _)| t).collect();

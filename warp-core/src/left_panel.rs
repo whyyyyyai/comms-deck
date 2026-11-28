@@ -602,8 +602,9 @@ mod tests {
         let spans = task_spans(&[t("t1", Some("vibe"), 0.0), t("t2", None, 900.0), t("t3", Some("claude"), 990.0)], 1000.0, 40);
         let all: String = spans.iter().map(|s| s.0.as_str()).collect();
         let open = all.find("OPEN").unwrap();
-        let claude = all.find("CLAUDE").unwrap();
-        let vibe = all.find("VIBE").unwrap();
+        // Seats show by display name (Jupiter is claude, Mercury is vibe).
+        let claude = all.find("JUPITER").unwrap();
+        let vibe = all.find("MERCURY").unwrap();
         assert!(open < claude && claude < vibe, "{all}");
         assert!(all.starts_with("TASKS   3 on the board · 1 open · oldest 16m"), "{all}");
         assert!(all.contains("Fix it"));
