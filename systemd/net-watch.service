@@ -1,0 +1,20 @@
+# net-watch: ticks away checking the internet; if it's down it walks a
+# reconnect ladder (wifi rescan, connection up, networking off/on) and
+# tells the owner. See the comment at the top of net-watch.
+#
+#   systemctl --user enable --now net-watch.service
+#   journalctl --user -u net-watch -f
+#
+# Written by: devin (Y, t82, 2026-11-28)
+[Unit]
+Description=net-watch: check the internet and reconnect when it's down
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/net-watch
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
