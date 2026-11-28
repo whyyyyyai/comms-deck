@@ -285,6 +285,11 @@ impl Queue {
         Some((&active.event, progress))
     }
 
+    /// Replace the per-event durations (from [kitten], which can change live).
+    pub fn set_durations(&mut self, durations: Durations) {
+        self.durations = durations;
+    }
+
     /// Inspect the current event without changing the queue or its clock.
     pub fn peek(&self) -> Option<&Event> {
         self.active.as_ref().map(|active| &active.event)

@@ -115,6 +115,13 @@ pub fn kitten_step(
         ));
         *spawned = true;
     }
+    // The beat lengths follow [kitten] live (Devin's review).
+    kit.queue.set_durations(kitten::Durations {
+        catch_s: cfg.catch_s,
+        relay_s: cfg.relay_s,
+        perch_s: cfg.perch_s,
+        rattle_s: cfg.rattle_s,
+    });
     let dt = real.delta_secs().max(1e-4);
     kit.fps = kit.fps * 0.95 + (1.0 / dt) * 0.05;
     let now = time.elapsed_secs();
