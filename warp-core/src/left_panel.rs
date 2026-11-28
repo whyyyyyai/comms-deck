@@ -406,6 +406,7 @@ pub fn left_panel(
             text_font.font_size = FontSize::Px(font);
         }
         let text = compact_header(left.tab, cols);
+        let text = glyphs(&text);
         if t.0 != text {
             t.0 = text;
         }
@@ -424,6 +425,7 @@ pub fn left_panel(
         *vis = if on_system { Visibility::Inherited } else { Visibility::Hidden };
         if on_system {
             let text = net_line(state.2.as_ref(), unix);
+            let text = glyphs(&text);
             if t.0 != text {
                 t.0 = text;
             }
@@ -481,7 +483,7 @@ pub fn left_panel(
         commands.entity(entity).with_children(|parent| {
             for (text, colour) in &rows.rows[first..end] {
                 parent.spawn((
-                    TextSpan::new(format!("{text}\n")),
+                    TextSpan::new(glyphs(&format!("{text}\n"))),
                     TextColor(*colour),
                     TextFont { font_size: FontSize::Px(font), ..default() },
                 ));
@@ -490,7 +492,7 @@ pub fn left_panel(
                 let cue = format!("Rows {}–{} of {} · Scroll", first + 1, end, rows.rows.len());
                 let cue = wrap(&cue, cols, 1).pop().unwrap_or_default();
                 parent.spawn((
-                    TextSpan::new(cue),
+                    TextSpan::new(glyphs(&cue)),
                     TextColor(Color::srgb(0.55, 0.65, 0.8)),
                     TextFont { font_size: FontSize::Px(font), ..default() },
                 ));
@@ -509,9 +511,20 @@ pub fn place(layout: &Layout, left: &Left, tab: LeftTab, old: Vec2) -> (Vec2, bo
     (Vec2::new(-h.x - layout.left + 14.0, h.y - 50.0), left.tab == tab && tab != LeftTab::Tasks)
 }
 
+/// The warp core's default font has no middle dot, ellipsis or en dash
+/// (they drew as boxes on the 03:09 screenshot): draw them in ASCII.
+pub fn glyphs(s: &str) -> String {
+    s.replace('\u{00b7}', "|").replace('\u{2026}', "...").replace('\u{2013}', "-")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn glyphs_the_font_lacks_become_ascii() {
+        assert_eq!(glyphs("t82 \u{00b7} Held 1h\u{2026} 2\u{2013}3"), "t82 | Held 1h... 2-3");
+    }
 
     #[test]
     fn titles_read_like_a_person_wrote_them() {
