@@ -449,23 +449,38 @@ pub fn ghosts_allowed(fps: f32, cfg: &KittenCfg) -> bool {
     cfg.enable && fps >= cfg.ghost_min_fps
 }
 
+/// Where the chat lives: `bottom` keeps F1 Comms in the strip and, with
+/// `side`, F2/F3 in the right panel; `right` is the old full-height column
+/// on the right holding all three tabs (Devin's t97 fold, claude's ask).
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ChatDock {
+    #[default]
+    Bottom,
+    Right,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ChatCfg {
     pub show: bool,
-    /// The right panel's width share (F2 Activity, F3 Notify; Y, 02:50).
+    /// The right panel's width share (F2 Activity, F3 Notify; Y, 02:50),
+    /// or the whole chat column's when dock = "right".
     pub width: f32,
     /// Show the right panel. Off: F2/F3 show in the bottom strip instead.
+    /// Ignored while dock = "right" (the column holds every tab).
     pub side: bool,
-    /// The strip's share of the window's height.
+    /// The bottom strip's share of the window's height.
     pub height: f32,
+    /// Where the chat docks.
+    pub dock: ChatDock,
     pub font: f32,
     /// How many notes the panel keeps (older ones scroll away).
     pub keep: usize,
 }
 impl Default for ChatCfg {
     fn default() -> Self {
-        ChatCfg { show: true, width: 0.22, side: true, height: 0.2, font: 14.0, keep: 200 }
+        ChatCfg { show: true, width: 0.22, side: true, height: 0.2, dock: ChatDock::Bottom, font: 14.0, keep: 200 }
     }
 }
 
