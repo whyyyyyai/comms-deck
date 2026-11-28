@@ -176,7 +176,7 @@ font = 14
 show = true
 height = 0.2                   # share of the window's height: the bottom strip of the central column (F1 Comms)
 side = true                    # the right panel for F2 Activity and F3 Notify (off: they show in the strip)
-width = 0.22                   # the right panel's share of the window's width
+width = 0.22                   # the right panel's share of the window's width (follows [left].width when both panels are on, t99)
 font = 14
 keep = 200                    # notes kept for scrolling back
 

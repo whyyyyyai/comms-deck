@@ -1862,7 +1862,11 @@ fn layout_view(
     let w = window_size(&windows);
     let strip = strip_height(w.y, &mods.cfg.chat);
     let left = left_panel::left_width(w.x, &mods.cfg.left);
-    let right = right_panel::right_width(w.x, &mods.cfg.chat);
+    let mut right = right_panel::right_width(w.x, &mods.cfg.chat);
+    // t99 (Y): when both panels are on, they are always the same width.
+    if left > 0.0 && right > 0.0 {
+        right = left;
+    }
     layout.scene = Vec2::new(w.x - left - right, w.y - strip);
     layout.panel = strip;
     layout.left = left;

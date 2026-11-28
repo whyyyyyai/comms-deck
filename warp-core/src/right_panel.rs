@@ -13,7 +13,8 @@ pub fn right_width(window_w: f32, cfg: &mods::ChatCfg) -> f32 {
     if !cfg.show || !cfg.side {
         return 0.0;
     }
-    (window_w * cfg.width).clamp(260.0, 600.0).min(window_w * 0.4)
+    // Same bounds as the left panel (t99): both panels share one size.
+    (window_w * cfg.width).clamp(260.0, 520.0).min(window_w * 0.4)
 }
 
 #[derive(Component)]
