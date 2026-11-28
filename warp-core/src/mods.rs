@@ -508,10 +508,13 @@ pub struct WarpCfg {
     pub per_note: f32,
     /// The most warp can stack to.
     pub max: f32,
+    /// Seconds of moiré interference on the core after warp drops below
+    /// active (t138: "the after-moire hyperdrive context").
+    pub moire_s: f32,
 }
 impl Default for WarpCfg {
     fn default() -> Self {
-        WarpCfg { decay: 0.22, on_broadcast: 1.0, per_note: 0.15, max: 3.0 }
+        WarpCfg { decay: 0.22, on_broadcast: 1.0, per_note: 0.15, max: 3.0, moire_s: 1.5 }
     }
 }
 

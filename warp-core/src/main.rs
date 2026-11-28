@@ -136,6 +136,7 @@ fn main() {
                     glow_seats,
                     draw_rings,
                     pulse_core,
+                    draw_moire,
                     (fly_comets, update_core_ticker).chain(),
                     kitten_view::draw_kitten,
                     move_stars,
@@ -411,6 +412,8 @@ struct Deck {
     history: VecDeque<Seen>,
     /// 0..1, the starfield's warp: kicked by broadcasts, decays on its own.
     warp: f32,
+    /// Clock time until which the core draws the post-warp moiré (t138).
+    moire_until: f32,
     /// How far round the orbit the ring has turned (radians).
     orbit: f32,
     /// 0..1, built by typing in the chat box, draining on its own.
@@ -1876,7 +1879,12 @@ fn read_feed(
     while deck.arrivals.front().is_some_and(|t| now - *t > 3600.0) {
         deck.arrivals.pop_front();
     }
+    // t138: when warp falls back under active, the core moirés for a moment.
+    let was_warped = deck.warp > WARP_ACTIVE;
     deck.warp = (deck.warp - time.delta_secs() * mods.cfg.warp.decay).max(0.0);
+    if was_warped && deck.warp <= WARP_ACTIVE {
+        deck.moire_until = now + mods.cfg.warp.moire_s;
+    }
     deck.thrust = (deck.thrust - time.delta_secs() * mods.cfg.typing.decay).max(0.0);
     deck.boost = (deck.boost - time.delta_secs() * mods.cfg.stars.boost_decay).max(0.0);
     let gone = mods.cfg.conduits.packet_seconds.max(0.1);
@@ -2621,6 +2629,36 @@ fn pulse_core(
     // No containment rings round the core: Y found the two arc patterns
     // spinning round it unnecessary (2026-11-27) — the black hole alone
     // marks the centre, the planets and their orbits do the rest.
+}
+
+/// Post-warp moiré (t138): for [warp].moire_s after warp drops below active,
+/// two ring families with different spacing and slightly different spin
+/// interfere on the core, fading out.
+fn draw_moire(deck: Res<Deck>, mods: Res<Mods>, time: Res<Time>, mut gizmos: Gizmos) {
+    let now = time.elapsed_secs();
+    let total = mods.cfg.warp.moire_s.max(0.01);
+    if now >= deck.moire_until {
+        return;
+    }
+    let k = ((deck.moire_until - now) / total).clamp(0.0, 1.0); // 1 at start, 0 at end
+    let fade = k * k;
+    for set in 0..2u8 {
+        let rot = now * (0.7 + set as f32 * 0.19);
+        let gap = 8.0 + set as f32 * 1.7; // the spacing mismatch makes the interference
+        for i in 1..=9u8 {
+            let r = i as f32 * gap;
+            if r > 170.0 {
+                break;
+            }
+            let pts: Vec<Vec2> = (0..=48)
+                .map(|j| {
+                    let a = j as f32 / 48.0 * std::f32::consts::TAU + rot;
+                    Vec2::new(a.cos() * r, a.sin() * r * 0.98)
+                })
+                .collect();
+            gizmos.linestrip_2d(pts.iter().copied(), lin([0.75, 0.85, 1.0], 0.4 * fade));
+        }
+    }
 }
 
 /// 0..1: the mean of the online seats' fullest meters (seats without
