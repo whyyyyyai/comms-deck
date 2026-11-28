@@ -144,6 +144,7 @@ fn main() {
                     draw_links,
                     drive_planets,
                     draw_moons_and_marks,
+                    draw_groups,
                     hud,
                     sys_panel,
                     task_panel,
@@ -1144,6 +1145,10 @@ struct HeldTask {
 #[derive(Component)]
 struct SeatLabel;
 
+/// A subgroup label on the ring (t137): one per entry in [groups].
+#[derive(Component)]
+struct GroupLabel(String);
+
 /// One of a seat's fuel rings: 0 context, 1 five-hour, 2 week.
 #[derive(Component)]
 struct FuelRing(usize);
@@ -2043,6 +2048,50 @@ fn layout_view(
     }
 }
 
+/// Draws each [groups] subgroup as a faint arc spanning its online members on
+/// the ring, and floats its label at the arc's midpoint (t137).
+fn draw_groups(
+    deck: Res<Deck>,
+    layout: Res<Layout>,
+    mods: Res<Mods>,
+    mut gizmos: Gizmos,
+    mut labels: Query<(&GroupLabel, &mut Transform)>,
+) {
+    let names = &deck.roster;
+    let n = names.len().max(1) as f32;
+    let rx = layout.scene.x * 0.38;
+    let ry = layout.scene.y * 0.30;
+    let angle: HashMap<&str, f32> = names
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.as_str(), std::f32::consts::FRAC_PI_2 - i as f32 / n * std::f32::consts::TAU - deck.orbit))
+        .collect();
+    for (glabel, mut tf) in &mut labels {
+        let members: Vec<f32> = mods
+            .cfg
+            .groups
+            .get(&glabel.0)
+            .map(|v| v.iter().filter_map(|m| angle.get(m.as_str()).copied()).collect())
+            .unwrap_or_default();
+        if members.len() < 2 {
+            tf.translation.z = -10.0; // park the label off-scene
+            continue;
+        }
+        let (a0, a1) = (members[0], *members.last().unwrap());
+        let steps = 24;
+        let pts: Vec<Vec2> = (0..=steps)
+            .map(|i| {
+                let a = a0 + (a1 - a0) * (i as f32 / steps as f32);
+                Vec2::new(a.cos() * rx, a.sin() * ry) * 1.08
+            })
+            .collect();
+        gizmos.linestrip_2d(pts.iter().copied(), lin([0.6, 0.7, 0.9], 0.25));
+        let am = (a0 + a1) * 0.5;
+        let p = Vec2::new(am.cos() * rx, am.sin() * ry) * 1.16;
+        tf.translation = Vec3::new(p.x, p.y, 5.0);
+    }
+}
+
 /// Builds the ring when the seat list changes, and keeps it fitted to the
 /// window when that is resized.
 #[allow(clippy::too_many_arguments)]
@@ -2058,6 +2107,7 @@ fn layout_seats(
     layout: Res<Layout>,
     time: Res<Time>,
     mut nodes: Query<(Entity, &mut SeatNode, &mut Transform)>,
+    group_labels: Query<Entity, With<GroupLabel>>,
 ) {
     let pace = deck.notes_last(time.elapsed_secs(), 600.0);
     let warp = deck.warp;
@@ -2085,6 +2135,19 @@ fn layout_seats(
     if names != deck.built {
         for (e, _, _) in &nodes {
             commands.entity(e).despawn();
+        }
+        for (e, _) in &group_labels {
+            commands.entity(e).despawn();
+        }
+        for gname in mods.cfg.groups.keys() {
+            commands.spawn((
+                GroupLabel(gname.clone()),
+                Text2d::new(gname.clone()),
+                TextFont { font_size: FontSize::Px(13.0), ..default() },
+                TextColor(Color::linear_rgba(0.6, 0.7, 0.9, 0.55)),
+                Anchor::BOTTOM_CENTER,
+                Transform::from_xyz(0.0, 0.0, 5.0),
+            ));
         }
         for name in &names {
             let (p, depth) = pos[name];
