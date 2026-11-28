@@ -2692,10 +2692,11 @@ fn draw_moons_and_marks(
             subs.sort_by(|a, b| a.id.cmp(&b.id));
             let mut moons: Vec<&SubagentInfo> = Vec::new();
             for sub in subs {
-                // Standing orbitals always circle the core; a resumable one
-                // joins them only while stopped. Task orbitals end with
-                // their task, so a stopped one is gone.
-                if sub.lifetime == SubagentLife::Standing || (!sub.active && sub.lifetime == SubagentLife::Resumable) {
+                // Standing orbitals always circle the core on their own
+                // ellipses (t106). A stopped task one is gone with its
+                // task; a parked resumable hides until it's resumed —
+                // the core's ellipse is standing's alone (codex).
+                if sub.lifetime == SubagentLife::Standing {
                     ellipse.push((node.name.as_str(), sub));
                 } else if sub.active {
                     moons.push(sub);
@@ -2720,8 +2721,8 @@ fn draw_moons_and_marks(
             );
         }
     }
-    // The core's own orbitals: each standing (or parked resumable) one gets
-    // a distinct ellipse around the singularity, dimmed while stopped.
+    // The core's own orbitals: each standing one gets a distinct ellipse
+    // around the singularity, dimmed while stopped.
     if sc.show && view.moons && !ellipse.is_empty() {
         ellipse.sort_by(|a, b| a.1.id.cmp(&b.1.id));
         let short = layout.scene.x.min(layout.scene.y).max(1.0);
