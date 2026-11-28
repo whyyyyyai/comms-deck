@@ -41,7 +41,7 @@ mod mods;
 mod sys;
 
 use bevy::{
-    asset::uuid_handle,
+    asset::{uuid_handle, RenderAssetUsages},
     core_pipeline::tonemapping::{DebandDither, Tonemapping},
     input::{
         keyboard::{Key, KeyboardInput},
@@ -51,7 +51,7 @@ use bevy::{
     post_process::bloom::Bloom,
     prelude::*,
     reflect::TypePath,
-    render::render_resource::{AsBindGroup, ShaderType},
+    render::render_resource::{AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat},
     shader::{Shader, ShaderRef},
     sprite::Anchor,
     sprite_render::{AlphaMode2d, Material2d, Material2dPlugin},
@@ -66,6 +66,7 @@ const STARS: usize = 260;
 const CORE_SHADER: Handle<Shader> = uuid_handle!("6f1d2c3a-6b0e-4c55-9a1e-2f4c8d7b9e01");
 const RING_SHADER: Handle<Shader> = uuid_handle!("0b9e3f4d-1a2c-4e6f-8b7d-5c3a2e1f0d02");
 const PLANET_SHADER: Handle<Shader> = uuid_handle!("3c7a1e9b-5d2f-4a8c-9e6b-1f0d2c3a4b03");
+const WEBCAM_SHADER: Handle<Shader> = uuid_handle!("8d4f2a1c-7e3b-4d59-a1c6-9f0e5b2d8a47");
 /// Fuel ring diameters around a seat: context, 5-hour, week.
 const FUEL_D: [f32; 3] = [70.0, 82.0, 94.0];
 const HALO_D: f32 = 116.0;
@@ -92,6 +93,7 @@ fn main() {
         .insert_resource(Looks::default())
         .insert_resource(Chat::default())
         .insert_resource(Layout::default())
+        .insert_resource(WebcamView::default())
         .insert_resource(Rng(0x9E37_79B9_7F4A_7C15))
         // 30 fps until the mods say otherwise ([look] fps): it is a display,
         // not a game, and half the CPU of drawing at the refresh rate.
@@ -126,12 +128,13 @@ fn main() {
             Material2dPlugin::<RingMaterial>::default(),
             Material2dPlugin::<CoreMaterial>::default(),
             Material2dPlugin::<PlanetMaterial>::default(),
+            Material2dPlugin::<WebcamMaterial>::default(),
         ))
         .add_systems(Startup, setup)
         .add_systems(
             Update,
             (
-                (watch_mods, pace_frames, breathe_background, read_feed, layout_view, apply_rules, layout_seats, kitten_view::kitten_step, left_panel::left_keys, layout_tasks, layout_held_tasks, pointer, chat_input, keys).chain(),
+                (watch_mods, pace_frames, breathe_background, read_feed, layout_view, apply_rules, layout_seats, kitten_view::kitten_step, left_panel::left_keys, layout_tasks, layout_held_tasks, pointer, chat_input, keys, webcam).chain(),
                 (
                     glow_seats,
                     draw_rings,
@@ -363,6 +366,168 @@ impl Material2d for PlanetMaterial {
     }
     fn alpha_mode(&self) -> AlphaMode2d {
         AlphaMode2d::Blend
+    }
+}
+
+/// mods/shaders/webcam.wgsl: the camera feed in the top-left corner (Y, t156).
+#[derive(Asset, TypePath, AsBindGroup, Clone, Debug)]
+struct WebcamMaterial {
+    #[uniform(0)]
+    colour: Vec4,
+    #[texture(1)]
+    #[sampler(2)]
+    frame: Option<Handle<Image>>,
+}
+
+impl Material2d for WebcamMaterial {
+    fn fragment_shader() -> ShaderRef {
+        WEBCAM_SHADER.into()
+    }
+    fn alpha_mode(&self) -> AlphaMode2d {
+        AlphaMode2d::Blend
+    }
+}
+
+/// The webcam quad and what the HUD needs to know about it.
+#[derive(Component)]
+struct WebcamQuad;
+
+#[derive(Resource, Default)]
+struct WebcamView {
+    /// The live frame texture, once the first frame has landed.
+    handle: Option<Handle<Image>>,
+    /// The frame's pixel size (w, h), for the on-screen aspect.
+    size: (u32, u32),
+    /// How tall the feed is on screen, 0 while hidden; the HUD drops below it.
+    shown_h: f32,
+    spawned: bool,
+    last_poll: f32,
+    /// (mtime, len) of the frame file last ingested, so unchanged polls are cheap.
+    seen: Option<(std::time::SystemTime, u64)>,
+    /// The quad's material, so its texture binding can be swapped.
+    material: Option<Handle<WebcamMaterial>>,
+}
+
+/// webcam-feed writes raw RGBA to ~/.local/state/warp-core/webcam/; pick the
+/// newest frame up and pin it, top-left of the scene, under a thin frame.
+fn webcam(
+    mut commands: Commands,
+    mods: Res<Mods>,
+    layout: Res<Layout>,
+    real: Res<Time<Real>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut images: ResMut<Assets<Image>>,
+    mut mats: ResMut<Assets<WebcamMaterial>>,
+    mut view: ResMut<WebcamView>,
+    mut quad: Query<(&mut Transform, &mut Visibility, &mut MeshMaterial2d<WebcamMaterial>), With<WebcamQuad>>,
+    mut gizmos: Gizmos,
+) {
+    let cfg = &mods.cfg.webcam;
+    let now = real.elapsed_secs();
+    if !view.spawned {
+        view.spawned = true;
+        view.material = Some(mats.add(WebcamMaterial { colour: Vec4::ONE, frame: None }));
+        commands.spawn((
+            WebcamQuad,
+            Mesh2d(meshes.add(Rectangle::new(1.0, 1.0))),
+            MeshMaterial2d(view.material.clone().unwrap()),
+            Transform::from_xyz(0.0, 0.0, 5.0),
+            Visibility::Hidden,
+        ));
+    }
+    let mut show = false;
+    let mut w = cfg.width.max(40.0);
+    let mut h = w * 0.75;
+    if cfg.show {
+        if view.handle.is_none() || now - view.last_poll >= cfg.poll_s.max(0.1) {
+            view.last_poll = now.max(1e-3);
+            let dir = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                .join(".local/state/warp-core/webcam");
+            let raw = dir.join("frame.rgba");
+            let meta = dir.join("frame.json");
+            let sig = std::fs::metadata(&raw).ok().map(|m| (m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len()));
+            if let Some((mtime, len)) = sig {
+                if view.seen != Some((mtime, len)) {
+                    view.seen = Some((mtime, len));
+                    // frame.json carries {"w":..,"h":..}; the feeder and this
+                    // agree on the size, but trust the file over a constant.
+                    let (pw, ph) = std::fs::read_to_string(&meta)
+                        .ok()
+                        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                        .map(|v| {
+                            (
+                                v["w"].as_u64().unwrap_or(640) as u32,
+                                v["h"].as_u64().unwrap_or(480) as u32,
+                            )
+                        })
+                        .unwrap_or((640, 480));
+                    if pw > 0 && ph > 0 && len == u64::from(pw) * u64::from(ph) * 4 {
+                        if let Ok(data) = std::fs::read(&raw) {
+                            view.size = (pw, ph);
+                            // A size change means a new texture, not new texels.
+                            let stale = view.handle.as_ref().and_then(|h| images.get(h)).is_some_and(|img| {
+                                img.texture_descriptor.size.width != pw || img.texture_descriptor.size.height != ph
+                            });
+                            if stale {
+                                view.handle = None;
+                            }
+                            if let Some(handle) = &view.handle {
+                                if let Some(mut img) = images.get_mut(handle) {
+                                    img.data = Some(data);
+                                }
+                            } else {
+                                view.handle = Some(images.add(Image::new(
+                                    Extent3d { width: pw, height: ph, depth_or_array_layers: 1 },
+                                    TextureDimension::D2,
+                                    data,
+                                    TextureFormat::Rgba8UnormSrgb,
+                                    RenderAssetUsages::RENDER_WORLD,
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(handle) = &view.handle {
+            show = true;
+            w = cfg.width.max(40.0);
+            h = w * view.size.1 as f32 / view.size.0.max(1) as f32;
+            for (mut tf, mut vis, _) in &mut quad {
+                *vis = Visibility::Inherited;
+                let hlf = layout.half();
+                // Top-left of the scene, a margin in, like the HUD was.
+                let cx = -hlf.x + 18.0 + w * 0.5;
+                let cy = hlf.y - 14.0 - h * 0.5;
+                tf.translation.x = cx;
+                tf.translation.y = cy;
+                tf.scale = Vec3::new(w, h, 1.0);
+            }
+            if let Some(mh) = &view.material {
+                if let Some(mut mat) = mats.get_mut(mh) {
+                    if mat.frame.as_ref() != Some(handle) {
+                        mat.frame = Some(handle.clone());
+                    }
+                }
+            }
+            view.shown_h = h;
+        }
+    }
+    if !show {
+        view.shown_h = 0.0;
+        for (_, mut vis, _) in &mut quad {
+            *vis = Visibility::Hidden;
+        }
+    }
+    if view.shown_h > 0.0 {
+        if let Some((tf, _, _)) = quad.iter().next() {
+            let half = Vec2::new(tf.translation.x, tf.translation.y);
+            gizmos.rect_2d(
+                Isometry2d::from_translation(half),
+                Vec2::new(w + 8.0, h + 8.0),
+                Color::linear_rgba(0.35, 0.45, 0.65, 0.8),
+            );
+        }
     }
 }
 
@@ -1860,6 +2025,7 @@ fn watch_mods(
         ("core.wgsl", CORE_SHADER, mods::DEFAULT_CORE_SHADER),
         ("ring.wgsl", RING_SHADER, mods::DEFAULT_RING_SHADER),
         ("planet.wgsl", PLANET_SHADER, mods::DEFAULT_PLANET_SHADER),
+        ("webcam.wgsl", WEBCAM_SHADER, mods::DEFAULT_WEBCAM_SHADER),
     ] {
         let path = dir.join("shaders").join(name);
         let first = !m.shaders_ok.iter().any(|s| s == name);
@@ -3422,6 +3588,7 @@ fn draw_splash(mut splash: ResMut<Splash>, mods: Res<Mods>, time: Res<Time>, lay
 fn sys_panel(
     deck: Res<Deck>,
     left: Res<left_panel::Left>,
+    webcam: Res<WebcamView>,
     mods: Res<Mods>,
     view: Res<View>,
     real: Res<Time<Real>>,
@@ -3459,7 +3626,10 @@ fn sys_panel(
         if c.0 != colour {
             c.0 = colour;
         }
-        let (p, here) = left_panel::place(&layout, &left, left_panel::LeftTab::System, Vec2::new(-layout.half().x + 18.0, layout.half().y - 70.0));
+        // The webcam owns the top-left corner (Y, t156); the floating stats
+        // start below the feed while it's up.
+        let drop = if webcam.shown_h > 0.0 { webcam.shown_h + 16.0 } else { 0.0 };
+        let (p, here) = left_panel::place(&layout, &left, left_panel::LeftTab::System, Vec2::new(-layout.half().x + 18.0, layout.half().y - 70.0 - drop));
         if !here {
             *vis = Visibility::Hidden;
         }
@@ -3631,6 +3801,7 @@ fn hud(
     real: Res<Time<Real>>,
     vtime: Res<Time<Virtual>>,
     layout: Res<Layout>,
+    webcam: Res<WebcamView>,
     mut hud: Query<(&mut Text2d, &mut Transform, &mut TextBounds), (With<Hud>, Without<Dock>)>,
     mut dock: Query<(&mut Text2d, &mut Transform, &mut Visibility, &mut TextBounds), (With<Dock>, Without<Hud>)>,
     mut fps: Local<(u32, f32, f32)>,
@@ -3705,7 +3876,9 @@ fn hud(
             text.0 = line.clone();
         }
         tf.translation.x = -half.x + 18.0;
-        tf.translation.y = half.y - 14.0;
+        // The webcam owns the top-left corner now (Y, t156); the line drops
+        // below the feed while it's up.
+        tf.translation.y = half.y - 14.0 - if webcam.shown_h > 0.0 { webcam.shown_h + 12.0 } else { 0.0 };
     }
 
     // The dock: seats off the ring, and the queues they're holding.
