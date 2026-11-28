@@ -136,7 +136,7 @@ fn main() {
                     glow_seats,
                     draw_rings,
                     pulse_core,
-                    fly_comets,
+                    (fly_comets, update_core_ticker).chain(),
                     kitten_view::draw_kitten,
                     move_stars,
                     colour_stars,
@@ -1154,6 +1154,55 @@ struct HaloRing;
 #[derive(Component)]
 struct Core;
 
+const WARP_ACTIVE: f32 = 0.05;
+const TICKER_STATIC_FRAME: f32 = 0.055;
+
+#[derive(Component, Default)]
+struct CoreTicker {
+    warped: bool,
+    transition_at: Option<f32>,
+}
+
+impl CoreTicker {
+    fn frame(&mut self, warp: f32, now: f32) -> (&'static str, bool) {
+        let warped = warp > WARP_ACTIVE;
+        if warped != self.warped {
+            self.warped = warped;
+            self.transition_at = Some(now);
+        }
+        if let Some(at) = self.transition_at {
+            let static_frames = if warped { ["S#L", "%/+", "X#P", "XR/"] } else { ["X#P", "+/%", "S#L", "SO/"] };
+            let frame = ((now - at).max(0.0) / TICKER_STATIC_FRAME) as usize;
+            if let Some(text) = static_frames.get(frame) {
+                return (text, true);
+            }
+            self.transition_at = None;
+        }
+        (if warped { "XRP" } else { "SOL" }, false)
+    }
+}
+
+fn update_core_ticker(
+    deck: Res<Deck>,
+    time: Res<Time>,
+    mut ticker: Query<(&mut CoreTicker, &mut Text2d, &mut TextColor)>,
+) {
+    for (mut state, mut text, mut colour) in &mut ticker {
+        let (frame, static_on) = state.frame(deck.warp, time.elapsed_secs());
+        if text.0 != frame {
+            text.0.clear();
+            text.0.push_str(frame);
+            colour.0 = if static_on {
+                Color::srgb(0.92, 0.95, 1.0)
+            } else if state.warped {
+                Color::srgb(0.78, 0.77, 1.0)
+            } else {
+                Color::srgb(0.65, 0.97, 0.89)
+            };
+        }
+    }
+}
+
 #[derive(Component)]
 struct Hud;
 
@@ -1429,6 +1478,15 @@ fn setup(
         Mesh2d(assets.quad.clone()),
         MeshMaterial2d(core_materials.add(CoreMaterial::default())),
         Transform::from_xyz(0.0, 0.0, 1.0).with_scale(Vec3::new(170.0, 170.0, 1.0)),
+    ));
+
+    commands.spawn((
+        CoreTicker::default(),
+        Text2d::new("SOL"),
+        TextFont { font_size: FontSize::Px(32.0), ..default() },
+        TextColor(Color::srgb(0.65, 0.97, 0.89)),
+        Anchor::CENTER,
+        Transform::from_xyz(0.0, 0.0, 5.5),
     ));
 
     let star_mat = materials.add(Color::linear_rgb(0.9, 0.95, 1.4));
@@ -3216,7 +3274,7 @@ fn hud(
         if !costs.is_empty() {
             line.push_str(&format!(" | ~${:.2} (estimate)", costs.iter().sum::<f64>()));
         }
-        if deck.warp > 0.05 {
+        if deck.warp > WARP_ACTIVE {
             line.push_str(&format!("    >> WARP {:.1}", deck.warp));
         }
         if deck.thrust > 0.05 {
@@ -4002,6 +4060,18 @@ mod tests {
     /// Bevy refuses, at start, two queries in one system that could touch
     /// the same component mutably (B0001): 1.32 died in a restart loop on
     /// exactly that. Initialising the systems catches it without a GPU.
+    #[test]
+    fn core_ticker_switches_through_static_in_both_directions() {
+        let mut ticker = CoreTicker::default();
+        assert_eq!(ticker.frame(0.0, 0.0), ("SOL", false));
+        assert_eq!(ticker.frame(WARP_ACTIVE, 1.0), ("SOL", false));
+        assert_eq!(ticker.frame(1.0, 2.0), ("S#L", true));
+        assert_eq!(ticker.frame(2.0, 2.1), ("%/+", true));
+        assert_eq!(ticker.frame(1.0, 2.3), ("XRP", false));
+        assert_eq!(ticker.frame(0.0, 3.0), ("X#P", true));
+        assert_eq!(ticker.frame(0.0, 3.3), ("SOL", false));
+    }
+
     #[test]
     fn workspace_and_scratchpad_events_wake_the_visibility_check() {
         assert!(shows_change("activespecial>>special:magic,DP-1\n"));
