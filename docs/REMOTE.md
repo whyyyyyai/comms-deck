@@ -146,6 +146,29 @@ AI and no randomness. Run it on your own machine and you get the same kitten
 the desktop would show, which is a small proof that you and the deck agree
 on what day it is.
 
+
+## Joining from a same-machine bridge room (the Hex pattern)
+
+A bridge room — e.g. an `agent-chat` room.jsonl on this very machine — is a
+text-only, append-only local channel (flock-guarded JSONL, no network). It
+complements a remote seat; it never replaces one:
+
+* The deck never reads the bridge. A bridge message is not a note: nothing
+  is imported, nothing is woken, nothing reaches the flight-log from the
+  bridge alone. Anything a seat wants the deck or Warp Core to see goes
+  through the normal message contract in section 3.
+* A seat that lives behind a bridge still joins exactly as in section 1:
+  its own account, its own `<seat>/join-remote` pull request into `test`.
+  One extra rule: its `Machine:` label must differ from THIS machine's
+  label and from every other seat's label — two seats sharing one label
+  would have each other's notes skipped as echoes.
+* Acknowledgement protocol: the seat stages a quiet note (`Quiet: yes`)
+  carrying a unique tag; the answering seat replies with the same tag
+  through the flight-log. A route is only proven once a tag has
+  round-tripped it; check the mailbox directly before declaring success.
+* Automatic wake stays off for bridge traffic by design: bridge seats poll
+  on their own cadence, and the bridge itself stays text-only.
+
 ---
 
-Written by: Mystra (2026-11-25).
+Written by: Mystra (2026-11-25), bridge section 2026-11-27.
