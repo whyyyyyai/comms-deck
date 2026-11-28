@@ -4,7 +4,7 @@
 // running warp core swaps it in; a broken edit is refused and the HUD says why.
 //
 // cool / hot: the disk's colour, blended by how full the crew's meters are
-// hot.a: zero at rest, otherwise one plus seconds into the warp colour sweep
+// hot.a: zero at rest, +1 plus warp-sweep age, or -1 minus cooldown-flicker age
 // params: x = the disk's angle in radians, carried on by the warp core so a
 //             change of pace bends the turning and never jumps the swirl;
 //             it turns clockwise, with the ring and the stars
@@ -105,6 +105,11 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
             let glow = smoothstep(0.0, 0.19, age) * (1.0 - smoothstep(1.22, 1.5, age));
             let edge = 1.0 - smoothstep(horizon * 0.91, horizon, r);
             colour = sweep * glow * edge * 0.62;
+        } else if (core.hot.a <= -1.0) {
+            let age = -core.hot.a - 1.0;
+            let flicker = smoothstep(0.0, 0.04, age) * (1.0 - smoothstep(0.12, 0.24, age));
+            let spot = 1.0 - smoothstep(horizon * 0.18, horizon * 0.55, r);
+            colour = vec3<f32>(0.65) * flicker * spot;
         }
         alpha = 1.0;
     }

@@ -2574,6 +2574,7 @@ fn draw_rings(
 struct CoreFlash {
     warped: bool,
     started: Option<f32>,
+    cooldown_at: Option<f32>,
 }
 
 impl CoreFlash {
@@ -2589,7 +2590,20 @@ impl CoreFlash {
         self.warped = warped;
         // Zero leaves the shadow black. Otherwise the shader receives
         // one plus the elapsed seconds, with a continuous fade envelope.
-        self.started.map_or(0.0, |at| 1.0 + (now - at).max(0.0))
+        if warped || self.started.is_some() {
+            self.cooldown_at = None;
+            return self.started.map_or(0.0, |at| 1.0 + (now - at).max(0.0));
+        }
+        let at = *self.cooldown_at.get_or_insert(now + 5.0);
+        if now < at {
+            return 0.0;
+        }
+        let age = now - at;
+        if age < 0.24 {
+            return -1.0 - age;
+        }
+        self.cooldown_at = Some(now + 11.0);
+        0.0
     }
 }
 
@@ -4159,6 +4173,19 @@ mod tests {
     /// Bevy refuses, at start, two queries in one system that could touch
     /// the same component mutably (B0001): 1.32 died in a restart loop on
     /// exactly that. Initialising the systems catches it without a GPU.
+    #[test]
+    fn cooldown_flicker_is_local_and_yields_to_warp() {
+        let mut flash = CoreFlash::default();
+        assert_eq!(flash.sample(0.0, 0.0), 0.0);
+        assert_eq!(flash.sample(0.0, 4.0), 0.0);
+        assert_eq!(flash.sample(0.0, 5.0), -1.0);
+        assert!(flash.sample(0.0, 5.1) < -1.0);
+        assert_eq!(flash.sample(0.0, 5.25), 0.0);
+        assert_eq!(flash.sample(0.0, 16.25), -1.0);
+        assert_eq!(flash.sample(1.0, 16.3), 1.0);
+        assert_eq!(flash.sample(0.0, 18.0), 0.0);
+    }
+
     #[test]
     fn core_flash_sweeps_once_per_warp_entry() {
         let mut flash = CoreFlash::default();
