@@ -21,8 +21,6 @@ struct VertexOutput {
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    // The camera's first row is the top of the picture; the quad's v = 0 is
-    // its bottom, so flip.
-    let c = textureSample(frame_tex, frame_smp, vec2<f32>(in.uv.x, 1.0 - in.uv.y));
+    let c = textureSample(frame_tex, frame_smp, in.uv);
     return vec4<f32>(c.rgb * webcam.colour.rgb, c.a * webcam.colour.a);
 }
