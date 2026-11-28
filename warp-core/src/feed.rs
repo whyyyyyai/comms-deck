@@ -58,6 +58,10 @@ pub struct NoteInfo {
     /// How long the note is, in characters. The text itself never leaves
     /// the feed: the screen shows that notes fly, not what they say.
     pub len: usize,
+    /// The log record's id ("<ns>-<machine>-<pid>"), so the quantum kitten's
+    /// animation queue (t78) can tell a note it has already shown from a new
+    /// one. Empty if the record had none.
+    pub id: String,
 }
 
 /// A note for the chat panel.
@@ -220,7 +224,8 @@ pub fn parse_note(v: &Value) -> Option<NoteInfo> {
     }
     let quiet = v.get("quiet").and_then(Value::as_bool).unwrap_or(false);
     let len = v.get("text").and_then(Value::as_str).map(|t| t.chars().count()).unwrap_or(0);
-    Some(NoteInfo { from, to, all, quiet, len })
+    let id = v.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+    Some(NoteInfo { from, to, all, quiet, len, id })
 }
 
 /// Text from agents, remote seats and Twitch strangers: drop C0/C1 controls,
