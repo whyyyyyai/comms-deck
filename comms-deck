@@ -1728,6 +1728,20 @@ def log(text):
 
 
 GROK_BOT_PORT = 9222
+GROK_BOT_STATE = HOME / ".local/state/grokbot-seats"
+
+
+def grok_bot_port(seat):
+    """The CDP port this seat's Grok Bot instance listens on.
+
+    `grokbot-seat <name>` gives a seat its own app instance and writes
+    ~/.local/state/grokbot-seats/<seat>.port; seats without one share the
+    original single window on GROK_BOT_PORT (Y, t130).
+    """
+    try:
+        return int((GROK_BOT_STATE / f"{seat}.port").read_text().strip())
+    except (OSError, ValueError):
+        return GROK_BOT_PORT
 
 
 def GROK_BOT_SEATS():
@@ -2025,9 +2039,9 @@ def cdp_connect(ws_url):
     return Cdp(sock, leftover)
 
 
-def open_grok_bot_page():
+def open_grok_bot_page(port=GROK_BOT_PORT):
     """The Grok Bot renderer page on 127.0.0.1, or raise if it isn't there."""
-    req = urllib.request.Request(f"http://127.0.0.1:{GROK_BOT_PORT}/json/list")
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/json/list")
     with urllib.request.urlopen(req, timeout=2) as resp:
         targets = json.loads(resp.read().decode())
     for target in targets:
@@ -2443,30 +2457,38 @@ def drive_app_seat(seat, cdp, focused):
 
 
 def try_app_seats():
-    """One pass over the Grok Bot window for every app seat that lives there."""
+    """One pass over the Grok Bot windows for every app seat that lives there.
+
+    Seats that `grokbot-seat` gave their own instance are grouped by port and
+    each window is driven on its own; the rest share the original 9222 page.
+    """
     if not APP_SEATS:
         return
     if not GROK_BOT_SEATS():
         return
     focused = app_window_focused()
-    try:
-        cdp = open_grok_bot_page()
-    except (OSError, RuntimeError, TimeoutError, ValueError, urllib.error.URLError):
-        for seat in GROK_BOT_SEATS():
-            state = load_seat(seat)
-            if state.get("app_page") == "grok-bot":
-                mark_app_down(seat, state)
-        return
-    try:
-        cdp_eval(cdp, _SCROLL_JS)
-        time.sleep(0.2)
-        for seat in GROK_BOT_SEATS():
-            try:
-                drive_app_seat(seat, cdp, focused)
-            except Exception as error:
-                log(f"app seat {seat} failed: {type(error).__name__}")
-    finally:
-        cdp.close()
+    by_port = {}
+    for seat in GROK_BOT_SEATS():
+        by_port.setdefault(grok_bot_port(seat), []).append(seat)
+    for port, seats in by_port.items():
+        try:
+            cdp = open_grok_bot_page(port)
+        except (OSError, RuntimeError, TimeoutError, ValueError, urllib.error.URLError):
+            for seat in seats:
+                state = load_seat(seat)
+                if state.get("app_page") == "grok-bot":
+                    mark_app_down(seat, state)
+            continue
+        try:
+            cdp_eval(cdp, _SCROLL_JS)
+            time.sleep(0.2)
+            for seat in seats:
+                try:
+                    drive_app_seat(seat, cdp, focused)
+                except Exception as error:
+                    log(f"app seat {seat} failed: {type(error).__name__}")
+        finally:
+            cdp.close()
 
 
 # -----------------------------------------------------------------------------
