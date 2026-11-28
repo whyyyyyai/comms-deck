@@ -3649,6 +3649,30 @@ fn to_label(to: &str) -> String {
 }
 
 /// The panel's spans for the notes shown: newest last, `scroll` notes back.
+/// How many of the newest notes (before `scroll`) fit in `lines` rows of
+/// `cols` characters, each note taking its header plus its wrapped text.
+/// The strip is short (t91), and the log grows upward from its input line:
+/// drawn whole, 60 notes climbed over the whole scene.
+fn notes_that_fit(notes: &VecDeque<ChatNote>, scroll: usize, cols: usize, lines: usize) -> usize {
+    let end = notes.len().saturating_sub(scroll);
+    let cols = cols.max(20);
+    let mut used = 0;
+    let mut n = 0;
+    for note in notes.range(..end).rev() {
+        let head = note.from.len() + note.to.len() + 12;
+        let rows = (head + note.text.chars().count()).div_ceil(cols).max(1);
+        if used + rows > lines && n > 0 {
+            break;
+        }
+        used += rows;
+        n += 1;
+        if used >= lines {
+            break;
+        }
+    }
+    n.max(1)
+}
+
 fn chat_spans(notes: &VecDeque<ChatNote>, scroll: usize, cap: usize) -> Vec<(String, Color)> {
     let end = notes.len().saturating_sub(scroll);
     let start = end.saturating_sub(cap);
@@ -3804,10 +3828,13 @@ fn draw_chat(
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs_f64())
                 .unwrap_or(0.0);
+            // Only what fits between the header and the input line.
+            let rows = ((strip_h - header_h - input_h - 14.0) / (cfg.font * 1.25)).max(1.0) as usize;
+            let cols = (inner / (cfg.font * 0.6)) as usize;
             let spans = match chat.tab {
-                Tab::Comms => chat_spans(&chat.notes, chat.scroll, 60),
-                Tab::Activity => activity_spans(&chat.activity, chat.scroll, 80, now_epoch),
-                Tab::Notify => notice_spans(&chat.notices, chat.scroll, 50, now_epoch),
+                Tab::Comms => chat_spans(&chat.notes, chat.scroll, notes_that_fit(&chat.notes, chat.scroll, cols, rows)),
+                Tab::Activity => activity_spans(&chat.activity, chat.scroll, rows, now_epoch),
+                Tab::Notify => notice_spans(&chat.notices, chat.scroll, rows, now_epoch),
             };
             commands.entity(e).with_children(|p| {
                 for (text, colour) in spans {
@@ -4573,6 +4600,19 @@ mod tests {
         // A lowered max never yanks a running warp up, and never adds past it.
         assert_eq!(stack_warp(0.5, 0.0, 3.0), 0.5);
         assert_eq!(stack_warp(1.0, -2.0, 3.0), 1.0);
+    }
+
+    #[test]
+    fn only_the_notes_that_fit_the_strip_are_drawn() {
+        let note = |text: &str| ChatNote { from: "claude".into(), to: "owner".into(), time: String::new(), text: text.into(), quiet: false };
+        let notes: VecDeque<ChatNote> = (0..60).map(|_| note(&"x".repeat(170))).collect();
+        // 200 columns: each note is 1 row of header+text; 6 rows fit 6 notes.
+        assert_eq!(notes_that_fit(&notes, 0, 200, 6), 6);
+        // 100 columns: each note wraps to 2 rows, so 3 fit.
+        assert_eq!(notes_that_fit(&notes, 0, 100, 6), 3);
+        // A single note too long for the strip is still shown.
+        assert_eq!(notes_that_fit(&notes, 0, 20, 2), 1);
+        assert_eq!(notes_that_fit(&VecDeque::new(), 0, 100, 6), 1);
     }
 
     #[test]
