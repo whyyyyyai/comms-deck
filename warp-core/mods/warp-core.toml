@@ -188,6 +188,12 @@ show = true
 width = 0.22                  # share of the window (260..520 px)
 font = 14
 
+# Named seat subgroups (t137): each is drawn as a faint arc and a label on the
+# ring spanning its members. Edit live; a broken edit is refused and the HUD
+# says why.
+[groups]
+solar-agents = ["claude", "grok", "vibe", "devin", "gravity", "lumo", "alice", "codex"]
+
 [chat]
 show = true
 height = 0.2                   # bottom dock: share of the window's height

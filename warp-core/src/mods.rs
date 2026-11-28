@@ -17,7 +17,7 @@
 //! Written by: claude
 
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -752,7 +752,21 @@ pub struct Config {
     pub planets: PlanetsCfg,
     pub kitten: KittenCfg,
     pub left: LeftCfg,
+    /// Named seat subgroups (t137, Y: "a new subgroup: Solar-agents"), drawn as a
+    /// faint arc and a label spanning their members on the ring. Editable live.
+    #[serde(default = "default_groups")]
+    pub groups: BTreeMap<String, Vec<String>>,
     pub rule: Vec<RuleSpec>,
+}
+
+fn default_groups() -> BTreeMap<String, Vec<String>> {
+    let mut g = BTreeMap::new();
+    g.insert(
+        "solar-agents".to_string(),
+        ["claude", "grok", "vibe", "devin", "gravity", "lumo", "alice", "codex"]
+            .iter().map(|s| s.to_string()).collect(),
+    );
+    g
 }
 
 impl Config {
