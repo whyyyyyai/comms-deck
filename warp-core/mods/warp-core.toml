@@ -197,6 +197,8 @@ keep = 200                    # notes kept for scrolling back
 [chart]
 show = true
 bucket_s = 300                # seconds per candle: 10 samples each, ~24 fit two hours
+symbols = ["SOL", "XRP"]       # prices.json keys, one row each, top to bottom;
+                              # futures keys (e.g. "SOL-PERP") join here when pricefeed writes them
 
 # Typing in the chat box builds thrust: the longer the note, the faster the
 # stars stream. It drains away when you stop; sending jumps to warp.

@@ -501,10 +501,13 @@ pub struct ChartCfg {
     /// Seconds per candle. The feed samples every 30 s, so 300 gives ten
     /// samples a candle and two hours of history fills ~24 of them.
     pub bucket_s: f32,
+    /// Which prices.json keys get a row, top to bottom. Futures land as
+    /// their own keys (e.g. "SOL-PERP") once pricefeed writes them (t146).
+    pub symbols: Vec<String>,
 }
 impl Default for ChartCfg {
     fn default() -> Self {
-        ChartCfg { show: true, bucket_s: 300.0 }
+        ChartCfg { show: true, bucket_s: 300.0, symbols: vec!["SOL".into(), "XRP".into()] }
     }
 }
 

@@ -164,7 +164,6 @@ pub fn candles(samples: &[(f64, f64)], bucket: f64) -> Vec<(f64, f32, f32, f32, 
     out
 }
 
-const CHART_SYMBOLS: [&str; 2] = ["SOL", "XRP"];
 const UP: [f32; 3] = [0.25, 0.9, 0.45];
 const DOWN: [f32; 3] = [1.0, 0.18, 0.12];
 
@@ -174,14 +173,20 @@ pub fn draw_candles(
     mods: Res<Mods>,
     layout: Res<Layout>,
     real: Res<Time<Real>>,
-    mut prices: Local<(f32, HashMap<String, Vec<(f64, f64)>>)>,
-    mut tags: Query<(&CandleTag, &mut Text2d, &mut Transform, &mut Visibility)>,
+    mut prices: Local<(f32, HashMap<String, Vec<(f64, f64)>>, String)>,
+    mut tags: Query<(Entity, &CandleTag, &mut Text2d, &mut Transform, &mut Visibility)>,
     mut gizmos: Gizmos,
 ) {
     let font = mods.cfg.chat.font;
-    if tags.is_empty() {
-        // First frame: one label per symbol, hidden until the panel shows.
-        for (i, _sym) in CHART_SYMBOLS.iter().enumerate() {
+    let symbols = &mods.cfg.chart.symbols;
+    let sig = symbols.join(",");
+    // The symbol rows are entities; when [chart] symbols changes (futures
+    // keys joining, t146) the old labels are replaced wholesale.
+    if sig != prices.2 || tags.is_empty() {
+        for (e, ..) in tags.iter() {
+            commands.entity(e).despawn();
+        }
+        for (i, _) in symbols.iter().enumerate() {
             commands.spawn((
                 CandleTag(i),
                 Text2d::new(""),
@@ -192,14 +197,15 @@ pub fn draw_candles(
                 Visibility::Hidden,
             ));
         }
+        prices.2 = sig;
         return;
     }
     let show = layout.right > 0.0
         && mods.cfg.chat.dock == mods::ChatDock::Bottom
-        && mods.cfg.chart.show;
+        && mods.cfg.chart.show
+        && !symbols.is_empty();
     if !show {
-        for (_, _, mut tf, mut vis) in tags.iter_mut() {
-            tf.translation = Vec3::ZERO;
+        for (_, _, _, _, mut vis) in tags.iter_mut() {
             *vis = Visibility::Hidden;
         }
         return;
@@ -211,28 +217,26 @@ pub fn draw_candles(
         prices.0 = now.max(1e-3);
     }
 
-    // The bottom ~30% of the panel, two rows: SOL on top, XRP below.
+    // The bottom ~30% of the panel, one row per symbol, top to bottom.
     let h = layout.half();
     let x0 = h.x;
     let full_h = layout.scene.y + layout.panel;
     let y_bot = h.y - full_h;
     let chart_h = (full_h * 0.3).clamp(140.0, 380.0);
     let y_top = y_bot + chart_h;
-    let row_h = chart_h * 0.5;
+    let rows = symbols.len() as f32;
+    let row_h = chart_h / rows;
     let inner_x = x0 + 16.0;
     let inner_w = (layout.right - 32.0).max(40.0);
     let bucket = mods.cfg.chart.bucket_s.max(30.0) as f64;
 
-    for (tag, mut text, mut tf, mut vis) in tags.iter_mut() {
-        let sym = CHART_SYMBOLS[tag.0];
-        // Row i=0 (SOL) sits on top: its plot band is [y_bot+row_h, y_top].
-        // Row i=1 (XRP) is [y_bot, y_bot+row_h]. A 16 px strip at each row's
-        // top holds the symbol and last price.
-        let (plot_lo, plot_hi, label_y) = if tag.0 == 0 {
-            (y_bot + row_h + 18.0, y_top - 4.0, y_top - 12.0)
-        } else {
-            (y_bot + 4.0, y_bot + row_h - 18.0, y_bot + row_h - 12.0)
-        };
+    for (_e, tag, mut text, mut tf, mut vis) in tags.iter_mut() {
+        let sym = symbols[tag.0].as_str();
+        // Row 0 is on top: it spans [y_top - row_h, y_top]. A 16 px strip at
+        // the row's top holds the symbol, last price and window change.
+        let row_top = y_top - row_h * tag.0 as f32;
+        let row_bot = row_top - row_h;
+        let (plot_lo, plot_hi, label_y) = (row_bot + 4.0, row_top - 16.0, row_top - 12.0);
         *vis = Visibility::Inherited;
         tf.translation = Vec3::new(inner_x, label_y, 10.0);
 
