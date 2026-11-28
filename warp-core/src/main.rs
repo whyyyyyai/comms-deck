@@ -2568,12 +2568,38 @@ fn draw_rings(
 
 /// The core breathes faster the more notes fly, and runs hotter as the
 /// crew's meters fill.
+/// Turn each warp entry into one colour sweep across the core's shadow.
+/// Repeated entries cannot restart a sweep already in progress.
+#[derive(Default)]
+struct CoreFlash {
+    warped: bool,
+    started: Option<f32>,
+}
+
+impl CoreFlash {
+    fn sample(&mut self, warp: f32, now: f32) -> f32 {
+        let age = self.started.map(|at| (now - at).clamp(0.0, 1.5));
+        let active = age.is_some_and(|age| age < 1.5);
+        let warped = warp > WARP_ACTIVE;
+        if warped && !self.warped && !active {
+            self.started = Some(now);
+        } else if !active {
+            self.started = None;
+        }
+        self.warped = warped;
+        // Zero leaves the shadow black. Otherwise the shader receives
+        // one plus the elapsed seconds, with a continuous fade envelope.
+        self.started.map_or(0.0, |at| 1.0 + (now - at).max(0.0))
+    }
+}
+
 fn pulse_core(
     mut deck: ResMut<Deck>,
     mods: Res<Mods>,
     time: Res<Time>,
     mut core: Query<(&mut Transform, &MeshMaterial2d<CoreMaterial>), With<Core>>,
     mut core_materials: ResMut<Assets<CoreMaterial>>,
+    mut flash: Local<CoreFlash>,
 ) {
     let c = mods.cfg.core.clone();
     let t = time.elapsed_secs();
@@ -2611,7 +2637,7 @@ fn pulse_core(
                 // cool.w carries the photon ring's flare (no new field, so
                 // the uniform's size and the shader's binding stay as they are).
                 cool: v4(c.cool, shape.flare),
-                hot: v4(c.hot, 1.0),
+                hot: v4(c.hot, flash.sample(warp, t)),
                 // The shader's churn runs on the core's own energy too.
                 // x is the disk's carried angle, not the clock (t29/Y 05:23).
                 params: Vec4::new(d.disk_angle, heat, warp, (pace.min(30.0) / 30.0).max(shape.state.energy.min(1.0))),
@@ -4133,6 +4159,18 @@ mod tests {
     /// Bevy refuses, at start, two queries in one system that could touch
     /// the same component mutably (B0001): 1.32 died in a restart loop on
     /// exactly that. Initialising the systems catches it without a GPU.
+    #[test]
+    fn core_flash_sweeps_once_per_warp_entry() {
+        let mut flash = CoreFlash::default();
+        assert_eq!(flash.sample(0.0, 1.0), 0.0);
+        assert_eq!(flash.sample(1.0, 2.0), 1.0);
+        assert_eq!(flash.sample(0.0, 2.25), 1.25);
+        assert_eq!(flash.sample(1.0, 2.5), 1.5);
+        assert_eq!(flash.sample(1.0, 3.5), 0.0);
+        assert_eq!(flash.sample(0.0, 4.0), 0.0);
+        assert_eq!(flash.sample(1.0, 5.0), 1.0);
+    }
+
     #[test]
     fn core_ticker_switches_through_static_in_both_directions() {
         let mut ticker = CoreTicker::default();
