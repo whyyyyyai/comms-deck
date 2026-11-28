@@ -103,7 +103,7 @@ fn main() {
             DefaultPlugins
                 .set(WindowPlugin {
                     primary_window: Some(Window {
-                        title: "warp core".into(),
+                        title: "Sol".into(),
                         // WARP_CORE_SCALE=1 draws at 1x on the 2x display: a
                         // quarter of the pixels for the GPU (a test, 06:31).
                         resolution: match std::env::var("WARP_CORE_SCALE").ok().and_then(|v| v.parse::<f32>().ok()) {
@@ -1445,7 +1445,7 @@ fn setup(
 
     commands.spawn((
         Hud,
-        Text2d::new("warp core: waiting for the deck"),
+        Text2d::new("Sol: waiting for the deck"),
         TextFont { font_size: FontSize::Px(15.0), ..default() },
         TextBounds::new_horizontal(800.0),
         TextColor(Color::srgb(0.55, 0.65, 0.8)),
@@ -3204,7 +3204,7 @@ fn hud(
     let mut line = String::new();
     if mods.cfg.hud.show && view.hud {
         line = format!(
-            "WARP CORE {}  {:.0} fps    {} online | {} busy | {} waiting | {} notes in the last hour",
+            "SOL {}  {:.0} fps    {} online | {} busy | {} waiting | {} notes in the last hour",
             version(),
             fps.2,
             online.len(),
