@@ -1,0 +1,19 @@
+# webcam-feed: ffmpeg reads the camera and writes the newest frame to
+# ~/.local/state/warp-core/webcam/ for the warp core's top-left panel (Y,
+# t156). No root: the camera node is group-accessible.
+#
+#   systemctl --user enable --now webcam-feed.service
+#   journalctl --user -u webcam-feed -f
+#
+# Written by: devin (Y, t156, 2026-11-28)
+[Unit]
+Description=webcam-feed: camera frames for the warp core's top-left panel
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/webcam-feed
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
