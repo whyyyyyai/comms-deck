@@ -36,6 +36,7 @@
 
 mod chat;
 mod feed;
+mod kitten;
 mod mods;
 mod sys;
 
