@@ -32,9 +32,25 @@ impl LeftTab {
     }
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct Left {
     pub tab: LeftTab,
+}
+
+impl Default for Left {
+    /// The tab Y was last on: a reinstall restarts the warp core, and it used
+    /// to come back on F4 every time (Y couldn't see TASKS on screenshots).
+    fn default() -> Self {
+        let tab = std::fs::read_to_string(tab_file())
+            .ok()
+            .and_then(|t| LeftTab::ALL.iter().copied().find(|x| x.name() == t.trim()))
+            .unwrap_or_default();
+        Left { tab }
+    }
+}
+
+fn tab_file() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/state/warp-core/left-tab")
 }
 
 /// The panel's width for a window, or 0 when it's off.
@@ -89,6 +105,136 @@ pub fn crew_text(seats: &[SeatInfo], tasks: &[feed::TaskInfo]) -> String {
     s
 }
 
+/// A task's title as a person would write it (t87, Y: "it should be human
+/// readable"): the board keeps the first words of Y's chat line, so drop the
+/// lead-in ("Right, once those are done,", "can you", "we need a", "let's",
+/// "@claude") and start with a capital.
+pub fn clean_title(raw: &str) -> String {
+    let mut t = raw.trim().trim_end_matches('…').trim().to_string();
+    let fillers = [
+        "right,", "right", "okay,", "okay", "ok,", "ok", "so,", "so", "hey,", "please", "and", "also,", "also",
+        "once those are done,", "once that's done,", "then,", "now,",
+        "can you please", "could you please", "can you", "could you", "can we", "could we",
+        "we need a", "we need an", "we need to", "we need", "i need", "i'd like to", "i'd like", "i want to",
+        "i think", "let's", "lets", "let us", "go ahead and", "make sure",
+    ];
+    loop {
+        let before = t.clone();
+        while t.starts_with('@') {
+            t = t.split_once(char::is_whitespace).map(|x| x.1.trim_start().to_string()).unwrap_or_default();
+        }
+        let lower = t.to_lowercase();
+        for f in fillers {
+            if lower.starts_with(f) && lower[f.len()..].starts_with(|c: char| c.is_whitespace() || c == ',') {
+                t = t[f.len()..].trim_start_matches([',', ' ']).to_string();
+                break;
+            }
+        }
+        if t == before {
+            break;
+        }
+    }
+    let mut c = t.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => raw.trim().to_string(),
+    }
+}
+
+/// Word-wrap to `cols`, at most `max_lines`, with an ellipsis if cut.
+pub fn wrap(text: &str, cols: usize, max_lines: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let mut cut = false;
+    for (i, w) in words.iter().enumerate() {
+        if !cur.is_empty() && cur.chars().count() + 1 + w.chars().count() > cols {
+            lines.push(std::mem::take(&mut cur));
+            if lines.len() == max_lines {
+                cut = i < words.len();
+                break;
+            }
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(w);
+    }
+    if !cur.is_empty() && lines.len() < max_lines {
+        lines.push(cur);
+    }
+    if cut || text.ends_with('…') {
+        if let Some(last) = lines.last_mut() {
+            while last.chars().count() + 1 > cols {
+                last.pop();
+            }
+            last.push('…');
+        }
+    }
+    lines
+}
+
+/// How long a task has been held, as a colour: dim while fresh, amber past
+/// 30 minutes, red past two hours.
+pub fn age_colour(secs: f64) -> [f32; 3] {
+    if secs >= 7200.0 {
+        [1.0, 0.38, 0.32]
+    } else if secs >= 1800.0 {
+        [1.0, 0.72, 0.3]
+    } else {
+        [0.55, 0.62, 0.75]
+    }
+}
+
+/// The TASKS tab as coloured runs: a summary line, then the open tasks (they
+/// need someone), then each holder's tasks under its name in its colour.
+/// Each task: "t82 · 1h 14m" coloured by age, then its cleaned title, wrapped.
+pub fn task_spans(tasks: &[feed::TaskInfo], now: f64, cols: usize) -> Vec<(String, Color)> {
+    let dim = Color::srgb(0.5, 0.58, 0.72);
+    let text = Color::srgb(0.82, 0.86, 0.94);
+    let mut out: Vec<(String, Color)> = Vec::new();
+    let age = |t: &feed::TaskInfo| t.since.map(|s| (now - s).max(0.0)).unwrap_or(0.0);
+    let open: Vec<&feed::TaskInfo> = tasks.iter().filter(|t| t.holder.is_none()).collect();
+    let oldest = tasks.iter().map(age).fold(0.0f64, f64::max);
+    if tasks.is_empty() {
+        out.push(("TASKS\n\nNothing on the board.\n".into(), dim));
+        return out;
+    }
+    out.push((
+        format!("TASKS   {} on the board · {} open · oldest {}\n", tasks.len(), open.len(), ago(oldest)),
+        dim,
+    ));
+    let card = |out: &mut Vec<(String, Color)>, t: &feed::TaskInfo| {
+        let a = age(t);
+        out.push((format!("\n  {} · {}\n", t.id, ago(a)), lin(age_colour(a), 1.0)));
+        let title = t.title.as_deref().map(clean_title).unwrap_or_else(|| "Private task".into());
+        for line in wrap(&title, cols.saturating_sub(4).max(16), 2) {
+            out.push((format!("  {line}\n"), text));
+        }
+    };
+    if !open.is_empty() {
+        out.push((format!("\nOPEN · needs someone · {}\n", open.len()), Color::srgb(1.0, 0.72, 0.3)));
+        for t in &open {
+            card(&mut out, t);
+        }
+    }
+    let mut holders: Vec<&str> = tasks.iter().filter_map(|t| t.holder.as_deref()).collect();
+    holders.sort();
+    holders.dedup();
+    for h in holders {
+        let mine: Vec<&feed::TaskInfo> = tasks.iter().filter(|t| t.holder.as_deref() == Some(h)).collect();
+        out.push((format!("\n{} · {}\n", label_for(h).to_uppercase(), mine.len()), seat_colour(h, 1.3)));
+        for t in mine {
+            card(&mut out, t);
+        }
+    }
+    out
+}
+
+/// The TASKS tab's text root: its coloured runs are child spans.
+#[derive(Component)]
+pub struct LeftTasks;
+
 /// netwatch's last word (~/.local/state/netwatch/status.json), as a line.
 pub fn net_line(status: Option<&serde_json::Value>, now_unix: f64) -> String {
     let Some(v) = status else { return "net    no netwatch status".into() };
@@ -116,8 +262,13 @@ fn read_net() -> Option<serde_json::Value> {
 /// F4-F6 pick the tab (F1-F3 stay the chat's).
 pub fn left_keys(keys: Res<ButtonInput<KeyCode>>, mut left: ResMut<Left>) {
     for (k, tab) in [(KeyCode::F4, LeftTab::System), (KeyCode::F5, LeftTab::Tasks), (KeyCode::F6, LeftTab::Crew)] {
-        if keys.just_pressed(k) {
+        if keys.just_pressed(k) && left.tab != tab {
             left.tab = tab;
+            let f = tab_file();
+            if let Some(dir) = f.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(f, tab.name());
         }
     }
 }
@@ -135,8 +286,10 @@ pub fn left_panel(
     real: Res<Time<Real>>,
     mut bg: Query<(&mut Transform, &mut Visibility), (With<LeftBg>, Without<LeftHeader>, Without<LeftBody>)>,
     mut header: Query<(&mut Text2d, &mut Transform, &mut Visibility), (With<LeftHeader>, Without<LeftBg>, Without<LeftBody>)>,
-    mut body: Query<(&mut Text2d, &mut Transform, &mut Visibility), (With<LeftBody>, Without<LeftBg>, Without<LeftHeader>)>,
+    mut body: Query<(&mut Text2d, &mut Transform, &mut Visibility), (With<LeftBody>, Without<LeftBg>, Without<LeftHeader>, Without<LeftTasks>)>,
+    mut tasks_text: Query<(Entity, &mut Transform, &mut Visibility), (With<LeftTasks>, Without<LeftBg>, Without<LeftHeader>, Without<LeftBody>)>,
     mut state: Local<(bool, f32, Option<serde_json::Value>)>,
+    mut drawn: Local<(String, f32)>,
 ) {
     let font = mods.cfg.left.font;
     if !state.0 {
@@ -153,6 +306,15 @@ pub fn left_panel(
         ));
         commands.spawn((
             LeftBody,
+            Text2d::new(""),
+            TextFont { font_size: FontSize::Px(font), ..default() },
+            TextColor(Color::srgb(0.5, 0.6, 0.75)),
+            Anchor::TOP_LEFT,
+            Transform::from_xyz(0.0, 0.0, 10.0),
+            Visibility::Hidden,
+        ));
+        commands.spawn((
+            LeftTasks,
             Text2d::new(""),
             TextFont { font_size: FontSize::Px(font), ..default() },
             TextColor(Color::srgb(0.5, 0.6, 0.75)),
@@ -193,7 +355,7 @@ pub fn left_panel(
         let (text, y) = match left.tab {
             // The stats themselves are the SysPanel text, placed above this.
             LeftTab::System => (net_line(state.2.as_ref(), unix), -h.y + 90.0),
-            LeftTab::Tasks => (String::new(), h.y - 50.0),
+            LeftTab::Tasks => (String::new(), h.y - 50.0), // drawn by LeftTasks below
             LeftTab::Crew => (crew_text(&deck.seats, &deck.tasks), h.y - 50.0),
         };
         if t.0 != text {
@@ -201,6 +363,29 @@ pub fn left_panel(
         }
         tf.translation.x = x0 + 14.0;
         tf.translation.y = y;
+    }
+    // TASKS: rebuilt when the board changes, and each minute for the ages.
+    let on_tasks = show && left.tab == LeftTab::Tasks;
+    let cols = ((layout.left - 28.0) / (font * 0.6)).max(20.0) as usize;
+    for (e, mut tf, mut vis) in &mut tasks_text {
+        *vis = if on_tasks { Visibility::Inherited } else { Visibility::Hidden };
+        tf.translation.x = x0 + 14.0;
+        tf.translation.y = h.y - 50.0;
+        if !on_tasks {
+            continue;
+        }
+        let key = format!("{:?}{cols}", deck.tasks);
+        if key == drawn.0 && now - drawn.1 < 30.0 {
+            continue;
+        }
+        *drawn = (key, now);
+        commands.entity(e).despawn_related::<Children>();
+        let spans = task_spans(&deck.tasks, unix, cols);
+        commands.entity(e).with_children(|p| {
+            for (text, colour) in spans {
+                p.spawn((TextSpan::new(text), TextColor(colour), TextFont { font_size: FontSize::Px(font), ..default() }));
+            }
+        });
     }
 }
 
@@ -211,12 +396,45 @@ pub fn place(layout: &Layout, left: &Left, tab: LeftTab, old: Vec2) -> (Vec2, bo
         return (old, true);
     }
     let h = layout.half();
-    (Vec2::new(-h.x - layout.left + 14.0, h.y - 50.0), left.tab == tab)
+    (Vec2::new(-h.x - layout.left + 14.0, h.y - 50.0), left.tab == tab && tab != LeftTab::Tasks)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn titles_read_like_a_person_wrote_them() {
+        assert_eq!(clean_title("Right, once those are done, can we resolve the task obiters on claude?"), "Resolve the task obiters on claude?");
+        assert_eq!(clean_title("we need a local script that ticks away checking to see if we're conne…"), "Local script that ticks away checking to see if we're conne");
+        assert_eq!(clean_title("@claude let's start building the left panel"), "Start building the left panel");
+        assert_eq!(clean_title("Fix the ring"), "Fix the ring");
+        assert_eq!(clean_title("okay"), "Okay");
+    }
+
+    #[test]
+    fn wrap_keeps_words_and_marks_a_cut() {
+        assert_eq!(wrap("one two three four", 9, 2), vec!["one two", "three…"]);
+        assert_eq!(wrap("short", 20, 2), vec!["short"]);
+    }
+
+    #[test]
+    fn task_spans_group_open_first_then_by_holder() {
+        let t = |id: &str, holder: Option<&str>, since: f64| feed::TaskInfo {
+            id: id.into(), title: Some("we need to fix it".into()), since: Some(since), from: "owner".into(), holder: holder.map(Into::into), open: holder.is_none(),
+        };
+        let spans = task_spans(&[t("t1", Some("vibe"), 0.0), t("t2", None, 900.0), t("t3", Some("claude"), 990.0)], 1000.0, 40);
+        let all: String = spans.iter().map(|s| s.0.as_str()).collect();
+        let open = all.find("OPEN").unwrap();
+        let claude = all.find("CLAUDE").unwrap();
+        let vibe = all.find("VIBE").unwrap();
+        assert!(open < claude && claude < vibe, "{all}");
+        assert!(all.starts_with("TASKS   3 on the board · 1 open · oldest 16m"), "{all}");
+        assert!(all.contains("Fix it"));
+        assert_eq!(age_colour(60.0), [0.55, 0.62, 0.75]);
+        assert_eq!(age_colour(3600.0), [1.0, 0.72, 0.3]);
+        assert_eq!(age_colour(9000.0), [1.0, 0.38, 0.32]);
+    }
 
     #[test]
     fn header_brackets_the_current_tab() {
