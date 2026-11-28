@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""pricefeed: SOL and XRP spot prices for the warp core's ticker. No AI.
+
+Y, 2026-11-28 (t121/t122): SOL at the core, XRP in warp, and the ticker
+should "flicker in according to price action ... relative distribution
+function of price action". Every 30 s this reads Coinbase's public spot
+price for each symbol (no account, nothing sent but the request) and
+keeps two hours of samples in ~/.local/state/warp-core/prices.json, which
+the warp core reads. A failed fetch keeps the last good samples.
+
+    pricefeed            run forever (warp-core-prices.service)
+    pricefeed --once     one fetch
+    pricefeed --self-test
+
+Written by: claude
+"""
+import json
+import os
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+SYMBOLS = ("SOL", "XRP")
+URL = "https://api.coinbase.com/v2/prices/{}-USD/spot"
+OUT = Path(os.environ.get("PRICEFEED_OUT", Path.home() / ".local/state/warp-core/prices.json"))
+EVERY_S = 30
+KEEP_S = 2 * 3600
+
+
+def fetch(symbol, timeout=10):
+    req = urllib.request.Request(URL.format(symbol), headers={"User-Agent": "warp-core-pricefeed/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return float(json.load(r)["data"]["amount"])
+
+
+def merge(doc, symbol, price, now):
+    """Add one sample, dropping ones older than KEEP_S. Pure: tested."""
+    hist = [s for s in (doc.get(symbol) or {}).get("history", []) if now - s[0] <= KEEP_S]
+    hist.append([round(now, 1), price])
+    doc[symbol] = {"price": price, "history": hist}
+    doc["time"] = now
+    return doc
+
+
+def once():
+    try:
+        doc = json.loads(OUT.read_text())
+    except (OSError, ValueError):
+        doc = {}
+    now = time.time()
+    for symbol in SYMBOLS:
+        try:
+            doc = merge(doc, symbol, fetch(symbol), now)
+        except (OSError, ValueError, KeyError) as error:
+            print(time.strftime("%H:%M:%S"), f"{symbol}: {error}", flush=True)
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    tmp = OUT.with_suffix(".tmp")
+    tmp.write_text(json.dumps(doc))
+    tmp.replace(OUT)
+
+
+def self_test():
+    doc = {}
+    for i, p in enumerate((70.0, 70.1, 69.9)):
+        doc = merge(doc, "SOL", p, 1000.0 + 30 * i)
+    doc = merge(doc, "SOL", 71.0, 1000.0 + KEEP_S + 45)
+    checks = [
+        ("samples kept in order, the price is the latest", doc["SOL"]["price"] == 71.0 and doc["SOL"]["history"][-1][1] == 71.0),
+        ("samples older than two hours are dropped", [s[1] for s in doc["SOL"]["history"]] == [69.9, 71.0]),
+        ("the other symbol is untouched", "XRP" not in doc),
+    ]
+    bad = 0
+    for name, ok in checks:
+        print(("ok  " if ok else "FAIL") + " " + name)
+        bad += not ok
+    print("all passed" if not bad else f"{bad} failed")
+    return bad == 0
+
+
+if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        sys.exit(0 if self_test() else 1)
+    if "--once" in sys.argv:
+        once()
+        sys.exit(0)
+    while True:
+        once()
+        time.sleep(EVERY_S)

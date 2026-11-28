@@ -1182,23 +1182,96 @@ impl CoreTicker {
     }
 }
 
+/// How surprising the latest price move is (Y, t122: "flicker in according
+/// to price action ... relative distribution function of price action"):
+/// where the newest move's size sits in the empirical distribution of the
+/// recent moves' sizes, 0 (as small as any) to 1 (bigger than all). None
+/// with too few samples. Pure: tested.
+fn price_surprise(history: &[(f64, f64)]) -> Option<(f32, f32)> {
+    let moves: Vec<f64> = history.windows(2).filter(|w| w[0].1 > 0.0 && w[1].1 > 0.0).map(|w| (w[1].1 / w[0].1).ln()).collect();
+    let (latest, past) = moves.split_last()?;
+    if past.len() < 8 {
+        return None;
+    }
+    let below = past.iter().filter(|m| m.abs() < latest.abs()).count() as f32;
+    let ties = past.iter().filter(|m| m.abs() == latest.abs()).count() as f32;
+    let cdf = (below + 0.5 * ties) / past.len() as f32;
+    Some((cdf, latest.signum() as f32))
+}
+
+/// The prices the pricefeed keeps (~/.local/state/warp-core/prices.json).
+fn read_prices() -> HashMap<String, Vec<(f64, f64)>> {
+    let path = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/state/warp-core/prices.json");
+    let Ok(text) = std::fs::read_to_string(path) else { return HashMap::new() };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return HashMap::new() };
+    let mut out = HashMap::new();
+    for sym in ["SOL", "XRP"] {
+        let hist: Vec<(f64, f64)> = v[sym]["history"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|s| Some((s.get(0)?.as_f64()?, s.get(1)?.as_f64()?))).collect())
+            .unwrap_or_default();
+        out.insert(sym.to_string(), hist);
+    }
+    out
+}
+
+/// A glitch frame for `sym` at strength 0..1: the stronger, the more of its
+/// letters turn to static. `k` picks which, deterministically.
+fn glitch_frame(sym: &str, strength: f32, k: u64) -> String {
+    const NOISE: [char; 8] = ['#', '%', '/', '+', '*', '=', '\\', '~'];
+    sym.chars()
+        .enumerate()
+        .map(|(i, c)| {
+            let h = (k ^ (i as u64).wrapping_mul(0x9E37_79B9)).wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33;
+            if (h % 100) as f32 / 100.0 < strength * 0.8 { NOISE[(h % 8) as usize] } else { c }
+        })
+        .collect()
+}
+
 fn update_core_ticker(
     deck: Res<Deck>,
     time: Res<Time>,
     mut ticker: Query<(&mut CoreTicker, &mut Text2d, &mut TextColor)>,
+    mut prices: Local<(f32, HashMap<String, Vec<(f64, f64)>>)>,
 ) {
+    let now = time.elapsed_secs();
+    if prices.0 == 0.0 || now - prices.0 > 5.0 {
+        prices.1 = read_prices();
+        prices.0 = now.max(1e-3);
+    }
     for (mut state, mut text, mut colour) in &mut ticker {
-        let (frame, static_on) = state.frame(deck.warp, time.elapsed_secs());
-        if text.0 != frame {
+        let (frame, static_on) = state.frame(deck.warp, now);
+        let sym = if state.warped { "XRP" } else { "SOL" };
+        let mut shown = frame.to_string();
+        let mut flick = false;
+        // Price flicker, between warp transitions: only a move out in the
+        // tail of the recent distribution flickers, more often and harder
+        // the further out it is. A typical move holds steady.
+        if !static_on {
+            if let Some((cdf, dir)) = prices.1.get(sym).and_then(|h| price_surprise(h)) {
+                let strength = ((cdf - 0.6) / 0.4).clamp(0.0, 1.0);
+                let slot = (now / TICKER_STATIC_FRAME) as u64;
+                let roll = (slot.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40) % 1000;
+                if strength > 0.0 && (roll as f32) < strength * strength * 180.0 {
+                    shown = glitch_frame(sym, strength, slot);
+                    flick = true;
+                    // Up moves flash green, down moves red: the direction.
+                    colour.0 = if dir >= 0.0 { Color::srgb(0.55, 1.0, 0.6) } else { Color::srgb(1.0, 0.45, 0.4) };
+                }
+            }
+        }
+        if text.0 != shown {
             text.0.clear();
-            text.0.push_str(frame);
-            colour.0 = if static_on {
-                Color::srgb(0.92, 0.95, 1.0)
-            } else if state.warped {
-                Color::srgb(0.78, 0.77, 1.0)
-            } else {
-                Color::srgb(0.65, 0.97, 0.89)
-            };
+            text.0.push_str(&shown);
+            if !flick {
+                colour.0 = if static_on {
+                    Color::srgb(0.92, 0.95, 1.0)
+                } else if state.warped {
+                    Color::srgb(0.78, 0.77, 1.0)
+                } else {
+                    Color::srgb(0.65, 0.97, 0.89)
+                };
+            }
         }
     }
 }
@@ -4799,6 +4872,24 @@ mod tests {
         // A single note too long for the strip is still shown.
         assert_eq!(notes_that_fit(&notes, 0, 20, 2), 1);
         assert_eq!(notes_that_fit(&VecDeque::new(), 0, 100, 6), 1);
+    }
+
+    #[test]
+    fn price_surprise_is_where_the_latest_move_sits_in_the_recent_ones() {
+        let h = |ps: &[f64]| ps.iter().enumerate().map(|(i, p)| (i as f64 * 30.0, *p)).collect::<Vec<_>>();
+        // Small wiggles, then a big jump up: far in the tail, upward.
+        let calm = [100.0, 100.1, 100.0, 100.1, 100.0, 100.1, 100.0, 100.1, 100.0, 100.1, 103.0];
+        let (cdf, dir) = price_surprise(&h(&calm)).unwrap();
+        assert!(cdf > 0.95 && dir > 0.0);
+        // The same wiggles, then another ordinary wiggle: in the middle.
+        let typical = [100.0, 100.1, 100.0, 100.2, 100.0, 100.05, 100.0, 100.15, 100.0, 100.1, 100.0];
+        assert!(price_surprise(&h(&typical)).unwrap().0 < 0.8);
+        // Too few samples: no verdict.
+        assert!(price_surprise(&h(&[1.0, 2.0, 3.0])).is_none());
+        // Glitches are deterministic and stronger means more static.
+        assert_eq!(glitch_frame("SOL", 0.0, 7), "SOL");
+        assert_eq!(glitch_frame("SOL", 1.0, 7), glitch_frame("SOL", 1.0, 7));
+        assert_ne!(glitch_frame("SOL", 1.0, 7), "SOL");
     }
 
     #[test]

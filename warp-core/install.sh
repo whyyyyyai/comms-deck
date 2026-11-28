@@ -35,7 +35,12 @@ mods="$HOME/.local/lib/warp-core/mods-1.$(cat "$it")"
 rm -rf "$mods.new" && cp -a "$here/mods" "$mods.new" && rm -rf "$mods" && mv "$mods.new" "$mods"
 ln -sfn "$mods" "$HOME/.config/warp-core/mods"
 cp "$here/warp-core.service" "$HOME/.config/systemd/user/warp-core.service"
+# The price feed for the core ticker (t122): its own small service, so the
+# warp core never waits on the network.
+cp "$here/pricefeed" "$lib/pricefeed.new" && mv -f "$lib/pricefeed.new" "$lib/pricefeed"
+cp "$here/warp-core-prices.service" "$HOME/.config/systemd/user/warp-core-prices.service"
 systemctl --user daemon-reload
+systemctl --user enable --now warp-core-prices >/dev/null 2>&1 || true
 # Live at once (Y, 2026-11-27: every improvement goes live when it's done;
 # a restart with each one is fine).
 # A restart opens a new GPU window: never on a GPU that has just faulted
