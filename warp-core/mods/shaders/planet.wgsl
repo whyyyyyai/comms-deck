@@ -47,7 +47,8 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let seed = planet.params.w * 91.0;
     let has_logo = planet.logo.x > 0.5;
     let bright = clamp(planet.logo.z, 0.2, 2.0);
-    if (busy < 0.5 && !has_logo) {
+    let jupiter = planet.logo.w > 1.5;
+    if (busy < 0.5 && !has_logo && !jupiter) {
         discard; // idle, no logo: the planet's own colour shows
     }
 
@@ -101,6 +102,32 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
+    // Jupiter (logo.w = 2; Claude's planet, Y: "your graphics for your
+    // planet should include a swirling of sorts"): cream and tan cloud
+    // bands flowing in alternate directions, all of it twisted round a
+    // Great Red Spot vortex that spins faster at work. Always on, idle too.
+    var jup = vec3<f32>(0.0);
+    var jup_a = 0.0;
+    if (jupiter) {
+        let spot = vec2<f32>(0.30, -0.30);
+        let d = p - spot;
+        let dr = length(d * vec2<f32>(1.0, 1.7));
+        let spin = t * (0.8 + 1.8 * work) * exp(-dr * 3.5);
+        let c = cos(spin);
+        let sn = sin(spin);
+        let q = spot + vec2<f32>(c * d.x - sn * d.y, sn * d.x + c * d.y);
+        let lat = q.y;
+        let flow = select(-1.0, 1.0, fract(lat * 3.5) > 0.5);
+        let u = q.x + flow * t * (0.04 + 0.10 * work) + 0.07 * sin(lat * 9.0 + t * 0.35);
+        let band = 0.5 + 0.5 * sin(lat * 22.0 + 1.6 * sin(u * 5.0 + lat * 3.0));
+        jup = mix(vec3<f32>(0.62, 0.42, 0.27), vec3<f32>(0.96, 0.87, 0.70), band);
+        let spot_m = 1.0 - smoothstep(0.09, 0.16, dr);
+        let eddy = 0.8 + 0.3 * sin(atan2(d.y, d.x) * 3.0 - t * (2.0 + 3.0 * work));
+        jup = mix(jup, vec3<f32>(0.82, 0.30, 0.17) * eddy, spot_m);
+        jup_a = (0.55 + 0.25 * busy) * (1.0 - smoothstep(0.78, 0.95, r));
+        swirl = swirl + vec2<f32>(-d.y, d.x) * exp(-dr * dr / 0.02) * 0.9;
+    }
+
     // The logo, rippled by the particles passing through it.
     var mask = 0.0;
     var logo_rgb = vec3<f32>(1.0);
@@ -133,7 +160,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // itself glowing steadily, brighter at work and where particles pass.
     let shade = select(0.0, 0.45, has_logo) * (1.0 - mask);
     let glow = mask * (0.55 + 0.6 * busy + 2.5 * light * busy + 3.5 * lava * busy) * bright;
-    let colour = logo_rgb * glow + particles;
-    let alpha = clamp(shade + mask + lit + core_glow, 0.0, 1.0) * edge;
+    let colour = logo_rgb * glow + particles + jup * jup_a * (1.0 - mask);
+    let alpha = clamp(shade + mask + lit + core_glow + jup_a, 0.0, 1.0) * edge;
     return vec4<f32>(colour, alpha);
 }

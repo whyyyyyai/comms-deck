@@ -3190,9 +3190,10 @@ fn drive_planets(
                             // Mercury bubbles with lava while it works
                             // (Y, t140): the shader reads logo.w as the
                             // lava flag.
-                            if node.name == "vibe" { 1.0 } else { 0.0 },
+                            // Jupiter (claude) swirls: logo.w = 2.
+                            planet_style(&node.name),
                         ),
-                        None => Vec4::new(0.0, 0.0, 0.0, if node.name == "vibe" { 1.0 } else { 0.0 }),
+                        None => Vec4::new(0.0, 0.0, 0.0, planet_style(&node.name)),
                     },
                 };
             }
@@ -4249,6 +4250,17 @@ fn chat_input(
                 }
             }
         }
+    }
+}
+
+/// Which surface a planet's shader draws (its logo.w): 1 Mercury's lava
+/// (vibe, t140), 2 Jupiter's swirling bands and storm (claude, Y 08:46),
+/// 0 the default sparks.
+fn planet_style(seat: &str) -> f32 {
+    match seat {
+        "vibe" => 1.0,
+        "claude" => 2.0,
+        _ => 0.0,
     }
 }
 
