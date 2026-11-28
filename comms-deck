@@ -3205,6 +3205,13 @@ def ago(seconds):
     return f"{seconds // 3600}h ago"
 
 
+# Gauges that don't stop the agent when full. `monthly` is Vibe's Mistral
+# allowance read off its footer: at 100% Vibe goes on on a free model, so a
+# full one isn't spent (Y, 2026-11-27: Vibe showed offline on the warp core
+# while it worked). The bar still draws it.
+SOFT_LIMITS = ("monthly",)
+
+
 def limit_reset(data, now=None):
     """When a full plan limit in `data` resets: a time, math.inf if unknown, or None.
 
@@ -3216,8 +3223,8 @@ def limit_reset(data, now=None):
     if not isinstance(limits, dict):
         return None
     latest = None
-    for entry in limits.values():
-        if not isinstance(entry, dict):
+    for key, entry in limits.items():
+        if not isinstance(entry, dict) or key in SOFT_LIMITS:
             continue
         used = entry.get("used_percentage")
         if isinstance(used, bool) or not isinstance(used, (int, float)) or used < 100:
@@ -3420,8 +3427,13 @@ def activity_view(state, usage_data, now=None, waiting=0, marked=None):
     time), draws spent, in red. Otherwise idle with notes waiting is stuck.
     Spent wins: an agent that can't run isn't stuck. This does not write the
     seat file, so wake and the loop guard still see idle, busy or away.
+    A full gauge on a busy seat isn't drawn spent: the agent is plainly
+    running (Vibe goes on on a free model with its monthly allowance at
+    100%, Y 2026-11-27, and showed as offline on the warp core). A
+    `comms-deck spent` mark still wins, since someone set it by hand.
     """
-    if limit_spent(usage_data, now) or marked is not None:
+    gauge_full = limit_spent(usage_data, now) and state != "busy"
+    if gauge_full or marked is not None:
         return "○", "spent", 245  # a grey empty circle: out of usage until its reset (the owner's choice)
     mark, shade, word = row_status(state, waiting)
     return mark, (word or "")[:13], shade
@@ -8277,6 +8289,9 @@ def self_test():
         "assert x.limit_spent({'rate_limits': {'five_hour': full((future) * 1000)}}, now)",
         "assert not x.limit_spent({'rate_limits': {'five_hour': {'used_percentage': True, 'resets_at': future}}}, now)",
         "assert x.activity_view('idle', {'rate_limits': {'five_hour': full(future)}}, now) == ('○', 'spent', 245)",
+        "assert x.activity_view('busy', {'rate_limits': {'monthly': {'used_percentage': 100}}}, now)[1] == 'busy', 'a busy seat on a full gauge is running'",
+        "assert x.activity_view('busy', {}, now, marked=future)[1] == 'spent', 'a hand mark still wins'",
+        "assert x.activity_view('idle', {'rate_limits': {'monthly': {'used_percentage': 100}}}, now)[1] == 'idle', 'a full monthly gauge (Vibe) isn\\'t spent'",
         "assert x.activity_view('busy', {'rate_limits': {'five_hour': full(past)}}, now)[1] == 'busy'",
         "assert x.activity_view('idle', {}, now, waiting=3) == ('●', 'stuck', 196)",
         "assert x.activity_view('idle', {'rate_limits': {'five_hour': full(future)}}, now, waiting=3)[1] == 'spent'",
