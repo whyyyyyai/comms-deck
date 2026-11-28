@@ -455,6 +455,27 @@ def load_seat(seat):
     return state
 
 
+_windows_cache = {"at": 0.0, "classes": None}
+
+
+def window_classes(now=None):
+    """The classes of the windows open on the Hyprland desktop, or None when
+    Hyprland can't be asked (no session, no hyprctl). Cached for 3 s: the
+    status snapshot asks for every seat every 2 s."""
+    now = time.time() if now is None else now
+    if now - _windows_cache["at"] < 3.0:
+        return _windows_cache["classes"]
+    classes = None
+    try:
+        out = subprocess.run(["hyprctl", "clients", "-j"], capture_output=True, text=True, timeout=3)
+        if out.returncode == 0:
+            classes = {c.get("class", "") for c in json.loads(out.stdout or "[]")}
+    except (OSError, ValueError, subprocess.SubprocessError):
+        classes = None
+    _windows_cache.update(at=now, classes=classes)
+    return classes
+
+
 def app_seat_state(seat):
     """Busy or idle when the Grok Bot page was just read. Otherwise
     'connected' if a comms-deck MCP server is running for this seat,
@@ -471,6 +492,13 @@ def app_seat_state(seat):
             "busy", "idle", "away", "not connected", "chat not open", "no chat yet", "draft in box"):
         return state["state"]
     if APP_PROCESS.get(seat, "grok-bot") != "grok-bot":
+        # Its window closed means away, even if the app (and its MCP server)
+        # lives on in the tray: Y, t79, "when lumo's window is closed I don't
+        # think lumo should appear in the warp drive". Window classes come
+        # from Hyprland; without it this check is skipped.
+        classes = window_classes()
+        if classes is not None and APP_PROCESS[seat] not in classes:
+            return "away"
         # Not a Grok Bot seat: it can only connect through its own app's MCP.
         # Nothing tells us when its turn ends, so busy is time-based: it set
         # a status in the last MCP_BUSY_FOR seconds. Otherwise idle.
@@ -8066,6 +8094,15 @@ def self_test():
         "assert len(list((x.DATA/'inbox'/'claude').glob('*.json')))==1",
         "x.update_seat('alice', state='idle', app_seen=x.time.time())",
         "assert x.app_seat_state('alice')=='idle'",
+        # t79: an own-app seat whose window is closed is away, even while its
+        # app runs on in the tray; open, it falls through to the MCP check.
+        "x.APP_PROCESS['winseat'] = 'some-app'",
+        "x._windows_cache.update(at=x.time.time() + 60, classes={'kitty'})",
+        "assert x.app_seat_state('winseat')=='away'",
+        "x._windows_cache.update(at=x.time.time() + 60, classes={'kitty', 'some-app'})",
+        "assert x.app_seat_state('winseat')=='not set up'",
+        "x._windows_cache.update(at=x.time.time() + 60, classes=None)",
+        "assert x.app_seat_state('winseat')=='not set up'",
         "print('ok')",
     ])
     r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=30)
