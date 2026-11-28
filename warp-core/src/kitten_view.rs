@@ -249,7 +249,11 @@ pub fn kitten_step(
     let dt = real.delta_secs().max(1e-4);
     kit.fps = kit.fps * 0.95 + (1.0 / dt) * 0.05;
     let now = time.elapsed_secs();
-    kit.anchor = if cfg.enable { ring_positions(&deck.roster, layout.scene, deck.orbit).get(SEAT).map(|(p, _)| *p) } else { None };
+    // Only while her window is open (Y, t79: "when lumo's window is closed
+    // I don't think lumo should appear in the warp drive. Same goes vice
+    // versa."). The deck calls an app seat with no window "away".
+    let present = deck.seat(SEAT).is_some_and(|s| s.state != "away" && s.shown != "away");
+    kit.anchor = if cfg.enable && present { ring_positions(&deck.roster, layout.scene, deck.orbit).get(SEAT).map(|(p, _)| *p) } else { None };
     let Some(anchor) = kit.anchor else {
         for (_, _, mut vis) in &mut text {
             *vis = Visibility::Hidden;
