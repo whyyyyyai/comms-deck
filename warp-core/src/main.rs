@@ -1407,6 +1407,7 @@ fn label_for(name: &str) -> String {
         "lumo" => "Proton".into(),
         "claude" => "Jupiter".into(),
         "vibe" => "Mercury".into(),
+        "codex" => "Saturn".into(),
         _ => name.into(),
     }
 }
