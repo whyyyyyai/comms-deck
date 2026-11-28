@@ -518,9 +518,11 @@ pub struct CometsCfg {
     pub trail: usize,
     pub brightness: f32,
     pub size: f32,
-    /// "trail" is the comet's fading tail; "laser" fires the packet as a
-    /// bolt: a short bright lance behind the head (Y, t138).
+    /// "trail" keeps the missile trail; "laser" fires every packet as a
+    /// bolt; "mixed" deterministically samples individual packets.
     pub style: String,
+    /// Fraction of packets fired as lasers when style is "mixed" (0..=1).
+    pub laser_probability: f32,
     /// How far back the laser's lance reaches, in world units.
     pub laser_len: f32,
     /// The lance's thickness, in world units.
@@ -528,7 +530,7 @@ pub struct CometsCfg {
 }
 impl Default for CometsCfg {
     fn default() -> Self {
-        CometsCfg { seconds: 1.8, trail: 28, brightness: 5.0, size: 1.0, style: "trail".into(), laser_len: 90.0, laser_width: 5.0 }
+        CometsCfg { seconds: 1.8, trail: 28, brightness: 5.0, size: 1.0, style: "mixed".into(), laser_probability: 0.15, laser_len: 90.0, laser_width: 5.0 }
     }
 }
 
