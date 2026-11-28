@@ -174,9 +174,10 @@ font = 14
 
 [chat]
 show = true
-height = 0.2                   # share of the window's height: the bottom strip of the central column (F1 Comms)
-side = true                    # the right panel for F2 Activity and F3 Notify (off: they show in the strip)
-width = 0.22                   # the right panel's share of the window's width
+height = 0.2                   # bottom dock: share of the window's height
+dock = "bottom"               # "bottom" = strip (F1) + right panel (F2/F3); "right" = one column with all tabs
+side = true                    # bottom dock only: the right panel for F2 Activity and F3 Notify
+width = 0.22                   # the right panel's share of the window's width (or the column's, dock = "right")
 font = 14
 keep = 200                    # notes kept for scrolling back
 

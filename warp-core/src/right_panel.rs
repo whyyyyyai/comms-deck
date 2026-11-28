@@ -73,7 +73,9 @@ pub fn right_panel(
         ));
         state.0 = true;
     }
-    let show = layout.right > 0.0;
+    // Only the bottom dock has a side panel; dock = "right" puts every tab
+    // in the chat column instead.
+    let show = layout.right > 0.0 && mods.cfg.chat.dock == mods::ChatDock::Bottom;
     let want = if show { Visibility::Inherited } else { Visibility::Hidden };
     let h = layout.half();
     // The panel's left edge: the scene's right edge. It runs the window's full
