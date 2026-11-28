@@ -376,54 +376,232 @@ def session_key(data):
     return hashlib.sha256(raw.encode()).hexdigest()[:8] if raw else "-"
 
 
-def record_subagent(seat, event, data, now=None):
-    """Start or stop a subagent orbital for `seat`, under a lock."""
+def orbital_boot():
+    """Return a short identifier for the Linux boot that owns an active lease."""
+    try:
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        return ""
+    return hashlib.sha256(boot.encode()).hexdigest()[:12]
+
+
+def reconcile_orbitals(items, now, boot, standing):
+    """Drop expired task entries and park durable entries with no active lease."""
+    result = []
+    task_states = {}
+    for original in items:
+        if not isinstance(original, dict):
+            continue
+        row = dict(original)
+        lifetime = row.get("lifetime", "task")
+        if lifetime == "standing" and row.get("id") not in standing:
+            lifetime = row["lifetime"] = "resumable"
+        task = row.get("task")
+        if isinstance(task, str) and re.fullmatch(r"t[0-9]{1,6}", task):
+            if task not in task_states:
+                task_states[task] = (read_json(DATA / "tasks" / f"{task}.json", {}) or {}).get("state")
+            finished = task_states[task] == "done"
+        else:
+            finished = False
+        expired = now - float(row.get("since") or 0) >= SUBAGENT_EXPIRE
+        rebooted = bool(boot and row.get("boot") and row["boot"] != boot)
+        if finished or expired or rebooted:
+            if lifetime == "task":
+                continue
+            row.update(active=False, state="stopped")
+        result.append(row)
+    return result
+
+
+def update_orbitals(change=None, now=None):
+    """Reconcile the registry and optionally apply a mutation under one lock."""
     now = time.time() if now is None else now
-    entry = subagent_entry(seat, data, now)
-    if entry is None and event != "SessionEnd":
-        return
+    boot = orbital_boot()
+    allowed = read_json(CONFIG / "standing-orbitals.json", [])
+    standing = {oid for oid in allowed if isinstance(oid, str)} if isinstance(allowed, list) else set()
     path = DATA / "subagents.json"
+    if change is None and not path.exists():
+        return None
     DATA.mkdir(parents=True, exist_ok=True)
     with open(DATA / "subagents.lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        items = (read_json(path, {}) or {}).get("subagents") or []
-        items = [i for i in items if isinstance(i, dict) and now - float(i.get("since") or 0) < SUBAGENT_EXPIRE]
+        previous = (read_json(path, {}) or {}).get("subagents") or []
+        items = reconcile_orbitals(previous, now, boot, standing)
+        outcome = change(items, now, boot, standing) if change is not None else None
+        if items != previous:
+            write_json(path, {"time": now, "subagents": items})
+        return outcome
+
+
+def orbital_room(items, seat, preserve_existing=False):
+    """Make room for one orbital, preserving durable profiles."""
+    mine = [row for row in items if row.get("parent") == seat]
+    if len(mine) < SUBAGENT_MAX:
+        return True
+    old = next((row for row in mine if row.get("lifetime", "task") == "task"), None)
+    if old is None or preserve_existing:
+        return False
+    items.remove(old)
+    return True
+
+
+def record_subagent(seat, event, data, now=None):
+    """Record a runtime hook under the same lock as manually managed orbitals."""
+    now = time.time() if now is None else now
+    entry = subagent_entry(seat, data, now)
+    if seat not in AGENTS or (entry is None and event != "SessionEnd"):
+        return
+
+    def change(items, now, boot, standing):
         if event == "SessionEnd":
             session = session_key(data)
-            # This session's orbitals only; with no session named, the seat's.
-            items = [i for i in items if not (i.get("parent") == seat and (session == "-" or i.get("session") == session))]
+            for row in list(items):
+                if row.get("parent") != seat or (session != "-" and row.get("session") != session):
+                    continue
+                if row.get("lifetime", "task") == "task":
+                    items.remove(row)
+                else:
+                    row.update(active=False, state="stopped")
         elif event == "SubagentStart":
-            items = [i for i in items if i.get("id") != entry["id"]] + [entry]
-            mine = [i for i in items if i.get("parent") == seat]
-            for old in mine[:-SUBAGENT_MAX]:
-                items.remove(old)
+            existing = next((row for row in items if row.get("id") == entry["id"]), None)
+            if existing is not None:
+                if existing.get("lifetime", "task") != "task":
+                    return
+                items.remove(existing)
+            if orbital_room(items, seat):
+                entry["boot"] = boot
+                items.append(entry)
         elif event == "SubagentStop":
-            items = [i for i in items if i.get("id") != entry["id"]]
-        write_json(path, {"time": now, "subagents": items})
+            items[:] = [row for row in items if row.get("id") != entry["id"] or row.get("lifetime", "task") != "task"]
+
+    update_orbitals(change, now)
 
 
-def orbital_cli(action, oid, kind, task, seat=None):
-    """`comms-deck orbital start|stop`: an agent that launches helpers itself
-    (a terminal, a CLI call; Y, t103) puts them on the warp core. The parent
-    is the seat whose agent is calling, never one named on the command line.
-    Start prints the id to stop it with."""
-    # Who's calling comes from the process tree only, never from an
-    # environment variable any process could set (Vibe's review): a process
-    # that isn't running under a seat's agent can't mint orbitals for it.
+def orbital_cli(action, oid, kind, task, seat=None, lifetime="task"):
+    """Register, park, resume or retire a helper without launching a process."""
     seat = seat or find_agent(trust_env=False)[0]
     if seat not in AGENTS:
         return json.dumps({"ok": False, "reason": "not run from a seat's agent"})
     session = f"cli:{seat}"
     if action == "start":
-        raw = secrets.token_hex(6)
-        data = {"agent_id": raw, "agent_type": kind, "task": task, "orbital_session": session}
-        record_subagent(seat, "SubagentStart", data)
-        entry = subagent_entry(seat, data, 0) or {}
-        return json.dumps({"ok": True, "id": raw, "orbital": entry.get("id"), "parent": seat, "task": entry.get("task")})
-    if not oid:
-        return json.dumps({"ok": False, "reason": "orbital stop needs the id start printed"})
-    record_subagent(seat, "SubagentStop", {"agent_id": oid, "orbital_session": session})
-    return json.dumps({"ok": True, "stopped": oid})
+        oid = secrets.token_hex(6)
+    elif not oid:
+        return json.dumps({"ok": False, "reason": f"orbital {action} needs the id start printed"})
+    data = {"agent_id": oid, "agent_type": kind, "task": task, "orbital_session": session}
+
+    def change(items, now, boot, standing):
+        entry = subagent_entry(seat, data, now)
+        if action == "start":
+            if task and "task" not in entry:
+                return {"ok": False, "reason": "unknown task"}
+            if entry.get("task") and (read_json(DATA / "tasks" / f"{entry['task']}.json", {}) or {}).get("state") == "done":
+                return {"ok": False, "reason": "task is already done"}
+            if not orbital_room(items, seat, preserve_existing=lifetime != "task"):
+                return {"ok": False, "reason": "orbital limit reached"}
+            entry.update(boot=boot, lifetime=lifetime, state="busy")
+            items.append(entry)
+            return {"ok": True, "id": oid, "orbital": entry["id"], "parent": seat, "task": entry.get("task")}
+
+        row = next((row for row in items if row.get("parent") == seat
+                    and row.get("session") == entry["session"]
+                    and row.get("id") in (oid, entry["id"])), None)
+        if row is None:
+            return {"ok": False, "reason": "no orbital with that ID for this seat"}
+        if action == "stop":
+            if row.get("lifetime") == "standing":
+                row.update(active=False, state="stopped")
+            else:
+                items.remove(row)
+        elif row.get("lifetime", "task") == "task":
+            return {"ok": False, "reason": "this orbital is task-bound"}
+        elif action == "park":
+            row.update(active=False, state="stopped")
+        elif action == "stand":
+            if row["id"] not in standing:
+                return {"ok": False, "reason": "orbital ID is not in standing-orbitals.json"}
+            row["lifetime"] = "standing"
+        elif action == "resume":
+            if task and "task" not in entry:
+                return {"ok": False, "reason": "unknown task"}
+            if task and (read_json(DATA / "tasks" / f"{task}.json", {}) or {}).get("state") == "done":
+                return {"ok": False, "reason": "task is already done"}
+            if row.get("task") != (task or None):
+                row.pop("reports_to", None)
+                row.pop("report_offer", None)
+            if task:
+                row["task"] = task
+            else:
+                row.pop("task", None)
+            row.update(active=True, state="busy", since=now, boot=boot)
+        else:
+            return {"ok": False, "reason": "unknown orbital action"}
+        return {"ok": True, "orbital": row["id"], "active": bool(row.get("active") and row in items),
+                "lifetime": row.get("lifetime", "task")}
+
+    return json.dumps(update_orbitals(change))
+
+
+def orbital_report(action, oid, to, seat=None):
+    """Offer, accept, or resolve an orbital's reporting relationship."""
+    from orbital_routing import Orbital, Reporter, RouteError, accept_reporter, resolve_reporter
+
+    seat = seat or find_agent(trust_env=False)[0]
+    if seat not in AGENTS:
+        return json.dumps({"ok": False, "reason": "not run from a seat's agent"})
+    if not re.fullmatch(r"[0-9a-f]{12}", oid):
+        return json.dumps({"ok": False, "reason": "use the opaque orbital ID printed as orbital"})
+    target_kind, _, target_id = to.partition(":")
+    if action == "report" and (target_kind not in ("seat", "orbital") or not target_id):
+        return json.dumps({"ok": False, "reason": "use --to seat:NAME or --to orbital:ID"})
+
+    def change(items, now, boot, standing):
+        live = {row["id"]: row for row in items if row.get("active") and row.get("boot") == boot and boot}
+        row = live.get(oid)
+        if row is None:
+            raise RouteError("source orbital is no longer live")
+        task = row.get("task")
+        if task:
+            board = read_json(DATA / "tasks" / f"{task}.json", {}) or {}
+            eligible = {name for name in (board.get("candidates") or []) if name in AGENTS}
+            if board.get("holder") in AGENTS:
+                eligible.add(board["holder"])
+        else:
+            eligible = set(AGENTS)
+        eligible.add(row["parent"])
+
+        orbitals = {key: Orbital(item["parent"], item.get("task")) for key, item in live.items()}
+        routes = {}
+        for key, item in live.items():
+            edge = item.get("reports_to")
+            if isinstance(edge, dict):
+                routes[key] = Reporter(edge.get("kind"), edge.get("id"))
+
+        if action == "report":
+            if row["parent"] != seat:
+                raise RouteError("only the launcher can propose a report target")
+            target = Reporter(target_kind, target_id)
+            resolve_reporter(oid, orbitals, {**routes, oid: target}, eligible)
+            row["report_offer"] = {"kind": target.kind, "id": target.id, "expires": now + 300}
+            return {"ok": True, "pending": True}
+        if action == "accept-report":
+            offer = row.get("report_offer") or {}
+            if offer.get("expires", 0) <= now:
+                raise RouteError("no unexpired reporting offer")
+            target = Reporter(offer["kind"], offer["id"])
+            if to != f"{target.kind}:{target.id}":
+                raise RouteError("reporting offer changed; specify its exact target with --to")
+            edge = accept_reporter(oid, target, row["parent"], seat, orbitals, routes, eligible)
+            row["reports_to"] = {"kind": edge.kind, "id": edge.id}
+            row.pop("report_offer")
+            return {"ok": True, "reports_to": row["reports_to"]}
+        if row["parent"] != seat:
+            raise RouteError("only the launcher can resolve a result destination")
+        return {"ok": True, "seat": resolve_reporter(oid, orbitals, routes, eligible)}
+
+    try:
+        return json.dumps(update_orbitals(change))
+    except RouteError as error:
+        return json.dumps({"ok": False, "reason": str(error)})
 
 
 def orbital_run(cmd, kind="subagent", task="", seat=None):
@@ -3118,6 +3296,10 @@ def serve():
                 log(f"welcome pass failed: {error}")
         if time.time() - last_usage >= 30:
             last_usage = time.time()
+            try:
+                update_orbitals()
+            except (OSError, ValueError, TypeError) as error:
+                log(f"couldn't reconcile orbitals: {error}")
             try:
                 refresh_grok_usage()
             except Exception as error:  # usage is a nicety; never stop the service for it
@@ -8393,7 +8575,7 @@ def self_test():
         "sub = x.read_json(x.DATA / 'subagents.json', {})['subagents']",
         "assert len(sub) == 1 and sub[0]['parent'] == 'claude' and sub[0]['kind'] == 'Explore' and sub[0]['active']",
         "assert 'SECRET' not in (x.DATA / 'subagents.json').read_text() and sub[0]['id'] != 'a1' and len(sub[0]['id']) == 12 and int(sub[0]['id'], 16) >= 0",
-        "assert set(sub[0]) == {'id', 'parent', 'session', 'kind', 'active', 'since'}",
+        "assert set(sub[0]) == {'id', 'parent', 'session', 'kind', 'active', 'since', 'boot'}",
         "x.record_subagent('claude', 'SubagentStart', {'agent_id': 'a2', 'agent_type': '<script>alert(1)</script>long-long-long-kind'}, now=1001.0)",
         "kinds = [i['kind'] for i in x.read_json(x.DATA / 'subagents.json', {})['subagents']]",
         "assert all(k.replace('-', '').replace('_', '').isalnum() and len(k) <= 24 for k in kinds), kinds",
@@ -8440,11 +8622,48 @@ def self_test():
         "assert seen == [n_before + 1] * 3, seen",
         "assert len(x.read_json(x.DATA / 'subagents.json', {})['subagents']) == n_before, 'stopped after success, failure and a missing program'",
         "assert x.orbital_run([], 'x', '', seat='devin') == 2",
+        # Vibe's review: a child killed outright (SIGKILL) still ends its orbital.
+        "assert x.orbital_run(['sh', '-c', 'kill -9 $$'], 'test', '', seat='devin') == -9",
+        "assert len(x.read_json(x.DATA / 'subagents.json', {})['subagents']) == n_before, 'stopped after SIGKILL of the child'",
         "real_name = x.proc_name; x.proc_name = lambda pid: 'bash'",  # a caller under no agent
         "x.os.environ['COMMS_DECK_SEAT'] = 'claude'",
         "assert x.find_agent()[0] == 'claude' and x.find_agent(trust_env=False)[0] is None",
         "assert not x.json.loads(x.orbital_cli('start', '', 'x', ''))['ok'], 'a spoofed seat is refused'",
         "del x.os.environ['COMMS_DECK_SEAT']; x.proc_name = real_name",
+        "boot = x.orbital_boot; x.orbital_boot = lambda: 'test-boot-a'",
+        "start = x.json.loads(x.orbital_cli('start', '', 'research', 't7', seat='codex', lifetime='resumable'))",
+        "short = x.json.loads(x.orbital_cli('start', '', 'test', 't7', seat='codex'))",
+        "assert start['ok'] and short['ok']",
+        "def orbital_row(oid):",
+        "    return next((r for r in x.read_json(x.DATA / 'subagents.json', {}).get('subagents', []) if r['id'] == oid), None)",
+        "x.orbital_boot = lambda: 'test-boot-b'; x.update_orbitals()",
+        "assert orbital_row(short['orbital']) is None and not orbital_row(start['orbital'])['active']",
+        "assert not x.json.loads(x.orbital_cli('resume', start['id'], '', '', seat='grok'))['ok']",
+        "assert x.json.loads(x.orbital_cli('resume', start['id'], '', 't7', seat='codex'))['active']",
+        "assert not x.json.loads(x.orbital_cli('stand', start['id'], '', '', seat='codex'))['ok']",
+        "x.write_json(x.CONFIG / 'standing-orbitals.json', [start['orbital']])",
+        "assert x.json.loads(x.orbital_cli('stand', start['id'], '', '', seat='codex'))['lifetime'] == 'standing'",
+        "x.write_json(x.DATA / 'tasks' / 't7.json', {'id': 't7', 'state': 'done'}); x.update_orbitals()",
+        "assert orbital_row(start['orbital'])['state'] == 'stopped' and orbital_row(start['orbital'])['lifetime'] == 'standing'",
+        "(x.CONFIG / 'standing-orbitals.json').unlink(); x.update_orbitals()",
+        "assert orbital_row(start['orbital'])['lifetime'] == 'resumable'",
+        "assert x.json.loads(x.orbital_cli('stop', start['id'], '', '', seat='codex'))['ok']",
+        "assert orbital_row(start['orbital']) is None",
+        "x.orbital_boot = boot",
+        "x.write_json(x.DATA / 'tasks' / 't8.json', {'state': 'held', 'holder': 'codex', 'candidates': ['codex', 'devin']})",
+        "a = x.json.loads(x.orbital_cli('start', '', 'research', 't8', seat='codex'))['orbital']",
+        "b = x.json.loads(x.orbital_cli('start', '', 'review', 't8', seat='devin'))['orbital']",
+        "report = lambda action, orb, target, seat: x.json.loads(x.orbital_report(action, orb, target, seat=seat))",
+        "assert not report('report', a, 'seat:grok', 'codex')['ok']",
+        "assert report('report', a, 'orbital:' + b, 'codex')['pending']",
+        "assert report('reporter', a, '', 'codex')['seat'] == 'codex'",
+        "assert not report('accept-report', a, 'orbital:' + b, 'codex')['ok']",
+        "assert not report('accept-report', a, 'seat:devin', 'devin')['ok']",
+        "assert report('accept-report', a, 'orbital:' + b, 'devin')['ok']",
+        "assert report('reporter', a, '', 'codex')['seat'] == 'devin'",
+        "assert not report('report', b, 'orbital:' + a, 'devin')['ok']",
+        "x.orbital_cli('stop', b, '', '', seat='devin')",
+        "assert not report('reporter', a, '', 'codex')['ok']",
         "assert x.task_summary('<system-reminder> fixing the chat layout now', []) == 'fixing the chat layout now'",
         "assert x.task_summary('<system-reminder>', [('p', {'text': 'merge the PR', 'private': False})]) == 'merge the PR'",
         "assert x.describe('<system-reminder>\\nhook text\\n</system-reminder>\\nreview PR 36') == 'review PR 36'",
@@ -9267,10 +9486,12 @@ def main():
     p = sub.add_parser("wake", help="one wake attempt for a seat (for watchdogs)")
     p.add_argument("seat")
     p.add_argument("--stale", action="store_true", help="treat a long-unchanged busy seat as idle")
-    p = sub.add_parser("orbital", help="start or stop a subagent orbital from a terminal or script (t103)")
-    p.add_argument("action", choices=["start", "stop", "run"])
+    p = sub.add_parser("orbital", help="register and manage a subagent orbital (start, stop, run -- CMD, park, resume, stand, report)")
+    p.add_argument("action", choices=["start", "stop", "run", "park", "resume", "stand", "report", "accept-report", "reporter"])
     p.add_argument("id", nargs="?", default="")
     p.add_argument("--kind", default="subagent")
+    p.add_argument("--lifetime", choices=["task", "resumable"], default="task")
+    p.add_argument("--to", default="", help="report target, seat:NAME or orbital:ID")
     p.add_argument("--task", default="")
     p.add_argument("command", nargs="*", help="run: the command after --")
     p = sub.add_parser("settle", help="match seats' busy/idle to what their windows show (for watchdogs)")
@@ -9353,7 +9574,10 @@ def main():
             if args.action == "run":
                 cmd = [c for c in ([args.id] if args.id else []) + args.command if c != "--"]
                 sys.exit(orbital_run(cmd, args.kind, args.task))
-            print(orbital_cli(args.action, args.id, args.kind, args.task))
+            if args.action in ("report", "accept-report", "reporter"):
+                print(orbital_report(args.action, args.id, args.to))
+            else:
+                print(orbital_cli(args.action, args.id, args.kind, args.task, lifetime=args.lifetime))
         elif args.cmd == "settle":
             print(json.dumps({"screen_turns": list(SCREEN_TURNS), "changed": settle_seats([x.lower() for x in args.seats] or None)}))
         elif args.cmd == "install":
