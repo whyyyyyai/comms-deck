@@ -2673,7 +2673,7 @@ fn fly_comets(
         let pending = std::mem::take(&mut deck.pending);
         for note in pending {
             let look = note_look(&mods.rules, &mods.cfg, &note);
-            deck.warp = deck.warp.max(look.warp);
+            deck.warp = stack_warp(deck.warp, look.warp + mods.cfg.warp.per_note, mods.cfg.warp.max);
             // An agent writing to Y boosts the stars; notes between agents
             // speed the ring up. Always clockwise, the way the core's disk
             // turns: a note never reverses the orbit (Y, t11).
@@ -3111,7 +3111,8 @@ fn hud(
         }
         if deck.warp > 0.05 {
             line.push_str(&format!("    >> WARP {:.1}", deck.warp));
-        } else if deck.thrust > 0.05 {
+        }
+        if deck.thrust > 0.05 {
             line.push_str(&format!("    thrust {:.0}%", deck.thrust * 100.0));
         }
         if vtime.is_paused() {
@@ -3461,8 +3462,10 @@ fn chat_input(
                 send_line(&mut chat, &deck, real.elapsed_secs());
                 // A note went out: jump to warp in proportion to its length.
                 if chat.sending > before && mods.cfg.typing.jump_on_send {
-                    deck.warp = deck.warp.max(send_jump(len, reach, &mods.cfg.typing));
-                    deck.thrust = 0.0;
+                    // Sending stacks onto any warp already running, and the
+                    // thrust built while typing keeps pushing (Y, t88:
+                    // "Thrust should continue to apply even when in warp").
+                    deck.warp = stack_warp(deck.warp, send_jump(len, reach, &mods.cfg.typing), mods.cfg.warp.max);
                 }
             }
             Key::Escape => {
@@ -3505,6 +3508,12 @@ fn chat_input(
 
 /// The warp a sent note jumps to: proportional to its length, capped.
 /// Warp drains at a steady rate, so the coast is proportional too.
+/// Warp after a kick of `add`: kicks stack (more notes, further warp, Y
+/// t88), up to `max`.
+fn stack_warp(warp: f32, add: f32, max: f32) -> f32 {
+    (warp + add.max(0.0)).min(max.max(0.0)).max(warp.min(max.max(0.0)))
+}
+
 fn send_jump(len: usize, reach: usize, cfg: &mods::TypingCfg) -> f32 {
     // The more agents a note reaches, the bigger the jump (Y, t9).
     let more = 1.0 + cfg.per_recipient * (reach.max(1) - 1) as f32;
@@ -4527,6 +4536,20 @@ mod tests {
         assert_eq!(recipients("all", &seats), 4, "every agent, not Y");
         assert_eq!(recipients("all -grok", &seats), 3);
         assert!(send_jump(100, 3, &cfg) > send_jump(100, 1, &cfg) * 2.5);
+    }
+
+    #[test]
+    fn notes_stack_warp_up_to_the_max() {
+        // t88: more notes, further warp; no longer just the biggest kick.
+        let mut w = 0.0;
+        for _ in 0..4 {
+            w = stack_warp(w, 0.15, 3.0);
+        }
+        assert!((w - 0.6).abs() < 1e-5);
+        assert_eq!(stack_warp(2.9, 1.0, 3.0), 3.0);
+        // A lowered max never yanks a running warp up, and never adds past it.
+        assert_eq!(stack_warp(0.5, 0.0, 3.0), 0.5);
+        assert_eq!(stack_warp(1.0, -2.0, 3.0), 1.0);
     }
 
     #[test]

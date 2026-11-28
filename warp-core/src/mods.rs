@@ -484,10 +484,15 @@ impl Default for CometsCfg {
 pub struct WarpCfg {
     pub decay: f32,
     pub on_broadcast: f32,
+    /// Warp every note adds, on top of a broadcast's kick (Y, t88: "more
+    /// messages warp the core further"): notes stack, they don't just top up.
+    pub per_note: f32,
+    /// The most warp can stack to.
+    pub max: f32,
 }
 impl Default for WarpCfg {
     fn default() -> Self {
-        WarpCfg { decay: 0.22, on_broadcast: 1.0 }
+        WarpCfg { decay: 0.22, on_broadcast: 1.0, per_note: 0.15, max: 3.0 }
     }
 }
 
