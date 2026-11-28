@@ -151,7 +151,7 @@ fn main() {
                     tooltip,
                     chat_results,
                     draw_chat,
-                    right_panel::right_panel,
+                    (right_panel::right_panel, right_panel::draw_candles).chain(),
                     health_log,
                 )
                     .chain(),

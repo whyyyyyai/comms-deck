@@ -491,6 +491,23 @@ impl Default for ChatCfg {
     }
 }
 
+/// The SOL/XRP candlestick chart pinned to the bottom of the right panel
+/// (Y, t145), built from the pricefeed's samples - the oracle is Coinbase
+/// spot, bucketed here into candles.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ChartCfg {
+    pub show: bool,
+    /// Seconds per candle. The feed samples every 30 s, so 300 gives ten
+    /// samples a candle and two hours of history fills ~24 of them.
+    pub bucket_s: f32,
+}
+impl Default for ChartCfg {
+    fn default() -> Self {
+        ChartCfg { show: true, bucket_s: 300.0 }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CometsCfg {
@@ -716,6 +733,7 @@ pub struct Config {
     pub hud: HudCfg,
     pub tasks: TasksCfg,
     pub chat: ChatCfg,
+    pub chart: ChartCfg,
     pub typing: TypingCfg,
     pub splash: SplashCfg,
     pub conduits: ConduitsCfg,

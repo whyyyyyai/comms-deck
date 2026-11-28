@@ -191,6 +191,13 @@ width = 0.22                   # the right panel's share of the window's width (
 font = 14
 keep = 200                    # notes kept for scrolling back
 
+# The SOL/XRP candlestick chart pinned to the bottom of the right panel
+# (Y, t145). Candles are bucketed from the pricefeed's 30 s samples -
+# Coinbase spot is the oracle.
+[chart]
+show = true
+bucket_s = 300                # seconds per candle: 10 samples each, ~24 fit two hours
+
 # Typing in the chat box builds thrust: the longer the note, the faster the
 # stars stream. It drains away when you stop; sending jumps to warp.
 [typing]
