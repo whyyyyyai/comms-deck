@@ -92,6 +92,7 @@ pub fn candidates(
         .collect()
 }
 
+#[derive(Clone, Debug, PartialEq)]
 pub struct Hop {
     pub index: u64,
     pub from: Vec2,
@@ -290,6 +291,11 @@ impl Queue {
         Some((&active.event, progress))
     }
 
+    /// Inspect the current event without changing the queue or its clock.
+    pub fn peek(&self) -> Option<&Event> {
+        self.active.as_ref().map(|active| &active.event)
+    }
+
     fn advance(&mut self, now: f32) {
         let mut start = now;
         if let Some(active) = &self.active {
@@ -467,8 +473,11 @@ mod tests {
         assert!(!queue.push("first", Event::Flash, 10.0));
         assert!(queue.push("second", relay.clone(), 10.1));
         assert_eq!(queue.current(10.5), Some((&Event::Catch, 0.5)));
+        assert_eq!(queue.peek(), Some(&Event::Catch));
         assert_eq!(queue.current(12.0), Some((&relay, 0.5)));
+        assert_eq!(queue.peek(), Some(&relay));
         assert_eq!(queue.current(13.0), None);
+        assert_eq!(queue.peek(), None);
         assert!(!queue.push("first", Event::Rattle, 13.0));
     }
 
