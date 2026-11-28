@@ -405,8 +405,8 @@ impl Default for KittenCfg {
     fn default() -> Self {
         KittenCfg {
             enable: true,
-            size: 14.0,
-            reach: 0.6,
+            size: 30.0,
+            reach: 0.22,
             base_dwell_s: 4.0,
             dwell_floor: 0.6,
             dwell_min_s: 1.5,
@@ -414,7 +414,7 @@ impl Default for KittenCfg {
             ghost_alpha: 0.25,
             ghost_min_fps: 30.0,
             yarn_max: 3,
-            catch_s: 0.6,
+            catch_s: 1.5,
             perch_s: 0.8,
             rattle_s: 0.4,
             relay_s: 1.2,

@@ -344,17 +344,32 @@ pub fn draw_kitten(mut kit: ResMut<KittenView>, deck: Res<Deck>, mods: Res<Mods>
             }
         }
         Some((Event::Catch, k)) => {
-            // Two paws up, and a sparkle.
-            let up = (k * std::f32::consts::PI).sin();
+            // Y, 00:52: "I don't see her catching it with both paws". From the
+            // screen recording the first version read as a small crown. Now:
+            // both arms swing wide and up to hold the note, a glowing ball,
+            // over her head; sparkles burst out from it and a ring flashes
+            // round her.
+            let up = (k * std::f32::consts::PI * 1.2).sin().max(0.0).max(if *k > 0.3 && *k < 0.8 { 1.0 } else { 0.0 });
+            let hold = body_at + Vec2::new(s * 0.15, s * (2.4 + 0.25 * up));
             for side in [-1.0f32, 1.0] {
-                g.line_2d(body_at + Vec2::new(side * s * 0.4, s * 0.3), body_at + Vec2::new(side * s * 0.7, s * (0.8 + up)), c);
+                let shoulder = body_at + Vec2::new(side * s * 0.55, s * 0.45);
+                let elbow = shoulder + Vec2::new(side * s * 0.75, s * (0.2 + 0.7 * up));
+                let paw = elbow.lerp(hold + Vec2::new(side * s * 0.42, -s * 0.05), up);
+                poly(&mut g, &[shoulder, elbow, paw], c);
+                g.circle_2d(Isometry2d::from_translation(paw), s * 0.17, c);
             }
-            for i in 0..6 {
-                let a = i as f32 * std::f32::consts::TAU / 6.0 + k * 2.0;
-                let r = s * (1.2 + 1.5 * k);
-                let sp = body_at + Vec2::new(0.0, s * 1.6) + Vec2::from_angle(a) * r * 0.4;
-                g.line_2d(sp, sp + Vec2::from_angle(a) * s * 0.3 * (1.0 - k), lin(base, 1.8 * (1.0 - k)));
+            if *k < 0.75 {
+                g.circle_2d(Isometry2d::from_translation(hold), s * 0.32, lin(base, 2.2));
+                g.circle_2d(Isometry2d::from_translation(hold), s * 0.18, lin([1.0, 1.0, 1.0], 1.5));
             }
+            let fade = 1.0 - k;
+            for i in 0..10 {
+                let a = i as f32 * std::f32::consts::TAU / 10.0 + 0.3;
+                let r0 = s * (0.45 + 1.4 * k);
+                let p0 = hold + Vec2::from_angle(a) * r0;
+                g.line_2d(p0, p0 + Vec2::from_angle(a) * s * 0.45 * fade, lin(base, 2.0 * fade));
+            }
+            g.circle_2d(Isometry2d::from_translation(body_at + Vec2::new(0.0, s * 0.6)), s * (1.4 + 1.6 * k), lin(base, 1.2 * fade).with_alpha(0.6 * fade));
         }
         Some((Event::Rattle, k)) => wiggle = *k * 10.0,
         Some((Event::Flash, k)) => {
