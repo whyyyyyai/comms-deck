@@ -386,6 +386,12 @@ impl Material2d for WebcamMaterial {
 /// The webcam quad and what the HUD needs to know about it.
 #[derive(Component)]
 struct WebcamQuad;
+/// The dark plate shown where the feed would be while the camera is off.
+#[derive(Component)]
+struct WebcamPlate;
+/// The CAM badge's backdrop and label: click toggles the camera (Y, t163).
+#[derive(Component)]
+struct WebcamBtn;
 
 #[derive(Resource, Default)]
 struct WebcamView {
@@ -401,10 +407,27 @@ struct WebcamView {
     seen: Option<(std::time::SystemTime, u64)>,
     /// The quad's material, so its texture binding can be swapped.
     material: Option<Handle<WebcamMaterial>>,
+    /// Camera toggled off from the CAM badge (~/.local/state/warp-core/webcam-off).
+    off: bool,
+    /// The badge's centre and half-size in world units, for the click test.
+    button: Option<(Vec2, Vec2)>,
+    /// The pointer is on the badge this frame: it brightens.
+    hover: bool,
+    /// The last on-screen size, so the badge has somewhere to sit while the
+    /// feed is off.
+    last_size: (f32, f32),
+}
+
+/// Where the camera's off-switch lives: the file's presence means off, so a
+/// click in warp-core and a `touch`/`rm` from a shell agree.
+fn webcam_off_file() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+        .join(".local/state/warp-core/webcam-off")
 }
 
 /// webcam-feed writes raw RGBA to ~/.local/state/warp-core/webcam/; pick the
 /// newest frame up and pin it, top-left of the scene, under a thin frame.
+/// The CAM badge on its top-left corner toggles the camera (Y, t163).
 fn webcam(
     mut commands: Commands,
     mods: Res<Mods>,
@@ -413,8 +436,12 @@ fn webcam(
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut mats: ResMut<Assets<WebcamMaterial>>,
+    mut colours: ResMut<Assets<ColorMaterial>>,
     mut view: ResMut<WebcamView>,
     mut quad: Query<(&mut Transform, &mut Visibility, &mut MeshMaterial2d<WebcamMaterial>), With<WebcamQuad>>,
+    mut plate: Query<(&mut Transform, &mut Visibility), (With<WebcamPlate>, Without<WebcamQuad>, Without<WebcamBtn>)>,
+    mut badge: Query<(&mut Transform, &mut Visibility), (With<WebcamBtn>, Without<WebcamPlate>, Without<WebcamQuad>)>,
+    mut badge_text: Query<&mut Text2d, (With<WebcamBtn>, Without<Mesh2d>)>,
     mut gizmos: Gizmos,
 ) {
     let cfg = &mods.cfg.webcam;
@@ -429,8 +456,34 @@ fn webcam(
             Transform::from_xyz(0.0, 0.0, 5.0),
             Visibility::Hidden,
         ));
+        commands.spawn((
+            WebcamPlate,
+            Mesh2d(meshes.add(Rectangle::new(1.0, 1.0))),
+            MeshMaterial2d(colours.add(Color::srgb(0.02, 0.025, 0.05))),
+            Transform::from_xyz(0.0, 0.0, 4.9),
+            Visibility::Hidden,
+        ));
+        let badge_bg = colours.add(Color::srgb(0.1, 0.14, 0.28));
+        commands.spawn((
+            WebcamBtn,
+            Mesh2d(meshes.add(Rectangle::new(58.0, 22.0))),
+            MeshMaterial2d(badge_bg),
+            Transform::from_xyz(0.0, 0.0, 6.0),
+            Visibility::Hidden,
+        ));
+        commands.spawn((
+            WebcamBtn,
+            Text2d::new(if view.off { "CAM OFF" } else { "CAM" }),
+            TextFont { font_size: FontSize::Px(11.0), ..default() },
+            TextColor(Color::srgb(0.75, 0.85, 1.0)),
+            Anchor::CENTER,
+            Transform::from_xyz(0.0, 0.0, 6.1),
+            Visibility::Hidden,
+        ));
     }
-    let mut show = false;
+    // The off-switch is a file so shell and click agree; check it cheaply.
+    view.off = webcam_off_file().exists();
+    let mut feed = false;
     let mut w = cfg.width.max(40.0);
     let mut h = w * 0.75;
     if cfg.show {
@@ -484,45 +537,84 @@ fn webcam(
                 }
             }
         }
-        if let Some(handle) = &view.handle {
-            show = true;
-            w = cfg.width.max(40.0);
-            h = w * view.size.1 as f32 / view.size.0.max(1) as f32;
-            for (mut tf, mut vis, _) in &mut quad {
-                *vis = Visibility::Inherited;
-                let hlf = layout.half();
-                // Top-left of the scene, a margin in, like the HUD was.
-                let cx = -hlf.x + 18.0 + w * 0.5;
-                let cy = hlf.y - 14.0 - h * 0.5;
-                tf.translation.x = cx;
-                tf.translation.y = cy;
-                tf.scale = Vec3::new(w, h, 1.0);
-            }
-            if let Some(mh) = &view.material {
-                if let Some(mut mat) = mats.get_mut(mh) {
-                    if mat.frame.as_ref() != Some(handle) {
-                        mat.frame = Some(handle.clone());
+        if !view.off {
+            if let Some(handle) = &view.handle {
+                feed = true;
+                w = cfg.width.max(40.0);
+                h = w * view.size.1 as f32 / view.size.0.max(1) as f32;
+                for (mut tf, mut vis, _) in &mut quad {
+                    *vis = Visibility::Inherited;
+                    let hlf = layout.half();
+                    // Top-left of the scene, a margin in, like the HUD was.
+                    tf.translation.x = -hlf.x + 18.0 + w * 0.5;
+                    tf.translation.y = hlf.y - 14.0 - h * 0.5;
+                    tf.scale = Vec3::new(w, h, 1.0);
+                }
+                if let Some(mh) = &view.material {
+                    if let Some(mut mat) = mats.get_mut(mh) {
+                        if mat.frame.as_ref() != Some(handle) {
+                            mat.frame = Some(handle.clone());
+                        }
                     }
                 }
             }
-            view.shown_h = h;
         }
-    }
-    if !show {
-        view.shown_h = 0.0;
+        for (_, mut vis, _) in &mut quad {
+            if !feed {
+                *vis = Visibility::Hidden;
+            }
+        }
+    } else {
         for (_, mut vis, _) in &mut quad {
             *vis = Visibility::Hidden;
         }
     }
-    if view.shown_h > 0.0 {
-        if let Some((tf, _, _)) = quad.iter().next() {
-            let half = Vec2::new(tf.translation.x, tf.translation.y);
-            gizmos.rect_2d(
-                Isometry2d::from_translation(half),
-                Vec2::new(w + 8.0, h + 8.0),
-                Color::linear_rgba(0.35, 0.45, 0.65, 0.8),
-            );
+    // The plate and the badge share the feed's rectangle: the plate is what
+    // shows while the camera is off (or has no signal yet), the badge rides
+    // its top-left corner either way.
+    let hlf = layout.half();
+    let (w, h) = if view.last_size.0 > 0.0 && !feed { view.last_size } else { (w, h) };
+    let cx = -hlf.x + 18.0 + w * 0.5;
+    let cy = hlf.y - 14.0 - h * 0.5;
+    let on_screen = cfg.show; // the badge lives whenever the section is enabled
+    if feed {
+        view.last_size = (w, h);
+    }
+    for (mut tf, mut vis) in &mut plate {
+        *vis = if on_screen && !feed { Visibility::Inherited } else { Visibility::Hidden };
+        tf.translation.x = cx;
+        tf.translation.y = cy;
+        tf.scale = Vec3::new(w, h, 1.0);
+    }
+    let badge_c = Vec2::new(cx - w * 0.5 + 12.0 + 29.0, cy + h * 0.5 - 12.0 - 11.0);
+    view.button = on_screen.then_some((badge_c, Vec2::new(29.0, 11.0)));
+    for (mut tf, mut vis) in &mut badge {
+        *vis = if on_screen { Visibility::Inherited } else { Visibility::Hidden };
+        tf.translation.x = badge_c.x;
+        tf.translation.y = badge_c.y;
+    }
+    let words = if view.off { "CAM OFF" } else { "CAM" };
+    for mut t in &mut badge_text {
+        if t.0 != words {
+            t.0 = words.into();
         }
+    }
+    // The plate holds the corner whether the camera is off or has no signal,
+    // so the HUD drops below it whenever the section is on screen.
+    view.shown_h = if on_screen { h } else { 0.0 };
+    if view.shown_h > 0.0 {
+        gizmos.rect_2d(
+            Isometry2d::from_translation(Vec2::new(cx, cy)),
+            Vec2::new(w + 8.0, h + 8.0),
+            Color::linear_rgba(0.35, 0.45, 0.65, 0.8),
+        );
+    }
+    if view.hover {
+        gizmos.rect_2d(
+            Isometry2d::from_translation(badge_c),
+            Vec2::new(62.0, 26.0),
+            Color::linear_rgba(0.6, 0.75, 1.0, 0.9),
+        );
     }
 }
 
@@ -2544,6 +2636,7 @@ fn layout_held_tasks(
 fn pointer(
     mut deck: ResMut<Deck>,
     mut chat: ResMut<Chat>,
+    mut webcam: ResMut<WebcamView>,
     layout: Res<Layout>,
     windows: Query<&Window>,
     cameras: Query<(&Camera, &GlobalTransform)>,
@@ -2585,6 +2678,21 @@ fn pointer(
                 chat.focus = true;
             }
         }
+        return;
+    }
+    // The CAM badge toggles the camera (Y, t163); its rect is from the last
+    // webcam pass, a frame stale at worst.
+    webcam.hover = world.is_some_and(|w| {
+        webcam.button.is_some_and(|(c, h)| (w - c).abs().cmple(h).all())
+    });
+    if webcam.hover && mouse.just_pressed(MouseButton::Left) {
+        let f = webcam_off_file();
+        if f.exists() {
+            let _ = std::fs::remove_file(&f);
+        } else {
+            let _ = std::fs::write(&f, "off\n");
+        }
+        webcam.off = f.exists();
         return;
     }
     deck.cursor = world;
