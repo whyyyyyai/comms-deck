@@ -80,6 +80,7 @@ fn words_with_prefix(text: &str, mark: char) -> Vec<String> {
             "jupiter" => "claude".into(),
             "mercury" => "vibe".into(),
             "saturn" => "codex".into(),
+            "venus" => "devin".into(),
             _ => name,
         });
     }
@@ -258,6 +259,8 @@ mod tests {
         assert_eq!(route("@all -Mercury", &seats()).unwrap(), "all -vibe");
         assert_eq!(route("@Saturn hello", &seats()).unwrap(), "codex");
         assert_eq!(route("@all -Saturn", &seats()).unwrap(), "all -codex");
+        assert_eq!(route("@VENUS hello", &seats()).unwrap(), "devin");
+        assert_eq!(route("@all -Venus", &seats()).unwrap(), "all -devin");
     }
 
     #[test]
