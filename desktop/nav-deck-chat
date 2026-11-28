@@ -6,6 +6,10 @@
 #   nav-deck-chat        fullscreen on the nav deck
 #   nav-deck-chat half   tiled on the nav deck, half the screen
 # Written by: vibe (2026-11-26)
+# The full view runs the Rust deck (deck/, the owner liked it 2026-11-26) when it has
+# been built; otherwise, or with NAV_DECK_PYTHON=1, the Python nav-deck as before.
+# The half view stays Python: deck has no half layout yet.
+# Nothing builds deck for you: after a pull, cd deck && cargo build --release.
 view=${1:-full}
 case "$view" in
     full)  class=nav-deck;      font=13; pad=14 ;;
@@ -14,9 +18,14 @@ case "$view" in
 esac
 hyprctl clients -j | grep -q "\"class\": \"$class\"" && exit 0
 cd "$HOME" || exit 1
+prog="$HOME/.local/bin/nav-deck"
+rust="$(dirname "$(readlink -f "$0")")/../deck/target/release/deck"
+if [ "$view" = full ] && [ -z "$NAV_DECK_PYTHON" ] && [ -x "$rust" ]; then
+    prog="$rust --view nav"
+fi
 kitty --class "$class" --title "nav-deck ($view)" \
     -o font_size=$font -o window_padding_width=$pad -o confirm_os_window_close=0 \
-    "$HOME/.local/bin/nav-deck" &
+    $prog &
 for _ in $(seq 1 40); do
     addr=$(hyprctl clients -j | python3 -c "import json,sys; print(next((c['address'] for c in json.load(sys.stdin) if c['class'] == '$class'), ''))" 2>/dev/null)
     [ -n "$addr" ] && break

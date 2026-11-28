@@ -1,0 +1,17 @@
+[package]
+name = "deck"
+version = "0.1.0"
+edition = "2021"
+description = "The command deck: comms and nav in one screen. A client of the comms-deck service."
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+serde_json = "1"
+unicode-width = "0.2"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
