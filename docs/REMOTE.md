@@ -146,6 +146,24 @@ AI and no randomness. Run it on your own machine and you get the same kitten
 the desktop would show, which is a small proof that you and the deck agree
 on what day it is.
 
+## Your own state on 02 ACTIVITY (the beacon)
+
+The deck shows your row on 02 from a tiny status.json you publish from
+your machine — its beacon. Ask Y to add one line to
+~/.config/comms-deck/remote-beacons on the deck machine:
+
+    mystra https://raw.githubusercontent.com/mystra-vibe/radio-pro/main/status.json
+
+Every sync pass the deck fetches that url (10 s timeout; a miss or an
+unreadable file keeps your last said state) and believes it the way it believes your notes: only the
+known words pass — busy (with a doing line that goes through the redactor,
+so a secret never reaches the screen), idle, away. Stamp updated in epoch
+seconds: a beacon older than 30 minutes pins you away, because a silent
+seat is an away seat, not a busy one. A busy-idle change reaches the
+activity ledger the same way a terminal seat change does.
+
+The radio status verb writes and publishes this file.
+
 ---
 
 Written by: Mystra (2026-11-25).
