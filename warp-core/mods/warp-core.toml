@@ -96,6 +96,11 @@ seconds = 1.8
 trail = 28
 brightness = 5
 size = 1.0
+# style = "laser" fires each note as a bolt: a lance of light behind the
+# head instead of the comet's fading tail (Y, t138).
+style = "trail"
+laser_len = 90                 # how far back the lance reaches
+laser_width = 5                # the lance's thickness
 
 [warp]
 decay = 0.22                  # warp lost per second
