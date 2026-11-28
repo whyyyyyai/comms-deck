@@ -2,10 +2,11 @@
 """scratchpad-layout: each agent on its own desktop, the warp core on the scratchpad.
 
     Super+`  comms   the terminal chat, fullscreen
-    Super+1  claude      Super+5  gravity
+    Super+1  claude      Super+5  codex
     Super+2  grok        Super+6  lumo
     Super+3  vibe        Super+7  alice (Grok Bot)
     Super+4  devin       Super+8  nav deck    Super+9  mail
+                         Super+0  gravity
     Super+S  the warp core, fullscreen on the scratchpad (special:magic)
 
 (Y, 2026-11-27: "agents on their own displays, Super-1 -2 -3 ..., and put
@@ -38,7 +39,7 @@ scratchpad-layout (no flag) to put everything back.
 
 Written by: Claude (2026-11-24)
 Written by: Alice (2026-11-25)
-Written by: Claude (2026-11-27, desktops per agent)
+Written by: Claude (2026-11-27, desktops per agent; codex on Super+5, gravity on Super+0: Y)
 """
 import json
 import subprocess
@@ -48,8 +49,8 @@ WORKSPACE = "special:magic"    # the scratchpad (Super+S): the warp core's
 # Desktops are numbered workspaces carrying names (default_name in
 # hyprland.lua), so the bar sorts them by number and shows the name.
 # Super+1..9,0 reach workspaces 2..11; comms (1) is on Super+`.
-DESKS = {"comms": 1, "claude": 2, "grok": 3, "vibe": 4, "devin": 5, "gravity": 6,
-         "lumo": 7, "alice": 8, "nav": 9, "mail": 10, "0": 11}
+DESKS = {"comms": 1, "claude": 2, "grok": 3, "vibe": 4, "devin": 5, "codex": 6,
+         "lumo": 7, "alice": 8, "nav": 9, "mail": 10, "gravity": 11}
 CHAT_WORKSPACE = "comms"       # comms-deck's own desktop, Super+`
 
 # (label, desktop, how to find its windows): ("run", program) is a kitty
@@ -59,6 +60,7 @@ AGENT_DESKS = [
     ("Grok", "grok", ("run", "grok")),
     ("Vibe", "vibe", ("run", "vibe-rs")),
     ("Devin", "devin", ("run", "devin")),
+    ("Codex", "codex", ("run", "codex")),
     ("Gravity", "gravity", ("run", "agy")),
     ("Lumo", "lumo", ("app", "lumo-desktop")),
     ("Alice", "alice", ("app", "grok-bot")),
@@ -353,13 +355,13 @@ def self_check():
     """Check the desktops and the plan. Does not talk to Hyprland or move windows."""
     assert ws_target("comms") == "1" and ws_target("claude") == "2"
     assert ws_target("alice") == "8" and ws_target("nav") == "9" and ws_target("mail") == "10"
-    assert ws_target("0") == "11"
+    assert ws_target("codex") == "6" and ws_target("gravity") == "11"
     assert ws_target("special:magic") == '"special:magic"'
     assert sorted(DESKS.values()) == list(range(1, 12))
     assert all(desk in DESKS for _, desk, _ in AGENT_DESKS)
-    # Agents on Super+1..7, in Y's order.
+    # Agents on Super+1..7 in Y's order, codex on 5 and gravity on 0.
     keys = [(DESKS[desk] - 1) % 10 for _, desk, _ in AGENT_DESKS]
-    assert keys == [1, 2, 3, 4, 5, 6, 7], keys
+    assert keys == [1, 2, 3, 4, 5, 0, 6, 7], keys
     # The keeper reopens a closed chat, at most once per REOPEN_EVERY.
     assert chat_missing([{"class": "kitty"}, {"class": "comms-deck-chat-half"}])
     assert not chat_missing([{"class": "comms-deck-chat"}])

@@ -75,10 +75,11 @@ OWNER_NAME = os.environ.get("NAVDECK_OWNER", "STOX")
 REFRESH_S = 1.0
 # Desktops are decks: numbered workspaces with names (STOX, 2026-11-26).
 # goto takes the label on the bar. Each agent has its own desktop on
-# Super+1..7, nav and mail on Super+8 and 9 (Y, 2026-11-27); the same map as
+# Super+1..7 (codex on 5) and gravity on Super+0, nav and mail on Super+8
+# and 9 (Y, 2026-11-27); the same map as
 # scratchpad-layout's DESKS.
-DESKS = {"comms": 1, "claude": 2, "grok": 3, "vibe": 4, "devin": 5, "gravity": 6,
-         "lumo": 7, "alice": 8, "nav": 9, "mail": 10, "0": 11}
+DESKS = {"comms": 1, "claude": 2, "grok": 3, "vibe": 4, "devin": 5, "codex": 6,
+         "lumo": 7, "alice": 8, "nav": 9, "mail": 10, "gravity": 11}
 
 
 def goto_target(label):
@@ -1394,7 +1395,8 @@ def self_test():
 
     # the flight keys: deck labels fly by number (claude's DESKS, #123)
     assert goto_target("comms") == "1" and goto_target("nav") == "9"
-    assert goto_target("mail") == "10" and goto_target("claude") == "2" and goto_target("0") == "11"
+    assert goto_target("mail") == "10" and goto_target("claude") == "2" and goto_target("gravity") == "11"
+    assert goto_target("codex") == "6"
     assert goto_target("somename") == '"name:somename"'
 
     # vitals maths: ~3 GiB free of 8, no swap, low-sample counter
