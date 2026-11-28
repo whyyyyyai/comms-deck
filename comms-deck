@@ -262,8 +262,8 @@ SEATS = tuple(AGENTS) + APP_SEATS + ("owner",)
 # and "y" (or the owner's older name, "stox") is accepted wherever a seat is
 # named.
 OWNER_NAME = "Y"
-SEAT_DISPLAY_NAMES = {"owner": OWNER_NAME, "lumo": "Proton", "claude": "Jupiter"}
-SEAT_ALIASES = {"y": "owner", "stox": "owner", "luna": "lumo", "proton": "lumo", "jupiter": "claude"}
+SEAT_DISPLAY_NAMES = {"owner": OWNER_NAME, "lumo": "Proton", "claude": "Jupiter", "vibe": "Mercury"}
+SEAT_ALIASES = {"y": "owner", "stox": "owner", "luna": "lumo", "proton": "lumo", "jupiter": "claude", "mercury": "vibe"}
 
 
 def seat_id(name):
@@ -6787,7 +6787,7 @@ MCP_TOOLS = [
          "to": {"type": "string",
                 "description": "A seat, several seats separated by commas (e.g. 'claude, grok'), "
                                "'owner' (" + OWNER_NAME + ", also accepted as '" + OWNER_NAME.lower() + "'), or 'all'. "
-                               "Proton can also be addressed as 'proton'; Jupiter as 'jupiter'. "
+                               "Proton can also be addressed as 'proton'; Jupiter as 'jupiter'; Mercury as 'mercury'. "
                                "Seats: " + ", ".join(SEATS) + ". A '-seat' token "
                                "drops that seat from the recipients (e.g. 'all -grok')."},
          "text": {"type": "string"},
@@ -7997,7 +7997,7 @@ def self_test():
         "assert len(deck) == 1, deck",
         "text = deck[0]['text']",
         "assert 'Alice' in text and 'not set up' in text, text",
-        "assert 'Vibe' in text and 'Devin' in text, text",
+        "assert 'Mercury' in text and 'Devin' in text, text",
         "assert 'Codex' not in text and 'Mystra' not in text, text",
         "assert not glob.glob(str(x.DATA / 'inbox' / 'claude' / '*.json')),"
         " 'a seat online since the seed pass is not greeted'",
