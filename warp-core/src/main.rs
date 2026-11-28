@@ -5250,7 +5250,7 @@ mod tests {
             });
         }
         let text: String = chat_spans(&notes, 0, 60).into_iter().map(|(t, _)| t).collect();
-        assert_eq!(text, "03:00 Jupiter -> all  note 0\n03:01 Y -> Mercury, devin  note 1\n03:02 Mercury -> Y  (quiet) note 2");
+        assert_eq!(text, "03:00 Jupiter -> all  note 0\n03:01 Y -> Mercury, Venus  note 1\n03:02 Mercury -> Y  (quiet) note 2");
         let back: String = chat_spans(&notes, 1, 60).into_iter().map(|(t, _)| t).collect();
         assert!(back.ends_with("note 1"), "scrolled back one note");
         let capped: String = chat_spans(&notes, 0, 1).into_iter().map(|(t, _)| t).collect();
