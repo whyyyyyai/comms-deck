@@ -1528,9 +1528,92 @@ def composer_text(screen):
     return nxt.replace("│", "").replace("\u00a0", " ").strip()
 
 
+# Seats whose turns the deck also reads off the screen. A seat's Stop hook is
+# what normally says a turn has ended; Codex runs new hooks only after Y
+# trusts them, and only in a session started after they were installed, so
+# without this it froze at busy (27 Nov, 22:32-22:58 and again at 23:01)
+# with notes queued and no green ring (Y, t69: "Codex should have a green
+# ring when it is available, and new messages sent to it should wake it").
+SCREEN_TURNS = tuple(x.strip() for x in setting("SCREEN_TURNS", "codex").split(",") if x.strip())
+SCREEN_IDLE_AFTER = 20       # s busy before the screen is believed over the state
+SCREEN_CHECK_EVERY = 5       # s between screen reads per seat
+WORKING_MARKS = ("esc to interrupt",)  # drawn by Codex (and Claude) while a turn runs
+_screen_checked = {}
+
+
+def screen_says_working(screen):
+    """True if a terminal agent's screen shows a turn running."""
+    tail = "\n".join(screen.splitlines()[-12:]).lower()
+    return any(mark in tail for mark in WORKING_MARKS)
+
+
+def screen_says_idle(screen):
+    """True if a terminal agent's screen shows it waiting: an empty prompt
+    and no turn running. A half-typed prompt, an approval question (no
+    prompt line) or a working line all say no."""
+    if composer_text(screen) != "":
+        return False
+    tail = "\n".join(screen.splitlines()[-12:]).lower()
+    return not any(mark in tail for mark in WORKING_MARKS)
+
+
+def settle_from_screen(seat, state, now=None, force=False):
+    """Make a SCREEN_TURNS seat's state match its window, both ways:
+    busy, but an idle prompt shown unchanged on two reads a second apart:
+    idle (its Stop hook never ran). Idle, but a turn running on screen (Y
+    typed into it, or a hook missed the prompt): busy, so no note is pasted
+    into the middle of a turn. Rate-limited per seat unless `force`.
+    Returns the (maybe new) state."""
+    now = time.time() if now is None else now
+    if seat not in SCREEN_TURNS or state["state"] not in ("busy", "idle"):
+        return state
+    since = max(float(state.get("since") or 0), float(state.get("woke_at") or 0))
+    if not force and (now - since < SCREEN_IDLE_AFTER or now - _screen_checked.get(seat, 0) < SCREEN_CHECK_EVERY):
+        return state
+    _screen_checked[seat] = now
+    socket, window = state.get("kitty_socket"), state.get("kitty_window")
+    if not socket or not window:
+        return state
+    read = lambda: drop_placeholders(kitty(socket, "get-text", "--match", f"id:{window}", "--ansi"))
+    try:
+        first = read()
+        if state["state"] == "idle":
+            if not screen_says_working(first):
+                return state
+            log(f"{seat}: its screen shows a turn running; marking it busy")
+            update_seat(seat, state="busy", doing="working (seen on screen)")
+            return load_seat(seat)
+        if not screen_says_idle(first):
+            return state
+        time.sleep(1.0)
+        second = read()
+    except (RuntimeError, OSError, subprocess.SubprocessError):
+        return state
+    if second != first or not screen_says_idle(second):
+        return state
+    log(f"{seat}: its screen shows an idle prompt; marking it idle")
+    update_seat(seat, state="idle", doing="")
+    return load_seat(seat)
+
+
+def settle_seats(seats=None):
+    """`comms-deck settle`: one forced screen check per seat, for watchdogs
+    (chronophage runs it every pass, so this works even if the service's own
+    loop is stuck). Returns [{seat, from, to}] for the seats it changed."""
+    changed = []
+    for seat in seats or SCREEN_TURNS:
+        if seat not in AGENTS:
+            continue
+        before = load_seat(seat)
+        after = settle_from_screen(seat, before, force=True)
+        if after["state"] != before["state"]:
+            changed.append({"seat": seat, "from": before["state"], "to": after["state"]})
+    return changed
+
+
 def try_wake(seat):
     """If `seat` is idle with a normal note waiting, paste it in. True if done."""
-    state = load_seat(seat)
+    state = settle_from_screen(seat, load_seat(seat))
     socket, window = state.get("kitty_socket"), state.get("kitty_window")
     if state["state"] != "idle" or not socket or not window:
         return False
@@ -6794,7 +6877,13 @@ def mcp_tool(seat, name, args):
         add_note(seat, str(args.get("text", "")))
         return "Added to the commentary.", False
     if name == "set_status":
-        update_seat(seat, state="busy", doing=describe(args.get("text", "")))
+        text = args.get("text", "")
+        # "idle", "done" or "ready" means the turn is over (Codex found
+        # set_status(text="idle") left her busy, 23:45 on 27 Nov, t69).
+        if text.strip().lower().rstrip(".!") in ("idle", "done", "ready"):
+            update_seat(seat, state="idle", doing="")
+        else:
+            update_seat(seat, state="busy", doing=describe(text))
         return "Status set.", False
     if name == "team_status":
         return status_text(), False
@@ -8176,6 +8265,17 @@ def self_test():
         "x.update_seat('codex', state='busy'); x.write_json(x.DATA / 'seats' / 'codex.json', dict(x.load_seat('codex'), updated=1.0))",
         "assert x.wake_seat('codex', stale=True) == (False, 'out of usage until its reset') and x.load_seat('codex')['state'] == 'busy'",
         "x.mark_spent('codex', 'clear', 'claude'); (x.DATA / 'inbox' / 'codex' / 'w1.json').unlink()",
+        # t69: Codex's turns read off its screen when no Stop hook says so.
+        "assert x.screen_says_idle('• Sent Y the report.\\n  Worked for 9s\\n› \\n\\n  GPT-6.2-Sol default · ~')",
+        "assert not x.screen_says_idle('• Working (4s • esc to interrupt)\\n› \\n\\n  GPT-6.2-Sol default · ~')",
+        "assert not x.screen_says_idle('› half a sentence\\n  GPT-6.2-Sol default · ~')",
+        "assert not x.screen_says_idle('Allow this command?\\n  1. Yes  2. No')",
+        "st = dict(x.load_seat('codex'), state='busy', since=x.time.time(), woke_at=0); assert x.settle_from_screen('codex', st) is st",
+        "st = dict(x.load_seat('grok'), state='busy', since=0.0); assert x.settle_from_screen('grok', st) is st",
+        "assert x.screen_says_working('• Working (4s • esc to interrupt)\\n› \\n\\n  GPT') and not x.screen_says_working('› \\n\\n  GPT')",
+        "assert x.settle_seats(['grok']) == [] and x.settle_seats(['nobody']) == []",
+        "x.mcp_call('codex', 'set_status', {'text': 'reviewing #158'}); assert x.load_seat('codex')['state'] == 'busy'",
+        "x.mcp_call('codex', 'set_status', {'text': 'Idle.'}); assert x.load_seat('codex')['state'] == 'idle' and x.load_seat('codex')['doing'] == ''",
         "x.write_json(x.DATA / 'usage' / 'gravity.json', {'time': now, 'data': {'rate_limits': {'five_hour': full(x.time.time() + 600)}}})",
         "x.update_seat('gravity', state='away')",
         "assert x.seat_spent('gravity') and any(s == 'gravity' for s, _, _ in x.current_states())",
@@ -8946,6 +9046,8 @@ def main():
     p = sub.add_parser("wake", help="one wake attempt for a seat (for watchdogs)")
     p.add_argument("seat")
     p.add_argument("--stale", action="store_true", help="treat a long-unchanged busy seat as idle")
+    p = sub.add_parser("settle", help="match seats' busy/idle to what their windows show (for watchdogs)")
+    p.add_argument("seats", nargs="*")
     p = sub.add_parser("spent", help="mark a seat spent until its limit resets (for agents with no meter)")
     p.add_argument("seat")
     p.add_argument("until", nargs="+", help="+166h, +90m, +2d, 06:20, 'YYYY-MM-DD HH:MM', or clear")
@@ -9020,6 +9122,8 @@ def main():
                 statusline(args.source)
             except Exception as error:  # a status line must never break the agent
                 print(f"comms-deck: {error}")
+        elif args.cmd == "settle":
+            print(json.dumps({"screen_turns": list(SCREEN_TURNS), "changed": settle_seats([x.lower() for x in args.seats] or None)}))
         elif args.cmd == "install":
             install(args.yes)
         elif args.cmd == "fetch-remote":
