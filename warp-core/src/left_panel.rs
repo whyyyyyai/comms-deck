@@ -330,9 +330,10 @@ pub fn left_panel(
     let x0 = -h.x - layout.left; // the panel's left edge, in world
     for (mut tf, mut vis) in &mut bg {
         *vis = want;
+        // Full window height: the chat strip only covers the central column.
         tf.translation.x = x0 + layout.left * 0.5;
-        tf.translation.y = 0.0;
-        tf.scale = Vec3::new(layout.left, layout.scene.y, 1.0);
+        tf.translation.y = -layout.panel * 0.5;
+        tf.scale = Vec3::new(layout.left, layout.scene.y + layout.panel, 1.0);
     }
     for (mut t, mut tf, mut vis) in &mut header {
         *vis = want;

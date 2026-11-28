@@ -518,11 +518,14 @@ impl Default for SeatLook {
 #[derive(Resource, Default)]
 struct Looks(HashMap<String, SeatLook>);
 
-/// Where things go this frame: the scene (ring, core, HUD) on the left, the
-/// chat panel on the right. World x runs -scene.x/2 .. scene.x/2 + panel.
+/// Where things go this frame: the scene (ring, core, HUD) fills the top of
+/// the central column, the chat strip runs along its bottom, the left panel
+/// sits on the left. World x runs -scene.x/2 .. scene.x/2 across the central
+/// column; the chat strip is the `panel`-high band just below the scene.
 #[derive(Resource, Default)]
 struct Layout {
     scene: Vec2,
+    /// The chat strip's height.
     panel: f32,
     /// The left panel's width (t87), 0 when it's off.
     left: f32,
@@ -532,18 +535,21 @@ impl Layout {
     fn half(&self) -> Vec2 {
         self.scene * 0.5
     }
-    /// Is this world point over the chat panel?
+    /// Is this world point over the chat strip?
     fn in_panel(&self, p: Vec2) -> bool {
-        self.panel > 0.0 && p.x > self.scene.x * 0.5
+        self.panel > 0.0
+            && p.x.abs() <= self.scene.x * 0.5
+            && p.y < -self.scene.y * 0.5
+            && p.y >= -self.scene.y * 0.5 - self.panel
     }
 }
 
-/// The panel's width for a window: a share of it, kept readable.
-fn panel_width(window_w: f32, cfg: &mods::ChatCfg) -> f32 {
+/// The chat strip's height for a window: a share of it, kept readable.
+fn strip_height(window_h: f32, cfg: &mods::ChatCfg) -> f32 {
     if !cfg.show {
         return 0.0;
     }
-    (window_w * cfg.width).clamp(300.0, 600.0).min(window_w * 0.6)
+    (window_h * cfg.height).clamp(100.0, window_h * 0.45)
 }
 
 /// What came back from a send (Some(the line)) or a wake (None).
@@ -588,7 +594,7 @@ struct Chat {
     rx: Mutex<mpsc::Receiver<SendResult>>,
     /// The notes need laying out again.
     dirty: bool,
-    drawn_width: f32,
+    drawn_size: f32,
 }
 
 impl Default for Chat {
@@ -607,7 +613,7 @@ impl Default for Chat {
             tx,
             rx: Mutex::new(rx),
             dirty: true,
-            drawn_width: 0.0,
+            drawn_size: 0.0,
         }
     }
 }
@@ -1831,7 +1837,7 @@ fn window_size(windows: &Query<&Window>) -> Vec2 {
     windows.iter().next().map(|w| w.size()).unwrap_or(Vec2::new(1280.0, 800.0))
 }
 
-/// Splits the window into the scene and the chat panel, and moves the
+/// Splits the window into the scene and the chat strip, and moves the
 /// camera so the core sits in the middle of the scene.
 fn layout_view(
     windows: Query<&Window>,
@@ -1841,17 +1847,18 @@ fn layout_view(
     mut camera: Query<&mut Transform, With<Camera2d>>,
 ) {
     let w = window_size(&windows);
-    let panel = panel_width(w.x, &mods.cfg.chat);
+    let strip = strip_height(w.y, &mods.cfg.chat);
     let left = left_panel::left_width(w.x, &mods.cfg.left);
-    layout.scene = Vec2::new(w.x - panel - left, w.y);
-    layout.panel = panel;
+    layout.scene = Vec2::new(w.x - left, w.y - strip);
+    layout.panel = strip;
     layout.left = left;
-    if (chat.drawn_width - panel).abs() > 0.5 {
-        chat.drawn_width = panel;
+    if (chat.drawn_size - strip).abs() > 0.5 {
+        chat.drawn_size = strip;
         chat.dirty = true;
     }
     for mut tf in &mut camera {
-        tf.translation.x = (panel - left) * 0.5;
+        tf.translation.x = -left * 0.5;
+        tf.translation.y = -strip * 0.5;
     }
 }
 
@@ -2184,9 +2191,9 @@ fn pointer(
         deck.hover = None;
         if mouse.just_pressed(MouseButton::Left) {
             let w = world.unwrap_or_default();
-            if w.y > layout.scene.y * 0.5 - 38.0 {
-                // The header: a click picks a tab by thirds.
-                let k = ((w.x - layout.scene.x * 0.5) / layout.panel.max(1.0) * 3.0).clamp(0.0, 2.0) as usize;
+            // The strip's header is its top 38 px: a click picks a tab by thirds.
+            if w.y > -layout.scene.y * 0.5 - 38.0 {
+                let k = ((w.x + layout.scene.x * 0.5) / layout.scene.x.max(1.0) * 3.0).clamp(0.0, 2.0) as usize;
                 set_tab(&mut chat, Tab::ALL[k]);
             } else {
                 chat.focus = true;
@@ -2792,8 +2799,9 @@ fn move_stars(
     // The walls stars splash on: the scene's edges, the panel's left edge
     // included.
     let walls = layout.half();
-    // The sky fills the whole window (the panel covers its right side).
-    let half = Vec2::new(layout.scene.x * 0.5 + layout.panel, window_size(&windows).y * 0.5);
+    // The sky fills the whole window (the panels cover their edges).
+    let win = window_size(&windows);
+    let half = Vec2::new(win.x * 0.5 + layout.left * 0.5, win.y * 0.5 + layout.panel * 0.5);
     let reach = half.length() + 20.0;
     let pace = (deck.notes_last(time.elapsed_secs(), 600.0) as f32).min(30.0);
     let tc = &mods.cfg.typing;
@@ -3734,10 +3742,15 @@ fn draw_chat(
     let cfg = &mods.cfg.chat;
     let show = layout.panel > 0.0;
     let vis = if show { Visibility::Inherited } else { Visibility::Hidden };
-    let h = layout.scene.y;
-    let left = layout.scene.x * 0.5;
+    // The strip spans the central column: scene.x wide, `panel` tall, its top
+    // edge flush with the scene's bottom edge.
+    let strip_w = layout.scene.x;
+    let strip_h = layout.panel;
+    let top = -layout.scene.y * 0.5;
+    let bottom = top - strip_h;
+    let cy = bottom + strip_h * 0.5;
     let pad = 14.0;
-    let inner = (layout.panel - pad * 2.0).max(50.0);
+    let inner = (strip_w - pad * 2.0).max(50.0);
     let header_h = 38.0;
     // A long draft wraps upward: the status line and the notes sit above it.
     let line_h = line
@@ -3747,17 +3760,15 @@ fn draw_chat(
         .filter(|y| *y > 1.0)
         .unwrap_or(20.0);
     let input_h = line_h + 46.0;
-    let bottom = -h * 0.5;
-    let top = h * 0.5;
 
     for (mut tf, mut v, header) in &mut panels {
         *v = vis;
         if header.is_some() {
-            tf.translation = Vec3::new(left + layout.panel * 0.5, top - header_h * 0.5, 9.0);
-            tf.scale = Vec3::new(layout.panel, header_h, 1.0);
+            tf.translation = Vec3::new(0.0, top - header_h * 0.5, 9.0);
+            tf.scale = Vec3::new(strip_w, header_h, 1.0);
         } else {
-            tf.translation = Vec3::new(left + layout.panel * 0.5, 0.0, 7.0);
-            tf.scale = Vec3::new(layout.panel, h, 1.0);
+            tf.translation = Vec3::new(0.0, cy, 7.0);
+            tf.scale = Vec3::new(strip_w, strip_h, 1.0);
         }
     }
     for (mut text, mut tf, mut v) in &mut title {
@@ -3774,11 +3785,11 @@ fn draw_chat(
         if text.0 != t {
             text.0 = t;
         }
-        tf.translation = Vec3::new(left + pad, top - 12.0, 10.0);
+        tf.translation = Vec3::new(-strip_w * 0.5 + pad, top - 12.0, 10.0);
     }
     for (e, mut tf, mut bounds, mut v, mut font) in &mut log {
         *v = vis;
-        tf.translation = Vec3::new(left + pad, bottom + input_h + 10.0, 8.0);
+        tf.translation = Vec3::new(-strip_w * 0.5 + pad, bottom + input_h + 10.0, 8.0);
         if bounds.width != Some(inner) {
             bounds.width = Some(inner);
         }
@@ -3823,7 +3834,7 @@ fn draw_chat(
         if bounds.width != Some(inner) {
             bounds.width = Some(inner);
         }
-        tf.translation = Vec3::new(left + pad, bottom + 12.0, 10.0);
+        tf.translation = Vec3::new(-strip_w * 0.5 + pad, bottom + 12.0, 10.0);
     }
     for (mut text, mut colour, mut tf, mut v) in &mut status {
         *v = vis;
@@ -3843,7 +3854,7 @@ fn draw_chat(
             text.0 = t;
         }
         colour.0 = if err { Color::srgb(1.0, 0.45, 0.4) } else { Color::srgb(0.5, 0.56, 0.68) };
-        tf.translation = Vec3::new(left + pad, bottom + 12.0 + line_h + 8.0, 10.0);
+        tf.translation = Vec3::new(-strip_w * 0.5 + pad, bottom + 12.0 + line_h + 8.0, 10.0);
     }
 }
 
@@ -4354,12 +4365,24 @@ mod tests {
     }
 
     #[test]
-    fn the_panel_keeps_a_readable_width() {
+    fn the_strip_keeps_a_readable_height() {
         let cfg = mods::ChatCfg::default();
-        assert_eq!(panel_width(2000.0, &cfg), 600.0);
-        assert_eq!(panel_width(1100.0, &cfg), 352.0);
-        assert!((panel_width(400.0, &cfg) - 240.0).abs() < 0.01, "never more than 60% of a narrow window");
-        assert_eq!(panel_width(1100.0, &mods::ChatCfg { show: false, ..cfg }), 0.0);
+        assert!((strip_height(1000.0, &cfg) - 200.0).abs() < 0.01);
+        assert!((strip_height(600.0, &cfg) - 120.0).abs() < 0.01);
+        assert!((strip_height(300.0, &cfg) - 100.0).abs() < 0.01, "never under 100 px");
+        assert!((strip_height(1000.0, &mods::ChatCfg { height: 0.9, ..cfg }) - 450.0).abs() < 0.01, "never over 45% of the window");
+        assert_eq!(strip_height(1000.0, &mods::ChatCfg { show: false, ..cfg }), 0.0);
+    }
+
+    #[test]
+    fn the_strip_sits_under_the_scene_centre_column() {
+        let layout = Layout { scene: Vec2::new(1000.0, 800.0), panel: 200.0, left: 0.0 };
+        assert!(layout.in_panel(Vec2::new(0.0, -410.0)));
+        assert!(layout.in_panel(Vec2::new(490.0, -450.0)));
+        assert!(!layout.in_panel(Vec2::new(0.0, -390.0)), "above the strip is scene");
+        assert!(!layout.in_panel(Vec2::new(0.0, -610.0)), "below the strip is off-window");
+        assert!(!layout.in_panel(Vec2::new(510.0, -450.0)), "past the column's edge");
+        assert!(!Layout { panel: 0.0, ..layout }.in_panel(Vec2::new(0.0, -450.0)), "chat off: nothing is the panel");
     }
 
     #[test]
