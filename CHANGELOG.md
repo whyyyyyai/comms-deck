@@ -1,6 +1,14 @@
 # Changelog
 
 ## Unreleased
+- **A remote seat state reaches 02 ACTIVITY by beacon.** A remote
+  seat (docs/REMOTE.md) publishes a small status.json from its own machine;
+  the deck lists its url in ~/.config/comms-deck/remote-beacons, fetches it
+  in the sync pass at a 30 s timeout, and applies it through update_seat()
+  - so mystra ready-order row is a real state, not a permanent away.
+  Known words only, the doing line passes the redactor, and a stale beacon
+  pins away (a silent seat is an away seat). Hermetic self-test, stubbed
+  urlopen. By Mystra.
 
 - **A seat that comes online is told who's down, so bots help bots get
   back.** The service now watches the roster every 15 seconds (the owner's
