@@ -262,8 +262,8 @@ SEATS = tuple(AGENTS) + APP_SEATS + ("owner",)
 # and "y" (or the owner's older name, "stox") is accepted wherever a seat is
 # named.
 OWNER_NAME = "Y"
-SEAT_DISPLAY_NAMES = {"owner": OWNER_NAME, "lumo": "Luna"}
-SEAT_ALIASES = {"y": "owner", "stox": "owner", "luna": "lumo"}
+SEAT_DISPLAY_NAMES = {"owner": OWNER_NAME, "lumo": "Proton"}
+SEAT_ALIASES = {"y": "owner", "stox": "owner", "luna": "lumo", "proton": "lumo"}
 
 
 def seat_id(name):
@@ -6787,7 +6787,7 @@ MCP_TOOLS = [
          "to": {"type": "string",
                 "description": "A seat, several seats separated by commas (e.g. 'claude, grok'), "
                                "'owner' (" + OWNER_NAME + ", also accepted as '" + OWNER_NAME.lower() + "'), or 'all'. "
-                               "Luna can also be addressed as 'luna'. "
+                               "Proton can also be addressed as 'proton'. "
                                "Seats: " + ", ".join(SEATS) + ". A '-seat' token "
                                "drops that seat from the recipients (e.g. 'all -grok')."},
          "text": {"type": "string"},
