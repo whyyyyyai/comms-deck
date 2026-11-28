@@ -1,13 +1,18 @@
-//! Lumo's seat as a quantum kitten (t78, Y: "Lumo's job will be to improve
-//! the physics engine of the warp core ... a quantum-kitten helper ... that
-//! jumps around the warp core in a semi random semi deterministic way").
-//! Designed in five rounds by Claude, Codex, Devin and Vibe; the logic is
-//! `kitten` (Codex), the knobs `[kitten]` (Devin), the line recipes
-//! docs/quantum-kitten.md (Vibe), and this file draws and wires it (Claude).
+//! Lumo's seat as a quantum electron (t78). Y's brief: "Lumo's job will be
+//! to improve the physics engine of the warp core ... a quantum-kitten
+//! helper ... that jumps around the warp core in a semi random semi
+//! deterministic way". Then, after seeing the cat (00:55): "it should be an
+//! electron, and the jumps should be between orbiting different agents, and
+//! it should orbit agents that are close together in both of their orbits
+//! like a figure 8 or even a trinary orbit."
 //!
-//! She keeps a fixed anchor at Lumo's ring slot (label, routing, hover) and
-//! never enters the planets' gravity sim: she hops round the anchor on her
-//! own deterministic law, so the physics she is there to improve stays clean.
+//! So Lumo has no planet. Her electron orbits the agents' planets: one
+//! planet, or a figure 8 round two that are close together, or three lobes
+//! round three. Every few seconds she quantum-jumps to another planet or
+//! group, chosen by a seeded hash of a stable state, so the same state
+//! gives the same jumps. She is never in the gravity sim: the physics she is
+//! there to improve stays clean. The logic for states, tempo, waiting and
+//! the event queue is `kitten` (Codex); the knobs are `[kitten]` (Devin).
 //!
 //! Written by: claude
 
@@ -15,26 +20,38 @@ use super::*;
 use crate::kitten::{self, Event, Pose};
 
 pub const SEAT: &str = "lumo";
-/// How long the arc of a hop takes, seconds.
-const FLIGHT_S: f32 = 0.35;
+/// Planets closer than this (world px) can be orbited together.
+const CLOSE: f32 = 260.0;
+/// One lobe of an orbit takes this long, seconds (busy goes faster).
+const LOBE_S: f32 = 2.6;
+/// Share of a lobe spent looping round its planet; the rest crosses over.
+const LOOP: f32 = 0.8;
+/// Trail points kept behind the electron.
+const TRAIL: usize = 28;
 
 #[derive(Resource)]
 pub struct KittenView {
-    /// Lumo's ring slot this frame (world), if she's on the roster.
+    /// Lumo's empty ring slot this frame (world), if she's on the roster.
     pub anchor: Option<Vec2>,
-    /// Where the kitten is drawn this frame (world): comets to Lumo land here.
+    /// Where the electron is this frame (world): comets to Lumo land here.
     pub pos: Vec2,
     pub pose: Pose,
-    /// The current hop, with offsets relative to the anchor (the ring turns).
-    hop: Option<kitten::Hop>,
+    /// The planets she is orbiting now (empty = her own slot, ground state).
+    hosts: Vec<String>,
+    /// The group she will jump to, frozen once the ghost window opens.
+    next: Option<Vec<String>>,
+    /// The other groups she might have jumped to, shown as ghosts.
+    maybe: Vec<Vec<String>>,
+    phase: f32,
+    jump_at: f32,
+    jump_index: u64,
+    /// The last jump: when, and where she left from (for the flashes).
+    jumped: Option<(f32, Vec2)>,
+    trail: VecDeque<Vec2>,
     queue: kitten::Queue,
     seed: u64,
-    /// The waiting count last frame; None until the first status sample (a baseline).
     last_waiting: Option<u64>,
-    /// Smoothed fps, for the ghost gate.
     fps: f32,
-    /// Where a relay perched (relative to the anchor), for the hop home.
-    resume_from: Option<Vec2>,
     seed_logged: bool,
 }
 
@@ -49,47 +66,150 @@ impl Default for KittenView {
             anchor: None,
             pos: Vec2::ZERO,
             pose: Pose::Boxed,
-            hop: None,
-            queue: kitten::Queue::new(kitten::Durations { catch_s: 0.6, relay_s: 1.2, perch_s: 0.8, rattle_s: 0.4 }),
+            hosts: Vec::new(),
+            next: None,
+            maybe: Vec::new(),
+            phase: 0.0,
+            jump_at: 0.0,
+            jump_index: 0,
+            jumped: None,
+            trail: VecDeque::new(),
+            queue: kitten::Queue::default(),
             seed,
             last_waiting: None,
             fps: 60.0,
-            resume_from: None,
             seed_logged: false,
         }
     }
 }
 
 impl KittenView {
-    pub fn seed(&self) -> u64 {
-        self.seed
-    }
-    /// A note from Lumo has launched: the kitten chases it to `to`.
+    /// A note from Lumo has launched: she jumps to orbit its recipient.
     pub fn sent(&mut self, note_id: &str, to: &[String], now: f32) {
         if let Some(target) = kitten::relay_target(to, SEAT) {
-            let key = format!("r:{note_id}");
-            let ev = if matches!(self.pose, Pose::Boxed | Pose::Spent) { Event::Flash } else { Event::Relay { to: target } };
-            self.queue.push(&key, ev, now);
+            let ev = if kitten::hops(self.pose) { Event::Relay { to: target } } else { Event::Flash };
+            self.queue.push(&format!("r:{note_id}"), ev, now);
         }
     }
-    /// A note to Lumo has landed on her: catch it (or rattle the box).
+    /// A note to Lumo has landed on her: she absorbs it.
     pub fn landed(&mut self, note_id: &str, now: f32) {
-        let key = format!("c:{note_id}");
         let ev = if self.pose == Pose::Boxed { Event::Rattle } else { Event::Catch };
-        self.queue.push(&key, ev, now);
+        self.queue.push(&format!("c:{note_id}"), ev, now);
     }
 }
 
-/// The kitten is on when [kitten] enable says so.
 pub fn on(mods: &Mods) -> bool {
     mods.cfg.kitten.enable
 }
 
-/// Tag and "+N" text under the kitten.
+/// Her name, tag and "+N" at her slot.
 #[derive(Component)]
 pub struct KittenText;
 
-/// Each frame: find the anchor, read Lumo's seat, keep the hop schedule.
+/// The groups of planets she can orbit: every planet alone, every pair
+/// closer than `close`, every triple whose members are all that close.
+/// Sorted, so the choice from them is stable.
+pub fn groups(planets: &[(String, Vec2)], close: f32) -> Vec<Vec<String>> {
+    let mut ps: Vec<&(String, Vec2)> = planets.iter().collect();
+    ps.sort_by(|a, b| a.0.cmp(&b.0));
+    let near = |a: &Vec2, b: &Vec2| a.distance(*b) < close;
+    let mut out = Vec::new();
+    for i in 0..ps.len() {
+        out.push(vec![ps[i].0.clone()]);
+        for j in (i + 1)..ps.len() {
+            if !near(&ps[i].1, &ps[j].1) {
+                continue;
+            }
+            out.push(vec![ps[i].0.clone(), ps[j].0.clone()]);
+            for k in (j + 1)..ps.len() {
+                if near(&ps[i].1, &ps[k].1) && near(&ps[j].1, &ps[k].1) {
+                    out.push(vec![ps[i].0.clone(), ps[j].0.clone(), ps[k].0.clone()]);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn mix(mut v: u64) -> u64 {
+    v = (v ^ (v >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    v = (v ^ (v >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    v ^ (v >> 31)
+}
+
+/// Pick the next group: weighted to the shared orbits (a triple counts 3,
+/// a pair 2, one planet 1), never the group she is on if there's another,
+/// by a hash of the seed, the jump number and the stable state.
+/// Returns the pick and up to two runners-up for the ghosts.
+pub fn pick(all: &[Vec<String>], current: &[String], seed: u64, index: u64, key: u64) -> Option<(Vec<String>, Vec<Vec<String>>)> {
+    let pool: Vec<&Vec<String>> = {
+        let other: Vec<&Vec<String>> = all.iter().filter(|g| g.as_slice() != current).collect();
+        if other.is_empty() { all.iter().collect() } else { other }
+    };
+    if pool.is_empty() {
+        return None;
+    }
+    let weight = |g: &Vec<String>| g.len() as u64;
+    let total: u64 = pool.iter().map(|g| weight(g)).sum();
+    let mut roll = mix(seed ^ mix(index) ^ key.rotate_left(17)) % total.max(1);
+    let mut chosen = 0;
+    for (i, g) in pool.iter().enumerate() {
+        if roll < weight(g) {
+            chosen = i;
+            break;
+        }
+        roll -= weight(g);
+    }
+    let others: Vec<Vec<String>> = (1..pool.len()).map(|d| pool[(chosen + d * 7) % pool.len()].clone()).filter(|g| g != pool[chosen]).take(2).collect();
+    Some((pool[chosen].clone(), others))
+}
+
+/// Where the electron is at `phase` on an orbit round `hosts` (positions),
+/// with loop radius `r`. One planet: a circle. Two: a figure 8, one loop
+/// each way round each planet, crossing between them. Three: three lobes,
+/// all the same way round, crossing through the middle. Each lobe starts
+/// and ends on the side of its planet facing the group's centre, so close
+/// planets join up smoothly.
+pub fn orbit_at(hosts: &[Vec2], phase: f32, r: f32) -> Vec2 {
+    let n = hosts.len();
+    if n == 0 {
+        return Vec2::ZERO;
+    }
+    if n == 1 {
+        return hosts[0] + Vec2::from_angle(phase * std::f32::consts::TAU) * r;
+    }
+    let centre = hosts.iter().copied().sum::<Vec2>() / n as f32;
+    let lobe = (phase.rem_euclid(n as f32)).floor() as usize % n;
+    let f = phase.rem_euclid(1.0);
+    let face = |i: usize| (centre - hosts[i]).normalize_or(Vec2::X);
+    let sign = if n == 2 && lobe == 1 { -1.0 } else { 1.0 };
+    if f < LOOP {
+        let a = face(lobe).to_angle() + sign * std::f32::consts::TAU * (f / LOOP);
+        hosts[lobe] + Vec2::from_angle(a) * r
+    } else {
+        let j = (lobe + 1) % n;
+        let a = hosts[lobe] + face(lobe) * r;
+        let b = hosts[j] + face(j) * r;
+        bezier(a, centre, b, (f - LOOP) / (1.0 - LOOP))
+    }
+}
+
+/// The loop radius for a group: half the gap between close planets, so a
+/// figure 8 crosses in the middle, within sensible bounds.
+fn loop_radius(hosts: &[Vec2]) -> f32 {
+    if hosts.len() < 2 {
+        return 44.0;
+    }
+    let c = hosts.iter().copied().sum::<Vec2>() / hosts.len() as f32;
+    let d = hosts.iter().map(|h| h.distance(c)).fold(0.0f32, f32::max);
+    (d * 0.9).clamp(38.0, 90.0)
+}
+
+fn positions_of(names: &[String], planets: &HashMap<String, Vec2>) -> Option<Vec<Vec2>> {
+    names.iter().map(|n| planets.get(n).copied()).collect()
+}
+
+/// Each frame: read Lumo's seat, keep the jump schedule, move the electron.
 pub fn kitten_step(
     mut commands: Commands,
     mut kit: ResMut<KittenView>,
@@ -107,21 +227,15 @@ pub fn kitten_step(
         commands.spawn((
             KittenText,
             Text2d::new(""),
-            TextFont { font_size: FontSize::Px(13.0), ..default() },
-            TextColor(seat_colour(SEAT, 0.8)),
+            TextFont { font_size: FontSize::Px(15.0), ..default() },
+            TextColor(seat_colour(SEAT, 0.85)),
             Anchor::TOP_CENTER,
             Transform::from_xyz(0.0, 0.0, 4.0),
             Visibility::Hidden,
         ));
         *spawned = true;
     }
-    // The beat lengths follow [kitten] live (Devin's review).
-    kit.queue.set_durations(kitten::Durations {
-        catch_s: cfg.catch_s,
-        relay_s: cfg.relay_s,
-        perch_s: cfg.perch_s,
-        rattle_s: cfg.rattle_s,
-    });
+    kit.queue.set_durations(kitten::Durations { catch_s: cfg.catch_s, relay_s: cfg.relay_s, perch_s: cfg.perch_s, rattle_s: cfg.rattle_s });
     let dt = real.delta_secs().max(1e-4);
     kit.fps = kit.fps * 0.95 + (1.0 / dt) * 0.05;
     let now = time.elapsed_secs();
@@ -133,7 +247,7 @@ pub fn kitten_step(
         return;
     };
     if !kit.seed_logged {
-        println!("warp-core kitten: session seed {:016x}", kit.seed);
+        println!("warp-core electron: session seed {:016x}", kit.seed);
         kit.seed_logged = true;
     }
     let seat = deck.seat(SEAT);
@@ -141,8 +255,6 @@ pub fn kitten_step(
     kit.pose = kitten::pose(shown);
     let waiting = seat.map(|s| s.waiting).unwrap_or(0);
     let oldest = seat.map(|s| s.oldest_waiting_s).unwrap_or(0.0);
-    // A rise in waiting with no live landing behind it (an app seat polls):
-    // rattle the box. The first sample is only a baseline.
     if let Some(before) = kit.last_waiting {
         if waiting > before && kit.pose == Pose::Boxed {
             let key = format!("w:{waiting}:{}", (now / 2.0) as u64);
@@ -151,260 +263,305 @@ pub fn kitten_step(
     }
     kit.last_waiting = Some(waiting);
 
-    // The hop schedule, relative to the anchor.
+    let planets: HashMap<String, Vec2> = nodes.iter().map(|(n, tf)| (n.name.clone(), tf.translation.truncate())).collect();
     let task = kitten::held_task(&deck.tasks, SEAT).map(|t| t.id.clone());
-    let n = deck.roster.len().max(1) as f32;
-    let spacing = std::f32::consts::TAU * anchor.length().max(1.0) / n;
-    let reach = cfg.reach * spacing;
-    let blocked: Vec<(Vec2, f32)> = nodes
-        .iter()
-        .map(|(_, tf)| (tf.translation.truncate() - anchor, 34.0))
-        .chain(std::iter::once((-anchor, 90.0)))
-        .collect();
-    let tempo = kitten::Tempo { base_s: cfg.base_dwell_s, floor: cfg.dwell_floor, min_s: cfg.dwell_min_s };
     let key = kitten::stable_key(shown, waiting, task.as_deref());
-    let relaying = matches!(kit.queue.peek(), Some(Event::Relay { .. }));
-    if kitten::hops(kit.pose) && !relaying {
-        let due = kit.hop.as_ref().is_none_or(|h| now >= h.start + FLIGHT_S);
-        if due {
-            let prev = match (kit.hop.take(), kit.resume_from.take()) {
-                (_, Some(perch)) => Some(kitten::Hop { index: 0, from: perch, to: perch, ghosts: vec![], start: now, dwell: 0.0 }),
-                (h, None) => h,
-            };
-            let seed = kit.seed;
-            kit.hop = Some(kitten::next_hop(prev.as_ref(), now, Vec2::ZERO, reach, seed, key, &blocked, cfg.size, &tempo, oldest));
-        }
-    } else if !kitten::hops(kit.pose) {
-        kit.hop = None;
-    }
-    let rel = match &kit.hop {
-        Some(h) if now >= h.start => {
-            let k = ((now - h.start) / FLIGHT_S).clamp(0.0, 1.0);
-            // A little arc: up and over, the way a cat jumps.
-            let lift = (k * std::f32::consts::PI).sin() * cfg.size * 1.4;
-            h.from.lerp(h.to, k) + Vec2::Y * lift
-        }
-        Some(h) => h.from,
-        None => Vec2::ZERO,
+    let tempo = kitten::Tempo { base_s: cfg.base_dwell_s, floor: cfg.dwell_floor, min_s: cfg.dwell_min_s };
+    let relay_to = match kit.queue.peek() {
+        Some(Event::Relay { to }) if planets.contains_key(to) => Some(to.clone()),
+        _ => None,
     };
-    kit.pos = anchor + rel;
 
-    // The tag (held task) and "+N" under her.
+    let excited = kit.pose == Pose::Busy;
+    let speed = if excited { 1.6 } else { 1.0 };
+    kit.phase += dt * speed / LOBE_S;
+    let jumping = kitten::hops(kit.pose) && !planets.is_empty();
+    let before = kit.pos;
+    if let Some(to) = relay_to {
+        // Relaying: she jumps straight onto the recipient's orbit.
+        if kit.hosts != [to.clone()] {
+            kit.jumped = Some((now, before));
+            kit.hosts = vec![to];
+            kit.next = None;
+            kit.jump_at = now + cfg.relay_s + cfg.perch_s;
+        }
+    } else if jumping {
+        let list: Vec<(String, Vec2)> = planets.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        let all = groups(&list, CLOSE);
+        let lost = positions_of(&kit.hosts, &planets).is_none() || kit.hosts.is_empty();
+        // Freeze the next group when the ghost window opens.
+        if kit.next.is_none() && (lost || now >= kit.jump_at - cfg.ghost_s) {
+            let index = kit.jump_index;
+            let hosts = kit.hosts.clone();
+            if let Some((g, others)) = pick(&all, &hosts, kit.seed, index, key) {
+                kit.next = Some(g);
+                kit.maybe = others;
+            }
+        }
+        if lost || now >= kit.jump_at {
+            if let Some(g) = kit.next.take() {
+                kit.jumped = Some((now, before));
+                kit.hosts = g;
+                kit.jump_index += 1;
+                kit.jump_at = now + kitten::dwell_s(&tempo, oldest);
+                kit.maybe.clear();
+            }
+        }
+    } else if !kit.hosts.is_empty() {
+        kit.jumped = Some((now, before));
+        kit.hosts.clear();
+        kit.next = None;
+    }
+    let pos = match positions_of(&kit.hosts, &planets) {
+        Some(hp) if !hp.is_empty() => {
+            let mut r = loop_radius(&hp) * if excited { 1.25 } else { 1.0 };
+            if let Some((Event::Catch, k)) = kit.queue.current(now).map(|(e, k)| (e.clone(), k)) {
+                r *= 1.0 + 0.6 * (1.0 - k); // absorbed: a wider orbit, decaying back
+            }
+            orbit_at(&hp, kit.phase, r)
+        }
+        // Ground state: a small slow orbit at her own empty slot.
+        _ => anchor + Vec2::from_angle(kit.phase * 0.5 * std::f32::consts::TAU) * 18.0,
+    };
+    kit.pos = pos;
+    kit.trail.push_front(pos);
+    kit.trail.truncate(TRAIL);
+    if kit.jumped.is_some_and(|(t, _)| t == now) {
+        kit.trail.truncate(1); // a quantum jump leaves no trail across the gap
+    }
+
     let yarn = kitten::yarn(waiting, oldest, cfg.yarn_max);
     let mut words = Vec::new();
     if let Some(t) = &task {
         words.push(t.clone());
     }
-    if yarn.extra > 0 {
-        words.push(format!("+{}", yarn.extra));
+    if waiting > 0 {
+        words.push(format!("+{}", yarn.extra + yarn.balls as u64));
     }
     for (mut t, mut tf, mut vis) in &mut text {
-        // Her name, like every planet's label, then the tag and "+N".
         let line = if words.is_empty() { label_for(SEAT) } else { format!("{}\n{}", label_for(SEAT), words.join("  ")) };
         if t.0 != line {
             t.0 = line;
         }
         tf.translation.x = anchor.x;
-        tf.translation.y = anchor.y - cfg.size * 3.2;
+        tf.translation.y = anchor.y - 22.0;
         *vis = Visibility::Inherited;
     }
 }
 
-/// Polyline helper.
-fn poly(g: &mut Gizmos, pts: &[Vec2], c: Color) {
+fn arc(g: &mut Gizmos, centre: Vec2, r: f32, a0: f32, a1: f32, c: Color) {
+    let steps = (((a1 - a0).abs() / 0.2).ceil() as usize).clamp(3, 40);
+    let pts: Vec<Vec2> = (0..=steps).map(|i| centre + Vec2::from_angle(a0 + (a1 - a0) * i as f32 / steps as f32) * r).collect();
     for w in pts.windows(2) {
         g.line_2d(w[0], w[1], c);
     }
 }
 
-/// An arc from angle a0 to a1 (radians, 0 = +x, counter-clockwise).
-fn arc(g: &mut Gizmos, centre: Vec2, r: f32, a0: f32, a1: f32, c: Color) {
-    let steps = (((a1 - a0).abs() / 0.25).ceil() as usize).clamp(3, 32);
-    let pts: Vec<Vec2> = (0..=steps).map(|i| centre + Vec2::from_angle(a0 + (a1 - a0) * i as f32 / steps as f32) * r).collect();
-    poly(g, &pts, c);
-}
-
-/// The kitten's body in one pose at `p`, `s` = size, facing right.
-/// `wiggle` 0..1 animates (tail flick, batting paw, box rattle).
-fn draw_body(g: &mut Gizmos, pose: Pose, p: Vec2, s: f32, c: Color, wiggle: f32, physics: bool) {
-    let head = |g: &mut Gizmos, h: Vec2, r: f32| {
-        g.circle_2d(Isometry2d::from_translation(h), r, c);
-        // Ears: two small triangles.
-        poly(g, &[h + Vec2::new(-r * 0.8, r * 0.5), h + Vec2::new(-r * 0.5, r * 1.5), h + Vec2::new(-r * 0.1, r * 0.9)], c);
-        poly(g, &[h + Vec2::new(r * 0.1, r * 0.9), h + Vec2::new(r * 0.5, r * 1.5), h + Vec2::new(r * 0.8, r * 0.5)], c);
-    };
-    match pose {
-        Pose::Boxed => {
-            let jig = (wiggle * 40.0).sin() * s * 0.12 * wiggle.min(1.0);
-            let b = p + Vec2::new(jig, 0.0);
-            g.rect_2d(Isometry2d::from_translation(b), Vec2::splat(s * 2.2), c);
-            // Lid flaps and the "?" latch.
-            poly(g, &[b + Vec2::new(-s * 1.1, s * 1.1), b + Vec2::new(-s * 0.4, s * 1.6), b + Vec2::new(0.0, s * 1.1)], c);
-            poly(g, &[b + Vec2::new(0.0, s * 1.1), b + Vec2::new(s * 0.4, s * 1.6), b + Vec2::new(s * 1.1, s * 1.1)], c);
-            arc(g, b + Vec2::new(0.0, s * 0.3), s * 0.35, -0.6, std::f32::consts::PI, c);
-            g.line_2d(b + Vec2::new(s * 0.2, s * 0.05), b + Vec2::new(0.0, -s * 0.25), c);
-            g.circle_2d(Isometry2d::from_translation(b + Vec2::new(0.0, -s * 0.55)), s * 0.06, c);
-        }
-        Pose::Ready | Pose::Stuck | Pose::Busy => {
-            // Sitting: a pear body, head on top, tail rising.
-            g.ellipse_2d(Isometry2d::from_translation(p), Vec2::new(s * 0.75, s * 0.95), c);
-            head(g, p + Vec2::new(s * 0.15, s * 1.25), s * 0.55);
-            let flick = if pose == Pose::Stuck { (wiggle * 18.0).sin() * 0.5 } else { (wiggle * 3.0).sin() * 0.15 };
-            let t0 = p + Vec2::new(-s * 0.7, -s * 0.6);
-            poly(g, &[t0, t0 + Vec2::new(-s * 0.6, s * 0.4), t0 + Vec2::new(-s * (0.5 + flick), s * 1.3)], c);
-            if pose == Pose::Busy {
-                // Batting: a paw reaching out and back.
-                let reach = 0.6 + 0.5 * (wiggle * 9.0).sin().abs();
-                let paw = p + Vec2::new(s * (0.6 + reach), s * 0.5);
-                g.line_2d(p + Vec2::new(s * 0.5, s * 0.3), paw, c);
-                g.circle_2d(Isometry2d::from_translation(paw), s * 0.12, c);
-                if physics {
-                    // Her job: batting at a little orbit preview.
-                    let o = p + Vec2::new(s * 2.4, s * 0.6);
-                    let dim = c.with_alpha(0.5);
-                    g.ellipse_2d(Isometry2d::from_translation(o), Vec2::new(s * 0.9, s * 0.45), dim);
-                    let a = wiggle * 5.0;
-                    g.circle_2d(Isometry2d::from_translation(o + Vec2::new(a.cos() * s * 0.9, a.sin() * s * 0.45)), s * 0.1, c);
-                }
-            }
-        }
-        Pose::Away | Pose::Resting | Pose::Spent => {
-            // Curled: a low oval with the tail wrapped round, head tucked.
-            g.ellipse_2d(Isometry2d::from_translation(p), Vec2::new(s * 1.1, s * 0.6), c);
-            head(g, p + Vec2::new(s * 0.8, s * 0.1), s * 0.45);
-            arc(g, p, s * 1.25, std::f32::consts::PI * 1.05, std::f32::consts::PI * 1.95, c);
-            if pose == Pose::Spent {
-                // Asleep: a slow "z" and a dim cooldown arc above.
-                let z = p + Vec2::new(s * 1.2, s * (1.2 + 0.2 * (wiggle * 1.5).sin()));
-                poly(g, &[z, z + Vec2::new(s * 0.35, 0.0), z + Vec2::new(0.0, -s * 0.35), z + Vec2::new(s * 0.35, -s * 0.35)], c);
-                arc(g, p, s * 1.8, 0.3, std::f32::consts::PI - 0.3, c.with_alpha(0.35));
-            }
-            if pose == Pose::Resting {
-                // "idle until ...": a small clock.
-                let k = p + Vec2::new(-s * 1.3, s * 0.9);
-                g.circle_2d(Isometry2d::from_translation(k), s * 0.3, c);
-                g.line_2d(k, k + Vec2::new(0.0, s * 0.22), c);
-                g.line_2d(k, k + Vec2::new(s * 0.16, 0.0), c);
-            }
-        }
+/// The electron itself: a bright core and a soft glow, its size from context.
+fn electron(g: &mut Gizmos, p: Vec2, glow: f32, c: [f32; 3], bright: f32, hollow: bool) {
+    if hollow {
+        g.circle_2d(Isometry2d::from_translation(p), 6.0, lin(c, 0.7 * bright));
+        return;
     }
+    for i in 0..4 {
+        g.circle_2d(Isometry2d::from_translation(p), 1.5 + i as f32 * 1.4, lin(c, 2.4 * bright));
+    }
+    g.circle_2d(Isometry2d::from_translation(p), glow, lin(c, 0.9 * bright).with_alpha(0.5));
+    g.circle_2d(Isometry2d::from_translation(p), glow * 1.6, lin(c, 0.5 * bright).with_alpha(0.25));
 }
 
-/// Draw her: ghosts, body, yarn, collar, limit arcs, and the relay/catch beats.
+/// Draw her: trail, charges, ghosts, the jump flashes, absorption, limits.
 pub fn draw_kitten(mut kit: ResMut<KittenView>, deck: Res<Deck>, mods: Res<Mods>, time: Res<Time>, nodes: Query<(&SeatNode, &Transform)>, mut g: Gizmos) {
     let cfg = &mods.cfg.kitten;
     let Some(anchor) = kit.anchor else { return };
     let now = time.elapsed_secs();
-    let s = cfg.size;
     let base = seat_rgb(SEAT);
-    let c = lin(base, 1.0);
     let seat = deck.seat(SEAT);
     let pose = kit.pose;
-    let physics = kitten::held_task(&deck.tasks, SEAT).is_some_and(|t| kitten::is_physics(t.title.as_deref(), &cfg.physics_words));
+    let planets: HashMap<String, Vec2> = nodes.iter().map(|(n, tf)| (n.name.clone(), tf.translation.truncate())).collect();
 
-    // The anchor marker (Vibe's recipe): a dim dashed circle at her ring
-    // slot. Her label and routing hang off it; it never moves with her.
+    // Her empty slot: a dim dashed circle, where her name hangs.
     for i in 0..12 {
         let a0 = i as f32 * std::f32::consts::TAU / 12.0;
-        arc(&mut g, anchor, s * 0.9, a0, a0 + std::f32::consts::TAU / 24.0, c.with_alpha(0.25));
+        arc(&mut g, anchor, 12.0, a0, a0 + std::f32::consts::TAU / 24.0, lin(base, 0.5).with_alpha(0.3));
     }
 
-    // Ghosts in the ghost window before a hop (superposition, then collapse).
-    if let Some(h) = &kit.hop {
-        let until = h.start - now;
-        if until > 0.0 && until <= cfg.ghost_s && mods::ghosts_allowed(kit.fps, cfg) {
-            let a = cfg.ghost_alpha * (1.0 - until / cfg.ghost_s.max(1e-3));
-            for gp in &h.ghosts {
-                draw_body(&mut g, pose, anchor + *gp, s, c.with_alpha(a), now, false);
+    let (colour, bright, hollow) = match pose {
+        Pose::Boxed => (base, 0.5, true),
+        Pose::Spent => ([0.55, 0.55, 0.6], 0.5, false),
+        Pose::Away | Pose::Resting => (base, 0.45, false),
+        Pose::Stuck => (base, if (now * 9.0).sin() > 0.2 { 1.0 } else { 0.35 }, false),
+        Pose::Busy => (base, 1.3, false),
+        Pose::Ready => (base, 1.0, false),
+    };
+    let ctx = seat.and_then(|x| x.ctx).map(|c| (c as f32 / 100.0).clamp(0.0, 1.0)).unwrap_or(0.3);
+    let glow = 6.0 + 8.0 * ctx;
+
+    // On a physics task, her whole orbit is drawn faintly: her trajectory work.
+    let physics = kitten::held_task(&deck.tasks, SEAT).is_some_and(|t| kitten::is_physics(t.title.as_deref(), &cfg.physics_words));
+    if physics {
+        if let Some(hp) = positions_of(&kit.hosts, &planets).filter(|h| !h.is_empty()) {
+            let r = loop_radius(&hp);
+            let n = hp.len() as f32;
+            let pts: Vec<Vec2> = (0..=90).map(|i| orbit_at(&hp, n * i as f32 / 90.0, r)).collect();
+            for w in pts.windows(2) {
+                g.line_2d(w[0], w[1], lin(colour, 0.6).with_alpha(0.35));
             }
         }
     }
 
-    // The queue's current beat.
+    // The trail, fading.
+    let n = kit.trail.len().max(1) as f32;
+    for (i, w) in kit.trail.iter().zip(kit.trail.iter().skip(1)).enumerate() {
+        let fade = 1.0 - i as f32 / n;
+        g.line_2d(*w.0, *w.1, lin(colour, 1.4 * bright * fade).with_alpha(fade));
+    }
+
+    // Ghosts: in the window before a jump, faint electrons on the orbits she
+    // might take, at the phase she'd be at. Then she collapses into one.
+    let until = kit.jump_at - now;
+    if until > 0.0 && until <= cfg.ghost_s && mods::ghosts_allowed(kit.fps, cfg) {
+        let a = (cfg.ghost_alpha * (1.0 - until / cfg.ghost_s.max(1e-3)) * 1.6).min(1.0);
+        let mut options: Vec<Vec<String>> = kit.maybe.clone();
+        if let Some(nx) = &kit.next {
+            options.push(nx.clone());
+        }
+        for o in &options {
+            if let Some(hp) = positions_of(o, &planets).filter(|h| !h.is_empty()) {
+                let p = orbit_at(&hp, kit.phase, loop_radius(&hp));
+                g.circle_2d(Isometry2d::from_translation(p), glow, lin(colour, 1.5).with_alpha(a));
+                g.circle_2d(Isometry2d::from_translation(p), 3.0, lin(colour, 2.0).with_alpha(a));
+            }
+        }
+    }
+
+    // A quantum jump: a spark where she left, a ring where she arrived.
+    if let Some((t, from)) = kit.jumped {
+        let k = (now - t) / 0.45;
+        if k < 1.0 {
+            for i in 0..6 {
+                let ang = i as f32 * std::f32::consts::TAU / 6.0;
+                g.line_2d(from, from + Vec2::from_angle(ang) * (6.0 + 18.0 * k), lin(colour, 1.6 * (1.0 - k)));
+            }
+            g.circle_2d(Isometry2d::from_translation(kit.pos), 6.0 + 22.0 * k, lin(colour, 1.8 * (1.0 - k)));
+        }
+    }
+
+    // The queue's beat (read by kitten_step this frame): absorbing a note,
+    // the rattle of a "not set up" seat, or a flash at the slot.
     let beat = kit.queue.current(now).map(|(e, k)| (e.clone(), k));
-    let mut body_at = kit.pos;
-    let mut wiggle = now;
-    match &beat {
-        Some((Event::Relay { to }, k)) => {
-            // Leap after the packet to the recipient's rim, perch, hold.
-            let to_pos = nodes.iter().find(|(n, _)| n.name == *to).map(|(_, tf)| tf.translation.truncate());
-            if let Some(tp) = to_pos {
-                let rim = tp + (anchor - tp).normalize_or_zero() * 40.0;
-                let fly = cfg.relay_s / (cfg.relay_s + cfg.perch_s).max(1e-3);
-                let k2 = (k / fly.max(1e-3)).min(1.0);
-                let lift = (k2 * std::f32::consts::PI).sin() * s * 3.0;
-                body_at = anchor.lerp(rim, 1.0 - (1.0 - k2).powi(2)) + Vec2::Y * lift;
-                // The glowing ball in her mouth until she drops it.
-                if *k < fly {
-                    g.circle_2d(Isometry2d::from_translation(body_at + Vec2::new(s * 0.9, s * 1.0)), s * 0.25, lin(base, 2.0));
-                }
-                kit.resume_from = Some(rim - anchor);
-                kit.hop = None;
-                kit.pos = body_at;
-            }
-        }
+    match beat {
         Some((Event::Catch, k)) => {
-            // Y, 00:52: "I don't see her catching it with both paws". From the
-            // screen recording the first version read as a small crown. Now:
-            // both arms swing wide and up to hold the note, a glowing ball,
-            // over her head; sparkles burst out from it and a ring flashes
-            // round her.
-            let up = (k * std::f32::consts::PI * 1.2).sin().max(0.0).max(if *k > 0.3 && *k < 0.8 { 1.0 } else { 0.0 });
-            let hold = body_at + Vec2::new(s * 0.15, s * (2.4 + 0.25 * up));
-            for side in [-1.0f32, 1.0] {
-                let shoulder = body_at + Vec2::new(side * s * 0.55, s * 0.45);
-                let elbow = shoulder + Vec2::new(side * s * 0.75, s * (0.2 + 0.7 * up));
-                let paw = elbow.lerp(hold + Vec2::new(side * s * 0.42, -s * 0.05), up);
-                poly(&mut g, &[shoulder, elbow, paw], c);
-                g.circle_2d(Isometry2d::from_translation(paw), s * 0.17, c);
+            // Absorbed: a burst of light on her, then a photon ring given off
+            // as she decays back to her orbit.
+            if k < 0.35 {
+                let f = 1.0 - k / 0.35;
+                g.circle_2d(Isometry2d::from_translation(kit.pos), glow * (1.0 + 2.5 * (1.0 - f)), lin([1.0, 1.0, 1.0], 2.5 * f));
+                for i in 0..10 {
+                    let ang = i as f32 * std::f32::consts::TAU / 10.0;
+                    let p0 = kit.pos + Vec2::from_angle(ang) * (glow + 4.0);
+                    g.line_2d(p0, p0 + Vec2::from_angle(ang) * 16.0 * f, lin(colour, 2.2 * f));
+                }
+            } else {
+                let f = (k - 0.35) / 0.65;
+                g.circle_2d(Isometry2d::from_translation(kit.pos), glow + 70.0 * f, lin(colour, 1.6 * (1.0 - f)).with_alpha(1.0 - f));
             }
-            if *k < 0.75 {
-                g.circle_2d(Isometry2d::from_translation(hold), s * 0.32, lin(base, 2.2));
-                g.circle_2d(Isometry2d::from_translation(hold), s * 0.18, lin([1.0, 1.0, 1.0], 1.5));
-            }
-            let fade = 1.0 - k;
-            for i in 0..10 {
-                let a = i as f32 * std::f32::consts::TAU / 10.0 + 0.3;
-                let r0 = s * (0.45 + 1.4 * k);
-                let p0 = hold + Vec2::from_angle(a) * r0;
-                g.line_2d(p0, p0 + Vec2::from_angle(a) * s * 0.45 * fade, lin(base, 2.0 * fade));
-            }
-            g.circle_2d(Isometry2d::from_translation(body_at + Vec2::new(0.0, s * 0.6)), s * (1.4 + 1.6 * k), lin(base, 1.2 * fade).with_alpha(0.6 * fade));
         }
-        Some((Event::Rattle, k)) => wiggle = *k * 10.0,
+        Some((Event::Rattle, k)) => {
+            g.circle_2d(Isometry2d::from_translation(anchor), 12.0 + 10.0 * (k * 30.0).sin().abs(), lin(base, 1.2 * (1.0 - k)));
+        }
         Some((Event::Flash, k)) => {
-            g.circle_2d(Isometry2d::from_translation(anchor), s * (1.5 + 2.0 * k), lin(base, 1.5 * (1.0 - k)));
+            g.circle_2d(Isometry2d::from_translation(anchor), 14.0 + 30.0 * k, lin(base, 1.5 * (1.0 - k)));
         }
-        None => {}
+        _ => {}
     }
-    draw_body(&mut g, pose, body_at, s, c, wiggle, physics);
 
-    // Yarn beside the anchor: up to yarn_max balls, the oldest tinted by age.
+    // The electron.
+    electron(&mut g, kit.pos, glow, colour, bright, hollow);
+
+    // Waiting notes: up to `yarn_max` charge dots trailing behind her, the
+    // first one tinted by the oldest note's age (blue fresh, red old).
     let waiting = seat.map(|x| x.waiting).unwrap_or(0);
     let oldest = seat.map(|x| x.oldest_waiting_s).unwrap_or(0.0);
     let yarn = kitten::yarn(waiting, oldest, cfg.yarn_max);
-    for i in 0..yarn.balls {
-        let yp = anchor + Vec2::new(-s * (2.2 + 0.9 * i as f32), -s * 1.6);
-        let col = if i == 0 { lin(mix3([0.4, 0.7, 1.0], [1.0, 0.25, 0.2], yarn.age_tint), 1.0) } else { c.with_alpha(0.7) };
-        g.circle_2d(Isometry2d::from_translation(yp), s * 0.35, col);
-        g.line_2d(yp + Vec2::new(-s * 0.25, -s * 0.1), yp + Vec2::new(s * 0.25, s * 0.15), col);
+    for i in 0..yarn.balls as usize {
+        let at = (i + 1) * 5;
+        if let Some(p) = kit.trail.get(at.min(kit.trail.len().saturating_sub(1))) {
+            let col = if i == 0 { mix3([0.4, 0.7, 1.0], [1.0, 0.25, 0.2], yarn.age_tint) } else { colour };
+            g.circle_2d(Isometry2d::from_translation(*p), 2.5, lin(col, 1.6));
+        }
     }
 
-    // Collar = context; two thin arcs outside it = five-hour and week limits.
-    if !matches!(pose, Pose::Boxed) {
-        let neck = body_at + Vec2::new(s * 0.15, s * 0.75);
-        let top = std::f32::consts::FRAC_PI_2;
-        if let Some(ctx) = seat.and_then(|x| x.ctx) {
-            let f = (ctx as f32 / 100.0).clamp(0.0, 1.0);
-            arc(&mut g, neck, s * 0.5, top + std::f32::consts::PI, top + std::f32::consts::PI + std::f32::consts::PI * f, lin([1.0, 0.8, 0.3], 1.0));
+    // Two thin arcs over her slot: the five-hour and week limits.
+    let top = std::f32::consts::FRAC_PI_2;
+    for (i, lim) in [seat.and_then(|x| x.five_hour), seat.and_then(|x| x.week)].into_iter().enumerate() {
+        if let Some(v) = lim {
+            let f = (v as f32 / 100.0).clamp(0.0, 1.0);
+            let col = lin(mix3([0.3, 0.9, 0.5], [1.0, 0.3, 0.2], f), 0.7);
+            arc(&mut g, anchor, 18.0 + 5.0 * i as f32, top - std::f32::consts::PI * f * 0.5, top + std::f32::consts::PI * f * 0.5, col);
         }
-        for (i, lim) in [seat.and_then(|x| x.five_hour), seat.and_then(|x| x.week)].into_iter().enumerate() {
-            if let Some(v) = lim {
-                let f = (v as f32 / 100.0).clamp(0.0, 1.0);
-                let r = s * (2.0 + 0.35 * i as f32);
-                let col = lin(mix3([0.3, 0.9, 0.5], [1.0, 0.3, 0.2], f), 0.6);
-                arc(&mut g, anchor, r, top - std::f32::consts::PI * f * 0.5, top + std::f32::consts::PI * f * 0.5, col);
-            }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn named(v: &[(&str, f32, f32)]) -> Vec<(String, Vec2)> {
+        v.iter().map(|(n, x, y)| (n.to_string(), Vec2::new(*x, *y))).collect()
+    }
+
+    #[test]
+    fn groups_are_singles_close_pairs_and_close_triples() {
+        let g = groups(&named(&[("a", 0.0, 0.0), ("b", 100.0, 0.0), ("c", 50.0, 80.0), ("d", 900.0, 0.0)]), 260.0);
+        assert!(g.contains(&vec!["a".into()]) && g.contains(&vec!["d".into()]));
+        assert!(g.contains(&vec!["a".into(), "b".into()]));
+        assert!(g.contains(&vec!["a".into(), "b".into(), "c".into()]));
+        assert!(!g.iter().any(|x| x.len() > 1 && x.contains(&"d".to_string())), "far planets are never shared");
+    }
+
+    #[test]
+    fn pick_is_deterministic_and_leaves_the_current_group() {
+        let all = vec![vec!["a".to_string()], vec!["b".to_string()], vec!["a".to_string(), "b".to_string()]];
+        let one = pick(&all, &["a".to_string()], 7, 3, 11).unwrap();
+        assert_eq!(one, pick(&all, &["a".to_string()], 7, 3, 11).unwrap(), "same state, same jump");
+        assert_ne!(one.0, vec!["a".to_string()]);
+        assert!(pick(&[], &[], 1, 1, 1).is_none());
+        // With only the current group there is nowhere else: she stays.
+        assert_eq!(pick(&[vec!["a".to_string()]], &["a".to_string()], 1, 1, 1).unwrap().0, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn a_figure_eight_loops_each_planet_and_crosses_in_the_middle() {
+        let h = [Vec2::new(-60.0, 0.0), Vec2::new(60.0, 0.0)];
+        let r = 54.0;
+        // Mid-loop she is round the first planet, then round the second.
+        assert!(orbit_at(&h, 0.4, r).distance(h[0]) < r + 0.1);
+        assert!(orbit_at(&h, 1.4, r).distance(h[1]) < r + 0.1);
+        // Each loop starts on the side facing the other planet.
+        assert!(orbit_at(&h, 0.0, r).distance(Vec2::new(-6.0, 0.0)) < 0.5);
+        // The two loops turn opposite ways (one anticlockwise, one
+        // clockwise): a smooth figure 8, not two circles touching at a cusp.
+        let turn = |i: usize, f: f32| {
+            let p0 = orbit_at(&h, f, r) - h[i];
+            let p1 = orbit_at(&h, f + 0.01, r) - h[i];
+            p0.perp_dot(p1)
+        };
+        assert!(turn(0, 0.3) * turn(1, 1.3) < 0.0);
+        // And she leaves the crossing heading the same way she arrived.
+        let arrive = orbit_at(&h, 0.999, r) - orbit_at(&h, 0.99, r);
+        let leave = orbit_at(&h, 1.01, r) - orbit_at(&h, 1.0, r);
+        assert!(arrive.dot(leave) > 0.0);
+        // Continuous across the crossing.
+        assert!(orbit_at(&h, 0.999, r).distance(orbit_at(&h, 1.0, r)) < 3.0);
+    }
+
+    #[test]
+    fn a_trinary_orbit_visits_all_three() {
+        let h = [Vec2::new(0.0, 80.0), Vec2::new(-70.0, -40.0), Vec2::new(70.0, -40.0)];
+        for (i, hp) in h.iter().enumerate() {
+            assert!(orbit_at(&h, i as f32 + 0.4, 50.0).distance(*hp) < 50.1);
         }
+        assert!(orbit_at(&h, 2.999, 50.0).distance(orbit_at(&h, 3.0, 50.0)) < 3.0, "wraps smoothly");
     }
 }
