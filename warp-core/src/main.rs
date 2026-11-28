@@ -2978,10 +2978,21 @@ fn fly_comets(
                     0.0 => 1.0,
                     s => s,
                 };
-                let via = (from + to_pos) * 0.12 + (to_pos - from).perp().normalize_or_zero() * (40.0 * side);
+                let laser = mods.cfg.comets.style == "laser";
+                // Laser packets relay through the iris: the quadratic's
+                // midpoint lands on the core, so every message flashes
+                // into Sol before it reaches its agent (Y, t138). The
+                // flight is a time-bound orbital: farther messages take
+                // disproportionately longer, period ~ r^1.5 like a real
+                // orbit's.
+                let (via, seconds) = if laser {
+                    let r = (from + to_pos).length() * 0.5;
+                    (-(from + to_pos) * 0.5, look.seconds * (0.5 + (r / 500.0).powf(1.5)))
+                } else {
+                    ((from + to_pos) * 0.12 + (to_pos - from).perp().normalize_or_zero() * (40.0 * side), look.seconds)
+                };
                 let bright = look.bright * if involved(&to) { 1.0 } else { 0.12 };
                 let colour = lin(look.colour, bright);
-                let laser = mods.cfg.comets.style == "laser";
                 // The bolt's lance: a quad stretched from tail to head,
                 // updated every frame in fly_comets. Hotter than the head
                 // so it blooms.
@@ -3003,7 +3014,7 @@ fn fly_comets(
                         to: to.clone(),
                         to_pos,
                         t: 0.0,
-                        seconds: look.seconds,
+                        seconds,
                         colour,
                         trail: VecDeque::new(),
                         shock: look.shock,
