@@ -16,7 +16,7 @@ use std::process::Command;
 /// with no @names goes to them alone (Y, 06:11); with nobody free, or with
 /// @all or @names, it goes the usual way.
 pub fn route(text: &str, seats: &[String], available: &[String]) -> Result<String, String> {
-    // The deck validates Luna against its registry even when Warp Core's
+    // The deck validates Proton against its registry even when Warp Core's
     // visible roster omits the hidden seat.
     let is_seat = |n: &str| n == "lumo" || seats.iter().any(|s| s == n);
     let mut names: Vec<String> = Vec::new();
@@ -75,7 +75,7 @@ fn words_with_prefix(text: &str, mark: char) -> Vec<String> {
         }
         let name: String = rest.iter().take_while(|&&c| word(c) || c == '-').collect();
         let name = name.to_lowercase();
-        out.push(if name == "luna" { "lumo".into() } else { name });
+        out.push(if matches!(name.as_str(), "luna" | "proton") { "lumo".into() } else { name });
     }
     out
 }
@@ -244,7 +244,8 @@ mod tests {
         assert!(route("@vibe -vibe", &seats()).is_err());
         assert_eq!(route("@Luna @lumo hello", &seats()).unwrap(), "lumo");
         assert_eq!(route("@all -Luna", &seats()).unwrap(), "all -lumo");
-        assert_eq!(route("@Luna hello", &[]).unwrap(), "lumo");
+        assert_eq!(route("@Proton hello", &[]).unwrap(), "lumo");
+        assert_eq!(route("@all -Proton", &seats()).unwrap(), "all -lumo");
     }
 
     #[test]

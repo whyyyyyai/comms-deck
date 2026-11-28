@@ -1270,7 +1270,7 @@ fn mix3(a: [f32; 3], b: [f32; 3], k: f32) -> [f32; 3] {
 fn label_for(name: &str) -> String {
     match name {
         "owner" => "Y".into(),
-        "lumo" => "Luna".into(),
+        "lumo" => "Proton".into(),
         _ => name.into(),
     }
 }
