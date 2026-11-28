@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""warp-distributor: serve a READ-ONLY live view of the warp core to any client.
+
+Y, t147: "a server where you can point your computer at a distributor that
+renders the warp core locally on any client, in a read-only mode where they
+could only see the incoming stream."
+
+Endpoints (GET only; anything else is refused — read-only by construction):
+  /            a single-page canvas viewer (draws the ring, core, ticker)
+  /feed.json   the public feed: seat states, waiting counts, the task board,
+               subagent orbitals, machine summary. NEVER notes, inboxes, logs,
+               mail, configs or secrets — the whitelist below is the whole API.
+
+  warp-distributor [--host 127.0.0.1] [--port 8787] [--data DIR]
+
+The default bind is localhost; point --host at the LAN IP to share. There is
+no auth token by design in v1: whoever can reach the port sees the same
+screen the warp core shows. Do not expose it beyond a trusted network.
+
+Written by: vibe (2026-11-28)
+"""
+import argparse
+import json
+import os
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+DATA = os.path.expanduser("~/.local/share/comms-deck")
+
+# The whole public surface. Anything not built from these three files is not
+# served, so deck notes, the log, notifications, mail and secrets never leave.
+def read_json(path, default):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+def public_feed():
+    status = read_json(os.path.join(DATA, "status.json"), {})
+    seats = []
+    for name, s in (status.get("seats") or {}).items():
+        seats.append({
+            "name": name,
+            "shown": s.get("shown", "away"),
+            "waiting": s.get("waiting", 0),
+            "oldest_waiting_s": s.get("oldest_waiting_s", 0),
+            "ctx": s.get("ctx"),
+        })
+    tasks = []
+    tdir = os.path.join(DATA, "tasks")
+    try:
+        for fn in sorted(os.listdir(tdir)):
+            if fn.endswith(".json"):
+                t = read_json(os.path.join(tdir, fn), {})
+                tasks.append({
+                    "id": t.get("id"),
+                    "holder": t.get("holder"),
+                    "state": t.get("state"),
+                    "summary": t.get("summary", ""),
+                })
+    except OSError:
+        pass
+    subagents = read_json(os.path.join(DATA, "subagents.json"), {}).get("subagents", [])
+    return {
+        "time": time.time(),
+        "seats": seats,
+        "tasks": tasks,
+        "orbitals": subagents,
+        "machine": {
+            "mem": read_json(os.path.join(DATA, "mem.json"), {}),
+        },
+    }
+
+VIEWER = """<!doctype html>
+<html><head><meta charset="utf-8"><title>warp core (read-only)</title>
+<style>body{background:#04060f;color:#cfe3ff;font:14px monospace;margin:0}
+canvas{display:block;margin:auto}#bar{padding:6px 10px;border-bottom:1px solid #223}
+.warn{color:#f80}</style></head>
+<body><div id="bar">warp core — READ-ONLY stream · <span id="t"></span></div>
+<canvas id="c" width="1100" height="700"></canvas>
+<script>
+const cv = document.getElementById('c'), g = cv.getContext('2d');
+async function tick(){
+  let d; try { d = await (await fetch('/feed.json')).json(); }
+  catch(e){ document.getElementById('t').textContent='feed unreachable'; return; }
+  document.getElementById('t').textContent = new Date(d.time*1000).toUTCString();
+  g.clearRect(0,0,cv.width,cv.height);
+  const cx=cv.width/2, cy=cv.height/2, R=Math.min(cv.width,cv.height)*0.36;
+  const on=d.seats.filter(s=>['ready','busy','stuck'].includes(s.shown));
+  g.strokeStyle='#223'; g.beginPath(); g.ellipse(cx,cy,R,R*0.8,0,0,7); g.stroke();
+  g.fillStyle='#9cf'; g.beginPath(); g.arc(cx,cy,26,0,7); g.fill();
+  g.font='12px monospace'; g.textAlign='center';
+  on.forEach((s,i)=>{
+    const a=Math.PI/2 - i/on.length*2*Math.PI;
+    const x=cx+Math.cos(a)*R, y=cy+Math.sin(a)*R*0.8;
+    g.fillStyle = s.shown==='busy' ? '#ffd27f' : '#7fd0ff';
+    g.beginPath(); g.arc(x,y,10,0,7); g.fill();
+    g.fillText(s.name + (s.waiting?` (+${s.waiting})`:''), x, y-18);
+  });
+  const held=d.tasks.filter(t=>t.state==='held');
+  g.fillStyle='#8f8'; g.textAlign='left';
+  held.slice(0,12).forEach((t,i)=>g.fillText(`${t.id} ${t.holder||''} — ${t.summary.slice(0,40)}`, 12, cv.height-12-i*14));
+  d.orbitals.slice(0,8).forEach((o,i)=>{
+    g.fillStyle='#e8a'; g.beginPath(); g.arc(cx+40+i*26, cy-60, 5, 0, 7); g.fill();
+  });
+}
+tick(); setInterval(tick, 2000);
+</script></body></html>
+"""
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *a):  # keep the distributor quiet
+        pass
+
+    def do_GET(self):
+        if self.path == "/":
+            body = VIEWER.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+        elif self.path == "/feed.json":
+            body = json.dumps(public_feed()).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+        else:
+            self.send_response(404)
+            self.send_header("Content-Type", "text/plain")
+            body = b"not found - this server only serves / and /feed.json"
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):  # read-only: refuse every write verb
+        self.send_response(405)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    do_PUT = do_POST
+    do_DELETE = do_POST
+    do_PATCH = do_POST
+
+def main():
+    global DATA
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=8787)
+    ap.add_argument("--data", default=DATA)
+    args = ap.parse_args()
+    DATA = args.data
+    srv = ThreadingHTTPServer((args.host, args.port), Handler)
+    print(f"warp-distributor: read-only view on http://{args.host}:{args.port}/ (feed: /feed.json)")
+    srv.serve_forever()
+
+if __name__ == "__main__":
+    main()
