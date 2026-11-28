@@ -72,6 +72,7 @@ const HALO_D: f32 = 116.0;
 
 mod kitten_view;
 mod left_panel;
+mod right_panel;
 use kitten_view::KittenView;
 
 fn main() {
@@ -150,6 +151,7 @@ fn main() {
                     tooltip,
                     chat_results,
                     draw_chat,
+                    right_panel::right_panel,
                     health_log,
                 )
                     .chain(),
@@ -529,6 +531,8 @@ struct Layout {
     panel: f32,
     /// The left panel's width (t87), 0 when it's off.
     left: f32,
+    /// The right panel's width (F2 Activity, F3 Notify), 0 when it's off.
+    right: f32,
 }
 
 impl Layout {
@@ -595,6 +599,12 @@ struct Chat {
     /// The notes need laying out again.
     dirty: bool,
     drawn_size: f32,
+    /// The right panel's tab (Y, 02:50: "you should still put F2 and F3 on
+    /// the right"): Activity or Notify. Comms lives in the bottom strip.
+    side: Tab,
+    side_dirty: bool,
+    /// Whether the right panel is shown (set by layout_view from [chat] side).
+    side_on: bool,
 }
 
 impl Default for Chat {
@@ -614,6 +624,9 @@ impl Default for Chat {
             rx: Mutex::new(rx),
             dirty: true,
             drawn_size: 0.0,
+            side: Tab::Activity,
+            side_dirty: true,
+            side_on: false,
         }
     }
 }
@@ -1849,15 +1862,22 @@ fn layout_view(
     let w = window_size(&windows);
     let strip = strip_height(w.y, &mods.cfg.chat);
     let left = left_panel::left_width(w.x, &mods.cfg.left);
-    layout.scene = Vec2::new(w.x - left, w.y - strip);
+    let right = right_panel::right_width(w.x, &mods.cfg.chat);
+    layout.scene = Vec2::new(w.x - left - right, w.y - strip);
     layout.panel = strip;
     layout.left = left;
+    layout.right = right;
+    if chat.side_on != (right > 0.0) {
+        chat.side_on = right > 0.0;
+        chat.dirty = true;
+        chat.side_dirty = true;
+    }
     if (chat.drawn_size - strip).abs() > 0.5 {
         chat.drawn_size = strip;
         chat.dirty = true;
     }
     for mut tf in &mut camera {
-        tf.translation.x = -left * 0.5;
+        tf.translation.x = (right - left) * 0.5;
         tf.translation.y = -strip * 0.5;
     }
 }
@@ -2239,6 +2259,15 @@ fn pointer(
 }
 
 fn set_tab(chat: &mut Chat, tab: Tab) {
+    // F1 is the strip's Comms; F2/F3 pick the right panel's tab (when it's
+    // on; without it they show in the strip as before).
+    if tab != Tab::Comms && chat.side_on {
+        if chat.side != tab {
+            chat.side = tab;
+            chat.side_dirty = true;
+        }
+        return;
+    }
     if chat.tab != tab {
         chat.tab = tab;
         chat.scroll = 0;
@@ -3797,12 +3826,16 @@ fn draw_chat(
     }
     for (mut text, mut tf, mut v) in &mut title {
         *v = vis;
-        let mut t = Tab::ALL
-            .iter()
-            .enumerate()
-            .map(|(i, tab)| if *tab == chat.tab { format!("[F{} {}]", i + 1, tab.name()) } else { format!(" F{} {} ", i + 1, tab.name()) })
-            .collect::<Vec<_>>()
-            .join(" ");
+        let mut t = if chat.side_on {
+            "[F1 COMMS]     F2 ACTIVITY · F3 NOTIFY on the right".to_string()
+        } else {
+            Tab::ALL
+                .iter()
+                .enumerate()
+                .map(|(i, tab)| if *tab == chat.tab { format!("[F{} {}]", i + 1, tab.name()) } else { format!(" F{} {} ", i + 1, tab.name()) })
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
         if chat.scroll > 0 {
             t.push_str(&format!("  (back {}, PgDn)", chat.scroll));
         }
@@ -4403,7 +4436,7 @@ mod tests {
 
     #[test]
     fn the_strip_sits_under_the_scene_centre_column() {
-        let layout = Layout { scene: Vec2::new(1000.0, 800.0), panel: 200.0, left: 0.0 };
+        let layout = Layout { scene: Vec2::new(1000.0, 800.0), panel: 200.0, left: 0.0, right: 0.0 };
         assert!(layout.in_panel(Vec2::new(0.0, -410.0)));
         assert!(layout.in_panel(Vec2::new(490.0, -450.0)));
         assert!(!layout.in_panel(Vec2::new(0.0, -390.0)), "above the strip is scene");

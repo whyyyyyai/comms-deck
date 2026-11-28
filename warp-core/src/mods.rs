@@ -453,9 +453,10 @@ pub fn ghosts_allowed(fps: f32, cfg: &KittenCfg) -> bool {
 #[serde(default, deny_unknown_fields)]
 pub struct ChatCfg {
     pub show: bool,
-    /// Legacy: the old side panel's width share. Kept so older configs
-    /// still parse; the chat strip spans the whole central column now.
+    /// The right panel's width share (F2 Activity, F3 Notify; Y, 02:50).
     pub width: f32,
+    /// Show the right panel. Off: F2/F3 show in the bottom strip instead.
+    pub side: bool,
     /// The strip's share of the window's height.
     pub height: f32,
     pub font: f32,
@@ -464,7 +465,7 @@ pub struct ChatCfg {
 }
 impl Default for ChatCfg {
     fn default() -> Self {
-        ChatCfg { show: true, width: 0.32, height: 0.2, font: 14.0, keep: 200 }
+        ChatCfg { show: true, width: 0.22, side: true, height: 0.2, font: 14.0, keep: 200 }
     }
 }
 
