@@ -7169,9 +7169,10 @@ def install(yes):
             link("load-balancer", repo)
     step(f"link {bin_dir}/load-balancer to ~/load-balancer, if that repo is cloned (the task board)",
          link_balancer)
-    step(f"link {bin_dir}/comms-deck (and the old name, launchpad) and push-courier to this repo",
+    step(f"link {bin_dir}/comms-deck (and the old name, launchpad), push-courier and net-watch to this repo",
          lambda: (bin_dir.mkdir(parents=True, exist_ok=True), link("comms-deck", here / "comms-deck"),
-                  link("launchpad", here / "comms-deck"), link("push-courier", here / "push-courier")))
+                  link("launchpad", here / "comms-deck"), link("push-courier", here / "push-courier"),
+                  link("net-watch", here / "net-watch")))
 
     def claude_settings():
         path = HOME / ".claude/settings.json"
@@ -7384,7 +7385,7 @@ def install(yes):
     def services():
         unit_dir = HOME / ".config/systemd/user"
         unit_dir.mkdir(parents=True, exist_ok=True)
-        for unit in ("comms-deck.service", "push-courier.service"):
+        for unit in ("comms-deck.service", "push-courier.service", "net-watch.service"):
             link_path = unit_dir / unit
             link_path.unlink(missing_ok=True)
             link_path.symlink_to(here / "systemd" / unit)
@@ -7393,8 +7394,8 @@ def install(yes):
             (unit_dir / old).unlink(missing_ok=True)
         subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
         subprocess.run(["systemctl", "--user", "enable", "--now", "comms-deck.service",
-                        "push-courier.service"], check=True, capture_output=True)
-    step("install and start comms-deck.service and push-courier.service", services)
+                        "push-courier.service", "net-watch.service"], check=True, capture_output=True)
+    step("install and start comms-deck.service, push-courier.service and net-watch.service", services)
 
     for text, _ in steps:
         print(f"  - {text}")
