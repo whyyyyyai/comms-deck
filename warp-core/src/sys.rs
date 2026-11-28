@@ -166,6 +166,59 @@ pub fn warning(m: &Machine, stalls: usize) -> bool {
     stalls > 0 || m.mem.used_share() > 0.9 || m.mem.swap_share() > 0.75
 }
 
+/// How close the machine is to running out of memory, for the heads-up
+/// alert across the top of the scene (Y, 2026-11-27, after the 22:42
+/// freeze: "a warning that comes up on the warp core heads up display,
+/// like a video game"). The kernel only steps in once swap is gone, and by
+/// then the iMac has been thrashing for minutes, so this warns well before.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Alert {
+    None,
+    /// Swap half used, or under 3 GB left in RAM and swap together.
+    Warning,
+    /// Swap 80% used, or under 1.5 GB left in RAM and swap together.
+    Critical,
+}
+
+/// RAM still free plus swap still free, in kB: what's left before a freeze.
+pub fn headroom_kb(m: &Memory) -> u64 {
+    m.available_kb + m.swap_free_kb
+}
+
+pub fn memory_alert(m: &Memory) -> Alert {
+    if m.total_kb == 0 {
+        return Alert::None;
+    }
+    // RAM share alone isn't a sign of trouble since the 8 GB zram swap went
+    // in (Y, 23:19: "change the parameters"): zram lives in RAM, so RAM runs
+    // near full by design while plenty of swap is left. What matters is
+    // what's left before a freeze, RAM and swap together.
+    let gb = 1024 * 1024;
+    let left = headroom_kb(m);
+    if m.swap_share() >= 0.8 || left < gb * 3 / 2 {
+        Alert::Critical
+    } else if m.swap_share() >= 0.5 || left < 3 * gb {
+        Alert::Warning
+    } else {
+        Alert::None
+    }
+}
+
+/// The alert's words: a headline and a line of figures.
+pub fn alert_text(m: &Memory, a: Alert) -> String {
+    let figures = format!(
+        "ram {:.0}%   swap {:.0}%   {:.1} GB left",
+        m.used_share() * 100.0,
+        m.swap_share() * 100.0,
+        gb(headroom_kb(m))
+    );
+    match a {
+        Alert::None => String::new(),
+        Alert::Warning => format!("!  LOW MEMORY  !\n{figures}"),
+        Alert::Critical => format!("!!  MEMORY CRITICAL  !!\n{figures}\nclose an agent or a window now"),
+    }
+}
+
 /// The panel's text. `context` is (seat label, context used %) for the
 /// seats that report it.
 pub fn panel_text(m: &Machine, f: &Frames, context: &[(String, f64)]) -> String {
@@ -232,6 +285,35 @@ mod tests {
         assert_eq!(m.swap_used_kb(), 4194300 - 1677720);
         assert!((m.used_share() - 0.6528).abs() < 0.001);
         assert_eq!(parse_meminfo("garbage\nMemTotal: x kB\n"), Memory::default());
+    }
+
+    #[test]
+    fn memory_alert_levels() {
+        let gb = 1024 * 1024;
+        let m = |avail: u64, swap_total: u64, swap_free: u64| Memory {
+            total_kb: 7 * gb,
+            available_kb: avail,
+            swap_total_kb: swap_total,
+            swap_free_kb: swap_free,
+            shmem_kb: 0,
+        };
+        // Tonight after the reboot: 2.4 GB free, swap untouched.
+        assert_eq!(memory_alert(&m(2 * gb + gb / 2, 4 * gb, 4 * gb)), Alert::None);
+        // 23:19 with zram: RAM 90% used, but 9 GB of swap free: no alarm.
+        assert_eq!(memory_alert(&m(gb * 8 / 10, 12 * gb, 9 * gb)), Alert::None);
+        // Under 3 GB left all told.
+        assert_eq!(memory_alert(&m(gb / 2, 4 * gb, 2 * gb)), Alert::Warning);
+        // Under 1.5 GB left all told.
+        assert_eq!(memory_alert(&m(gb / 2, 4 * gb, gb / 2)), Alert::Critical);
+        // Swap half gone.
+        assert_eq!(memory_alert(&m(2 * gb, 12 * gb, 6 * gb)), Alert::Warning);
+        // Swap 80% gone.
+        assert_eq!(memory_alert(&m(2 * gb, 12 * gb, 2 * gb)), Alert::Critical);
+        // Under 1 GB left all told: the 22:42 freeze.
+        assert_eq!(memory_alert(&m(gb / 4, 4 * gb, gb / 2)), Alert::Critical);
+        assert_eq!(memory_alert(&Memory::default()), Alert::None);
+        assert!(alert_text(&m(gb / 4, 4 * gb, gb / 2), Alert::Critical).starts_with("!!  MEMORY CRITICAL"));
+        assert_eq!(alert_text(&m(2 * gb, 4 * gb, 4 * gb), Alert::None), "");
     }
 
     #[test]

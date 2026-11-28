@@ -46,7 +46,7 @@ use bevy::{
         keyboard::{Key, KeyboardInput},
         mouse::MouseWheel,
     },
-    text::{TextBounds, TextLayoutInfo},
+    text::{TextBounds, TextLayout, TextLayoutInfo},
     post_process::bloom::Bloom,
     prelude::*,
     reflect::TypePath,
@@ -1115,6 +1115,10 @@ struct Hud;
 #[derive(Component)]
 struct SysPanel;
 
+/// The low-memory alert across the top of the scene (Y, 2026-11-27).
+#[derive(Component)]
+struct MemAlert;
+
 /// The task list at the bottom of the scene's left side: id, title, holder, how long.
 #[derive(Component)]
 struct TaskPanel;
@@ -1407,6 +1411,16 @@ fn setup(
         TextColor(Color::srgb(0.5, 0.6, 0.75)),
         Anchor::TOP_LEFT,
         Transform::from_xyz(0.0, 0.0, 5.0),
+    ));
+    commands.spawn((
+        MemAlert,
+        Text2d::new(""),
+        TextFont { font_size: FontSize::Px(34.0), ..default() },
+        TextLayout::justify(Justify::Center),
+        TextColor(Color::srgb(1.0, 0.7, 0.3)),
+        Anchor::TOP_CENTER,
+        Transform::from_xyz(0.0, 0.0, 6.0),
+        Visibility::Hidden,
     ));
     commands.spawn((
         TaskPanel,
@@ -2813,7 +2827,9 @@ fn sys_panel(
     view: Res<View>,
     real: Res<Time<Real>>,
     layout: Res<Layout>,
-    mut panel: Query<(&mut Text2d, &mut Transform, &mut TextColor, &mut Visibility), With<SysPanel>>,
+    mut panel: Query<(&mut Text2d, &mut Transform, &mut TextColor, &mut Visibility), (With<SysPanel>, Without<MemAlert>)>,
+    mut alert: Query<(&mut Text2d, &mut Transform, &mut TextColor, &mut Visibility), (With<MemAlert>, Without<SysPanel>)>,
+    mut gizmos: Gizmos,
     mut state: Local<(sys::Frames, sys::Machine, f32)>,
 ) {
     let now = real.elapsed_secs();
@@ -2847,6 +2863,73 @@ fn sys_panel(
         tf.translation.x = -layout.half().x + 18.0;
         tf.translation.y = layout.half().y - 70.0;
     }
+    // The low-memory alert shows whatever the HUD toggles say: it is the
+    // one thing on screen that must never be hidden. Amber and breathing
+    // for a warning; red, flashing, with a red frame round the scene when
+    // critical, like a game's low-health screen.
+    // A demo on demand (Y, 22:49: "bring up the low memory alert so I can
+    // see what it looks like"): `touch ~/.config/warp-core/alert-demo` shows
+    // 10 s of the warning, then 10 s of critical, with made-up figures, and
+    // removes the file. Checked with the 2 s machine read.
+    let (mut level, mut mem) = (sys::memory_alert(&state.1.mem), state.1.mem.clone());
+    if let Some(t0) = demo_since(now) {
+        let gb = 1024 * 1024;
+        let (lvl, avail, swap_free) =
+            if now - t0 < 10.0 { (sys::Alert::Warning, gb, 6 * gb) } else { (sys::Alert::Critical, gb / 4, gb / 2) };
+        mem = sys::Memory { total_kb: 7 * gb, available_kb: avail, swap_total_kb: 12 * gb, swap_free_kb: swap_free, shmem_kb: 0 };
+        level = lvl;
+    }
+    let words = sys::alert_text(&mem, level);
+    let (rgb, pulse) = match level {
+        sys::Alert::Critical => ([1.0, 0.15, 0.1], 0.55 + 0.45 * (now * 7.0).sin().abs()),
+        _ => ([1.0, 0.7, 0.25], 0.8 + 0.2 * (now * 2.0).sin()),
+    };
+    for (mut t, mut tf, mut c, mut vis) in &mut alert {
+        let want = if level == sys::Alert::None { Visibility::Hidden } else { Visibility::Inherited };
+        if *vis != want {
+            *vis = want;
+        }
+        if t.0 != words {
+            t.0 = words.clone();
+        }
+        c.0 = Color::srgba(rgb[0], rgb[1], rgb[2], pulse);
+        tf.translation.x = 0.0;
+        tf.translation.y = layout.half().y - 40.0;
+    }
+    if level == sys::Alert::Critical {
+        let h = layout.half();
+        for (inset, a) in [(3.0, pulse), (9.0, pulse * 0.5), (16.0, pulse * 0.25)] {
+            gizmos.rect_2d(
+                Isometry2d::IDENTITY,
+                Vec2::new(2.0 * (h.x - inset), 2.0 * (h.y - inset)),
+                Color::linear_rgba(rgb[0] * 2.0, rgb[1], rgb[2], a),
+            );
+        }
+    }
+}
+
+/// When the alert demo started (see sys_panel), while it runs: the file
+/// ~/.config/warp-core/alert-demo starts it, 20 s ends it.
+fn demo_since(now: f32) -> Option<f32> {
+    use std::sync::Mutex;
+    static START: Mutex<Option<f32>> = Mutex::new(None);
+    static LAST_LOOK: Mutex<f32> = Mutex::new(-10.0);
+    let mut start = START.lock().ok()?;
+    if let Some(t0) = *start {
+        if now - t0 < 20.0 {
+            return Some(t0);
+        }
+        *start = None;
+    }
+    let mut last = LAST_LOOK.lock().ok()?;
+    if now - *last >= 1.0 {
+        *last = now;
+        let f = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/warp-core/alert-demo");
+        if std::fs::remove_file(&f).is_ok() {
+            *start = Some(now);
+        }
+    }
+    *start
 }
 
 /// A task's title cut to `max` characters at a word, with an ellipsis.
