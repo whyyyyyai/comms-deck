@@ -16,7 +16,9 @@ use std::process::Command;
 /// with no @names goes to them alone (Y, 06:11); with nobody free, or with
 /// @all or @names, it goes the usual way.
 pub fn route(text: &str, seats: &[String], available: &[String]) -> Result<String, String> {
-    let is_seat = |n: &str| seats.iter().any(|s| s == n);
+    // The deck validates Luna against its registry even when Warp Core's
+    // visible roster omits the hidden seat.
+    let is_seat = |n: &str| n == "lumo" || seats.iter().any(|s| s == n);
     let mut names: Vec<String> = Vec::new();
     let mut excludes: Vec<String> = Vec::new();
     for word in words_with_prefix(text, '@') {
@@ -72,7 +74,8 @@ fn words_with_prefix(text: &str, mark: char) -> Vec<String> {
             continue;
         }
         let name: String = rest.iter().take_while(|&&c| word(c) || c == '-').collect();
-        out.push(name.to_lowercase());
+        let name = name.to_lowercase();
+        out.push(if name == "luna" { "lumo".into() } else { name });
     }
     out
 }
@@ -239,6 +242,9 @@ mod tests {
         assert!(route("@nobody hi", &seats()).unwrap_err().contains("@nobody"));
         assert!(route("@owner hi", &seats()).is_err(), "Y doesn't send to Y");
         assert!(route("@vibe -vibe", &seats()).is_err());
+        assert_eq!(route("@Luna @lumo hello", &seats()).unwrap(), "lumo");
+        assert_eq!(route("@all -Luna", &seats()).unwrap(), "all -lumo");
+        assert_eq!(route("@Luna hello", &[]).unwrap(), "lumo");
     }
 
     #[test]
