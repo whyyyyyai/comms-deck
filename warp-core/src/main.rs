@@ -94,6 +94,7 @@ fn main() {
         .insert_resource(Chat::default())
         .insert_resource(Layout::default())
         .insert_resource(WebcamView::default())
+        .insert_resource(TriumphView::default())
         .insert_resource(Rng(0x9E37_79B9_7F4A_7C15))
         // 30 fps until the mods say otherwise ([look] fps): it is a display,
         // not a game, and half the CPU of drawing at the refresh rate.
@@ -134,7 +135,7 @@ fn main() {
         .add_systems(
             Update,
             (
-                (watch_mods, pace_frames, breathe_background, read_feed, layout_view, apply_rules, layout_seats, kitten_view::kitten_step, left_panel::left_keys, layout_tasks, layout_held_tasks, pointer, chat_input, keys, webcam).chain(),
+                (watch_mods, pace_frames, breathe_background, read_feed, layout_view, apply_rules, layout_seats, kitten_view::kitten_step, left_panel::left_keys, layout_tasks, layout_held_tasks, pointer, chat_input, keys, webcam, triumph).chain(),
                 (
                     glow_seats,
                     draw_rings,
@@ -392,6 +393,59 @@ struct WebcamPlate;
 /// The CAM badge's backdrop and label: click toggles the camera (Y, t163).
 #[derive(Component)]
 struct WebcamBtn;
+/// The TRIUMPH badge's backdrop and label: click approves the memento queue
+/// (Y, t164 — no terminal needed).
+#[derive(Component)]
+struct TriumphBtn;
+
+#[derive(Resource, Default)]
+struct TriumphView {
+    spawned: bool,
+    last_poll: f32,
+    /// The approval token from needs-approval.json, while the queue waits.
+    token: Option<String>,
+    /// How many PRs are queued, for the label.
+    count: usize,
+    /// The badge's centre and half-size in world units, for the click test.
+    button: Option<(Vec2, Vec2)>,
+    /// The pointer is on the badge this frame: it brightens.
+    hover: bool,
+    /// The token Y clicked, while `memento go` runs; the badge re-arms once
+    /// the queue shows a different token or the approval would be stale.
+    spent: Option<(String, f32)>,
+}
+
+fn memento_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/state/memento")
+}
+
+/// Y's click on TRIUMPH: write the approval memento's confirm() accepts,
+/// then run `memento go` detached — the merge needs no terminal at all.
+fn triumph_approve(view: &mut TriumphView, now: f32) {
+    let Some(token) = view.token.clone() else { return };
+    let dir = memento_dir();
+    let ok = std::fs::write(
+        dir.join("approved.json"),
+        serde_json::json!({"token": token, "time": "warp-core click"}).to_string(),
+    )
+    .is_ok();
+    if ok {
+        view.spent = Some((token, now));
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("go.log"));
+        if let Ok(out) = log {
+            let err = out.try_clone().ok();
+            let mut cmd = std::process::Command::new("memento");
+            cmd.arg("go").stdout(out);
+            if let Some(err) = err {
+                cmd.stderr(err);
+            }
+            let _ = cmd.spawn();
+        }
+    }
+}
 
 #[derive(Resource, Default)]
 struct WebcamView {
@@ -615,6 +669,79 @@ fn webcam(
             Vec2::new(62.0, 26.0),
             Color::linear_rgba(0.6, 0.75, 1.0, 0.9),
         );
+    }
+}
+
+/// The TRIUMPH badge, top-centre: memento drops needs-approval.json while
+/// its queue waits, and a click here approves the merge — no terminal
+/// (Y, t164). Gold, because it's the triumph.
+fn triumph(
+    mut commands: Commands,
+    layout: Res<Layout>,
+    real: Res<Time<Real>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut colours: ResMut<Assets<ColorMaterial>>,
+    mut view: ResMut<TriumphView>,
+    mut badge: Query<(&mut Transform, &mut Visibility, Option<&mut Text2d>), With<TriumphBtn>>,
+) {
+    let now = real.elapsed_secs();
+    if !view.spawned {
+        view.spawned = true;
+        let gold = colours.add(Color::srgb(0.45, 0.34, 0.08));
+        commands.spawn((
+            TriumphBtn,
+            Mesh2d(meshes.add(Rectangle::new(120.0, 26.0))),
+            MeshMaterial2d(gold),
+            Transform::from_xyz(0.0, 0.0, 6.0),
+            Visibility::Hidden,
+        ));
+        commands.spawn((
+            TriumphBtn,
+            Text2d::new("TRIUMPH"),
+            TextFont { font_size: FontSize::Px(13.0), ..default() },
+            TextColor(Color::srgb(1.0, 0.85, 0.45)),
+            Anchor::CENTER,
+            Transform::from_xyz(0.0, 0.0, 6.1),
+            Visibility::Hidden,
+        ));
+    }
+    if now - view.last_poll >= 1.0 {
+        view.last_poll = now.max(1e-3);
+        let need = std::fs::read_to_string(memento_dir().join("needs-approval.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+        let need_tok = need.as_ref().and_then(|v| v["token"].as_str().map(String::from));
+        // Re-arm once memento has moved the queue past the clicked token,
+        // or once the approval would be too old to spend anyway.
+        if let Some((tok, at)) = &view.spent {
+            if need_tok.as_deref() != Some(tok.as_str()) || now - *at > 130.0 {
+                view.spent = None;
+            }
+        }
+        view.token = if view.spent.is_some() { None } else { need_tok };
+        view.count = need
+            .as_ref()
+            .and_then(|v| v["prs"].as_array().map(|a| a.len()))
+            .unwrap_or(0);
+    }
+    let on = view.token.is_some();
+    let hlf = layout.half();
+    let c = Vec2::new(0.0, hlf.y - 34.0);
+    view.button = on.then_some((c, Vec2::new(62.0, 14.0)));
+    let label = if view.count > 1 {
+        format!("TRIUMPH ×{}", view.count)
+    } else {
+        "TRIUMPH".to_string()
+    };
+    for (mut tf, mut vis, text) in &mut badge {
+        *vis = if on { Visibility::Inherited } else { Visibility::Hidden };
+        tf.translation.x = c.x;
+        tf.translation.y = c.y;
+        if let Some(mut t) = text {
+            if t.0 != label {
+                t.0 = label.clone().into();
+            }
+        }
     }
 }
 
@@ -2637,7 +2764,9 @@ fn pointer(
     mut deck: ResMut<Deck>,
     mut chat: ResMut<Chat>,
     mut webcam: ResMut<WebcamView>,
+    mut triumph: ResMut<TriumphView>,
     layout: Res<Layout>,
+    real: Res<Time<Real>>,
     windows: Query<&Window>,
     cameras: Query<(&Camera, &GlobalTransform)>,
     mouse: Res<ButtonInput<MouseButton>>,
@@ -2693,6 +2822,14 @@ fn pointer(
             let _ = std::fs::write(&f, "off\n");
         }
         webcam.off = f.exists();
+        return;
+    }
+    // The TRIUMPH badge approves the memento queue (Y, t164).
+    triumph.hover = world.is_some_and(|w| {
+        triumph.button.is_some_and(|(c, h)| (w - c).abs().cmple(h).all())
+    });
+    if triumph.hover && mouse.just_pressed(MouseButton::Left) {
+        triumph_approve(&mut triumph, real.elapsed_secs());
         return;
     }
     deck.cursor = world;
