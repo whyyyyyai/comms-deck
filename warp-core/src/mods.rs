@@ -85,10 +85,17 @@ pub struct Look {
     /// memory traffic on the 4480x2520 display; the shapes are drawn smooth
     /// by their shaders, so only thin lines gain from it.
     pub msaa: u32,
+    /// The background breathing on a pure sine: cycles a second, and how
+    /// far each channel swings either side of `background` (a fraction).
+    /// The channels run a third of a cycle apart, so the hue drifts too.
+    /// 0 holds the flat colour (Y, t142).
+    pub background_hz: f32,
+    pub background_amp: f32,
 }
 impl Default for Look {
     fn default() -> Self {
-        Look { background: [0.01, 0.012, 0.03], bloom: 0.28, fps: 60.0, fps_unfocused: 60.0, fps_hidden: 24.0, msaa: 1 }
+        Look { background: [0.01, 0.012, 0.03], bloom: 0.28, fps: 60.0, fps_unfocused: 60.0, fps_hidden: 24.0, msaa: 1,
+              background_hz: 0.0, background_amp: 0.0 }
     }
 }
 
