@@ -277,6 +277,12 @@ impl Queue {
         true
     }
 
+    /// The event playing now, without advancing the queue (Claude: hops
+    /// pause while a relay plays).
+    pub fn peek(&self) -> Option<&Event> {
+        self.active.as_ref().map(|a| &a.event)
+    }
+
     pub fn current(&mut self, now: f32) -> Option<(&Event, f32)> {
         self.advance(now);
         let active = self.active.as_ref()?;

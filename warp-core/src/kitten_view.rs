@@ -295,6 +295,13 @@ pub fn draw_kitten(mut kit: ResMut<KittenView>, deck: Res<Deck>, mods: Res<Mods>
     let pose = kit.pose;
     let physics = kitten::held_task(&deck.tasks, SEAT).is_some_and(|t| kitten::is_physics(t.title.as_deref(), &cfg.physics_words));
 
+    // The anchor marker (Vibe's recipe): a dim dashed circle at her ring
+    // slot. Her label and routing hang off it; it never moves with her.
+    for i in 0..12 {
+        let a0 = i as f32 * std::f32::consts::TAU / 12.0;
+        arc(&mut g, anchor, s * 0.9, a0, a0 + std::f32::consts::TAU / 24.0, c.with_alpha(0.25));
+    }
+
     // Ghosts in the ghost window before a hop (superposition, then collapse).
     if let Some(h) = &kit.hop {
         let until = h.start - now;
