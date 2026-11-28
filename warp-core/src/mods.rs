@@ -367,6 +367,71 @@ impl Default for PlanetsCfg {
     }
 }
 
+/// Lumo's quantum kitten (t78): her own movement law, poses, hops, yarn and
+/// the event queue are all tuned here. The drawing itself lives in kitten.rs
+/// and main.rs; this is only the numbers.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct KittenCfg {
+    pub enable: bool,
+    /// The kitten's body size in px (gizmo line recipes scale from it).
+    pub size: f32,
+    /// How far she may hop from her anchor, as a share of the seat spacing.
+    pub reach: f32,
+    /// Seconds she dwells between hops when nothing waits.
+    pub base_dwell_s: f32,
+    /// Dwell multiplier floor: the most restlessness age can buy (×0.6 at 1 h+).
+    pub dwell_floor: f32,
+    /// Dwell never drops below this many seconds, however restless.
+    pub dwell_min_s: f32,
+    /// How long the ghost kittens show before a hop collapses.
+    pub ghost_s: f32,
+    /// Ghost opacity.
+    pub ghost_alpha: f32,
+    /// Ghosts only draw while the measured fps is at least this.
+    pub ghost_min_fps: f32,
+    /// Yarn balls drawn beside the anchor before "+N" takes over.
+    pub yarn_max: u8,
+    /// Seconds each queue event animates for.
+    pub catch_s: f32,
+    pub perch_s: f32,
+    pub rattle_s: f32,
+    pub relay_s: f32,
+    /// Title words that mark a held task as physics work (the busy pose bats
+    /// at an orbit preview). Case-insensitive substring match.
+    pub physics_words: Vec<String>,
+}
+impl Default for KittenCfg {
+    fn default() -> Self {
+        KittenCfg {
+            enable: true,
+            size: 14.0,
+            reach: 0.6,
+            base_dwell_s: 4.0,
+            dwell_floor: 0.6,
+            dwell_min_s: 1.5,
+            ghost_s: 0.5,
+            ghost_alpha: 0.25,
+            ghost_min_fps: 30.0,
+            yarn_max: 3,
+            catch_s: 0.6,
+            perch_s: 0.8,
+            rattle_s: 0.4,
+            relay_s: 1.2,
+            physics_words: ["physic", "orbit", "gravity", "warp", "solver"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        }
+    }
+}
+
+/// Ghost kittens cost draw calls the M1 can ill afford during stalls: they
+/// only appear while the measured frame rate clears the configured floor.
+pub fn ghosts_allowed(fps: f32, cfg: &KittenCfg) -> bool {
+    cfg.enable && fps >= cfg.ghost_min_fps
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ChatCfg {
@@ -583,6 +648,7 @@ pub struct Config {
     pub splash: SplashCfg,
     pub conduits: ConduitsCfg,
     pub planets: PlanetsCfg,
+    pub kitten: KittenCfg,
     pub rule: Vec<RuleSpec>,
 }
 
