@@ -82,6 +82,37 @@ fn pct(v: Option<f64>) -> String {
     v.map(|x| format!("{:>3.0}%", x)).unwrap_or_else(|| "   -".into())
 }
 
+fn token_count(tokens: f64) -> String {
+    if tokens >= 1_000_000.0 {
+        format!("{:.1}M", tokens / 1_000_000.0)
+    } else if tokens >= 1_000.0 {
+        format!("{:.1}k", tokens / 1_000.0)
+    } else {
+        format!("{tokens:.0}")
+    }
+}
+
+fn context_line(seat: &SeatInfo) -> String {
+    let mut line = "Context".to_owned();
+    if let Some(used) = seat.ctx_tokens {
+        line.push(' ');
+        line.push_str(&token_count(used));
+        if let Some(capacity) = seat.ctx_capacity {
+            line.push('/');
+            line.push_str(&token_count(capacity));
+        }
+        line.push_str(" tokens");
+    } else if let Some(capacity) = seat.ctx_capacity {
+        line.push_str(&format!(" capacity {} tokens", token_count(capacity)));
+    }
+    if let Some(percent) = seat.ctx {
+        line.push_str(&format!(" | {percent:.0}%"));
+    } else if seat.ctx_tokens.is_none() && seat.ctx_capacity.is_none() {
+        line.push_str(" unavailable");
+    }
+    line
+}
+
 /// The crew tab: one block per seat, in the ring's order.
 pub fn crew_text(seats: &[SeatInfo], tasks: &[feed::TaskInfo]) -> String {
     let mut s = String::from("CREW\n\n");
@@ -92,10 +123,11 @@ pub fn crew_text(seats: &[SeatInfo], tasks: &[feed::TaskInfo]) -> String {
     for seat in seats {
         let held: Vec<&str> = tasks.iter().filter(|t| t.holder.as_deref() == Some(seat.name.as_str())).map(|t| t.id.as_str()).collect();
         s.push_str(&format!("{:<8} {}\n", label_for(&seat.name), seat.shown));
+        s.push_str(&format!("         {}\n", context_line(seat)));
         let wait = if seat.waiting > 0 { format!("{} waiting, oldest {}", seat.waiting, ago(seat.oldest_waiting_s)) } else { "no notes waiting".into() };
         s.push_str(&format!("         {wait}\n"));
-        if seat.ctx.is_some() || seat.five_hour.is_some() || seat.week.is_some() {
-            s.push_str(&format!("         ctx {}  5h {}  wk {}\n", pct(seat.ctx), pct(seat.five_hour), pct(seat.week)));
+        if seat.five_hour.is_some() || seat.week.is_some() {
+            s.push_str(&format!("         5h {}  wk {}\n", pct(seat.five_hour), pct(seat.week)));
         }
         if !held.is_empty() {
             s.push_str(&format!("         holds {}\n", held.join(", ")));
@@ -520,6 +552,16 @@ pub fn glyphs(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_window_labels_distinguish_zero_and_unknown() {
+        let mut seat = SeatInfo::default();
+        assert_eq!(context_line(&seat), "Context unavailable");
+        seat.ctx_tokens = Some(0.0);
+        seat.ctx_capacity = Some(200_000.0);
+        seat.ctx = Some(0.0);
+        assert_eq!(context_line(&seat), "Context 0/200.0k tokens | 0%");
+    }
 
     #[test]
     fn glyphs_the_font_lacks_become_ascii() {

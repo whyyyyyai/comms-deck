@@ -37,6 +37,8 @@ pub struct SeatInfo {
     pub week: Option<f64>,
     /// Tokens in the seat's context window, for the stars' split.
     pub ctx_tokens: Option<f64>,
+    /// Total context capacity in tokens, when the provider reports it.
+    pub ctx_capacity: Option<f64>,
     /// The session's cost as the seat reports it (an estimate).
     pub cost_usd: Option<f64>,
 }
@@ -362,12 +364,18 @@ pub fn parse_usage(v: &Value) -> (Option<f64>, Option<f64>, Option<f64>) {
 /// x window size (the deck's context_tokens); None when neither is there.
 pub fn context_tokens(v: &Value) -> Option<f64> {
     let cw = v.get("data")?.get("context_window")?;
-    if let Some(t) = cw.get("context_tokens").and_then(Value::as_f64).filter(|t| *t > 0.0) {
+    if let Some(t) = cw.get("context_tokens").and_then(Value::as_f64).filter(|t| *t >= 0.0) {
         return Some(t);
     }
-    let pct = cw.get("used_percentage").and_then(Value::as_f64).filter(|p| *p > 0.0)?;
-    let size = cw.get("context_window_size").and_then(Value::as_f64).filter(|s| *s > 0.0)?;
+    let pct = cw.get("used_percentage").and_then(Value::as_f64).filter(|p| *p >= 0.0)?;
+    let size = context_capacity(v)?;
     Some(size * pct / 100.0)
+}
+
+fn context_capacity(v: &Value) -> Option<f64> {
+    v.pointer("/data/context_window/context_window_size")?
+        .as_f64()
+        .filter(|size| *size > 0.0)
 }
 
 fn add_usage(seats: &mut [SeatInfo], dir: &std::path::Path) {
@@ -377,6 +385,10 @@ fn add_usage(seats: &mut [SeatInfo], dir: &std::path::Path) {
         let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
         (seat.ctx, seat.five_hour, seat.week) = parse_usage(&v);
         seat.ctx_tokens = context_tokens(&v);
+        seat.ctx_capacity = context_capacity(&v);
+        if seat.ctx.is_none() {
+            seat.ctx = seat.ctx_tokens.zip(seat.ctx_capacity).map(|(used, capacity)| used / capacity * 100.0);
+        }
         seat.cost_usd = v.pointer("/data/cost/total_cost_usd").and_then(Value::as_f64);
     }
 }
@@ -750,6 +762,9 @@ mod tests {
             Some(20000.0)
         );
         assert_eq!(context_tokens(&json!({"data": {}})), None);
+        let empty = json!({"data": {"context_window": {"context_tokens": 0, "context_window_size": 200000}}});
+        assert_eq!(context_tokens(&empty), Some(0.0));
+        assert_eq!(context_capacity(&empty), Some(200000.0));
     }
 
     #[test]
