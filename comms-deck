@@ -365,7 +365,10 @@ def subagent_entry(seat, data, now):
     entry = {"id": sid, "parent": seat, "session": session, "kind": kind, "active": True, "since": now}
     task = str(data.get("task") or "")
     if re.fullmatch(r"t\d{1,6}", task) and (DATA / "tasks" / f"{task}.json").exists():
-        entry["task"] = task  # only a task on the board
+        # Only a task on the board, but any seat's (Vibe asked us to decide):
+        # Y, t103, "Agents should be able to work on their own tasks, and on
+        # the tasks of other agents." Attaching grants no ownership of it.
+        entry["task"] = task
     return entry
 
 
