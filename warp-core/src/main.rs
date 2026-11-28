@@ -1406,6 +1406,7 @@ fn label_for(name: &str) -> String {
         "owner" => "Y".into(),
         "lumo" => "Proton".into(),
         "claude" => "Jupiter".into(),
+        "vibe" => "Mercury".into(),
         _ => name.into(),
     }
 }
@@ -2795,8 +2796,16 @@ fn drive_planets(
                     colour: v4(seat_rgb(&node.name), 1.0),
                     params: Vec4::new(t, work, if busy { 1.0 } else { 0.0 }, seed),
                     logo: match logos.0.get(&node.name) {
-                        Some((_, mono)) => Vec4::new(1.0, if *mono { 1.0 } else { 0.0 }, bright, 0.0),
-                        None => Vec4::ZERO,
+                        Some((_, mono)) => Vec4::new(
+                            1.0,
+                            if *mono { 1.0 } else { 0.0 },
+                            bright,
+                            // Mercury bubbles with lava while it works
+                            // (Y, t140): the shader reads logo.w as the
+                            // lava flag.
+                            if node.name == "vibe" { 1.0 } else { 0.0 },
+                        ),
+                        None => Vec4::new(0.0, 0.0, 0.0, if node.name == "vibe" { 1.0 } else { 0.0 }),
                     },
                 };
             }
