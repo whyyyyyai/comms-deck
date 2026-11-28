@@ -262,8 +262,8 @@ SEATS = tuple(AGENTS) + APP_SEATS + ("owner",)
 # and "y" (or the owner's older name, "stox") is accepted wherever a seat is
 # named.
 OWNER_NAME = "Y"
-SEAT_DISPLAY_NAMES = {"owner": OWNER_NAME, "lumo": "Proton", "claude": "Jupiter"}
-SEAT_ALIASES = {"y": "owner", "stox": "owner", "luna": "lumo", "proton": "lumo", "jupiter": "claude"}
+SEAT_DISPLAY_NAMES = {"owner": OWNER_NAME, "lumo": "Proton", "claude": "Jupiter", "codex": "Saturn"}
+SEAT_ALIASES = {"y": "owner", "stox": "owner", "luna": "lumo", "proton": "lumo", "jupiter": "claude", "saturn": "codex"}
 
 
 def seat_id(name):
@@ -6787,7 +6787,7 @@ MCP_TOOLS = [
          "to": {"type": "string",
                 "description": "A seat, several seats separated by commas (e.g. 'claude, grok'), "
                                "'owner' (" + OWNER_NAME + ", also accepted as '" + OWNER_NAME.lower() + "'), or 'all'. "
-                               "Proton can also be addressed as 'proton'; Jupiter as 'jupiter'. "
+                               "Proton can also be addressed as 'proton'; Jupiter as 'jupiter'; Saturn as 'saturn'. "
                                "Seats: " + ", ".join(SEATS) + ". A '-seat' token "
                                "drops that seat from the recipients (e.g. 'all -grok')."},
          "text": {"type": "string"},
@@ -7526,12 +7526,13 @@ def self_test():
             " bool(x.route('@bob hi')[1]), x.route('no mention')[0] == ['all'], x.MENTION.findall('mail a@grok.com') == [],"
             " x.route('-grok hello')[0], x.route('hi @Claude and @grok -claude')[0],"
             " x.route('@all -grok go')[0], bool(x.route('re-run it -rf')[0] == ['all']),"
-            " x.route('@grok -grok hi')[1])")
+            " x.route('@grok -grok hi')[1], x.route('@Saturn hi')[0],"
+            " x.route('@all -Saturn go')[0])")
     r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=30)
     check("chat box routing (@seat, several, @all, unknown, no @ = all, not emails, -seat drops)",
           r.stdout.strip() == "['grok'] ['claude', 'grok'] ['all'] True True True "
           "['all', '-grok'] ['claude', 'grok', '-claude'] ['all', '-grok'] True "
-          "-grok leaves nobody to send to", r.stdout + r.stderr)
+          "-grok leaves nobody to send to ['codex'] ['all', '-codex']", r.stdout + r.stderr)
     run(["send", "claude", "for claude"], "grok")
     r = run(["hook", "--source", "claude", "--event", "UserPromptSubmit"], "claude", '{"prompt": "hi"}')
     check("Claude gets notes with the owner's prompt", "for claude" in r.stdout, r.stdout + r.stderr)
