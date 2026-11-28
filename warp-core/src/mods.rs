@@ -193,8 +193,8 @@ impl Default for OrbitCfg {
 }
 
 /// The planets' motion (t13): each seat is a body in a simplified physics
-/// sim — gravity pulls it towards the singularity, an agent at work has
-/// thrust enough to climb to a higher orbit, an idle one keeps a fairly
+/// sim — gravity pulls it towards the singularity, an agent at work climbs
+/// to a stable ring orbit (t52), an idle one keeps a fairly
 /// stable orbit (t18), and no planet is ever lost over the screen's edge.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -202,10 +202,16 @@ pub struct PhysicsCfg {
     /// The core's pull: the inward acceleration at radius r is
     /// `gravity / r²` (px and seconds), so inner orbits run faster.
     pub gravity: f32,
-    /// Outward thrust while a seat is busy, as a multiple of the core's
-    /// pull at the planet's radius, fading to nothing near the screen's
-    /// edge so a working agent parks on the highest orbit there is room for.
-    pub thrust: f32,
+    /// Where a working agent's planet orbits (t52): a ring at this fraction
+    /// of the room between the core and the nearest wall (0..1), so it
+    /// circles clear of the screen's edges.
+    pub ring: f32,
+    /// How hard a busy planet is pulled onto its ring, per second² on the
+    /// gap in px.
+    pub ring_pull: f32,
+    /// How fast any planet's in-and-out speed dies away (per second), so a
+    /// kicked planet settles back onto a circle.
+    pub radial_damping: f32,
     /// Inward drift while a seat isn't working (px/s²). 0 keeps every
     /// planet on a fairly stable orbit (Y, t18); raise it to have idle
     /// planets sink slowly towards the core again.
@@ -252,7 +258,9 @@ impl Default for PhysicsCfg {
     fn default() -> Self {
         PhysicsCfg {
             gravity: 530_000.0,
-            thrust: 1.6,
+            ring: 0.8,
+            ring_pull: 0.2,
+            radial_damping: 0.9,
             drift: 0.0,
             mutual: 60_000.0,
             soften: 60.0,
@@ -491,10 +499,15 @@ pub struct HudCfg {
     pub dock: bool,
     /// The card under the pointer when it rests on a seat (off: Y, 2026-11-27).
     pub hover_card: bool,
+    /// The system stats down the scene's left side: GPU frames, RAM, swap,
+    /// load, power and each seat's context (t53).
+    pub stats: bool,
+    /// The current tasks at the bottom left: id, title, holder, how long.
+    pub tasks_panel: bool,
 }
 impl Default for HudCfg {
     fn default() -> Self {
-        HudCfg { show: true, dock: true, hover_card: false }
+        HudCfg { show: true, dock: true, hover_card: false, stats: true, tasks_panel: true }
     }
 }
 

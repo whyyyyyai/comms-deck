@@ -37,6 +37,7 @@
 mod chat;
 mod feed;
 mod mods;
+mod sys;
 
 use bevy::{
     asset::uuid_handle,
@@ -45,7 +46,7 @@ use bevy::{
         keyboard::{Key, KeyboardInput},
         mouse::MouseWheel,
     },
-    text::{TextBounds, TextLayoutInfo},
+    text::{TextBounds, TextLayout, TextLayoutInfo},
     post_process::bloom::Bloom,
     prelude::*,
     reflect::TypePath,
@@ -135,6 +136,8 @@ fn main() {
                     drive_planets,
                     draw_moons_and_marks,
                     hud,
+                    sys_panel,
+                    task_panel,
                     tooltip,
                     chat_results,
                     draw_chat,
@@ -996,10 +999,18 @@ fn body_size(share: f32, seats: usize, span: f32) -> f32 {
     (1.0 + span * (share / even - 1.0)).clamp(1.0 - span * 0.5, 1.0 + span * 0.5)
 }
 
+/// The radius of the ring a working agent's planet climbs to and holds
+/// (t52): `ring` of the room between the core and the nearest wall, so
+/// the whole circle stays clear of the screen's edges.
+fn ring_radius(scene: Vec2, cfg: &mods::PhysicsCfg) -> f32 {
+    let wall = scene * 0.5 - cfg.edge_margin;
+    (cfg.ring * wall.x.min(wall.y)).max(cfg.min_radius)
+}
+
 /// One step of the planets' physics (t13). The core is a singularity: its
-/// pull is `gravity / r²` towards the centre. A busy seat has thrust enough
-/// to climb to a higher orbit; an idle one keeps a fairly stable orbit
-/// (t18). The ring's turning (drift, traffic, warp, the notes' spin kicks)
+/// pull is `gravity / r²` towards the centre. A busy seat climbs to the
+/// ring (`ring_radius`) and holds a circle there (t52); an idle one keeps
+/// its orbit (t18), and every planet's in-and-out swing is damped. The ring's turning (drift, traffic, warp, the notes' spin kicks)
 /// rides on top of each planet's own circular speed (`turn_share` of
 /// `turning * r`), so the whole ring still answers the deck the way it
 /// did. `pull` is what the other planets' gravity
@@ -1016,16 +1027,17 @@ fn step_body(body: &mut Body, busy: bool, turning: f32, scene: Vec2, dt: f32, cf
     let tang = Vec2::new(out.y, -out.x);
     // The core's pull, softened at the floor so the sim stays stable there.
     let g = cfg.gravity / (r.max(cfg.min_radius) * r.max(cfg.min_radius));
-    // Thrust rides on the local pull (a multiple of it), so even a planet
-    // that sank all the way in has climb enough to get back out. It fades
-    // out on the approach to the screen's edge — measured in the planet's
-    // own direction — so a working agent parks on the highest orbit there
-    // is room for.
+    // A working agent climbs to the ring and holds it (t52, Y: "a stable
+    // ring orbit to the core"): a spring towards the ring's radius, a
+    // circle that fits inside the walls. Until now thrust beat the pull
+    // all the way out, so a busy planet rode the screen's edge and bounced.
     let half = scene * 0.5;
-    let edge = (1.0 / (out.x.abs() / half.x).max(out.y.abs() / half.y).max(1e-4)) - cfg.edge_margin;
-    let fade = 1.0 - ((r - 0.75 * edge) / (0.25 * edge.max(1.0))).clamp(0.0, 1.0);
-    let thrust = if busy { cfg.thrust * g * fade } else { 0.0 };
-    let sink = if busy { 0.0 } else { cfg.drift };
+    let ring = ring_radius(scene, cfg);
+    let lift = if busy { cfg.ring_pull * (ring - r) } else { -cfg.drift };
+    // Radial speed is damped for every planet, so a kick from a note, a
+    // contact or a neighbour's pull settles back onto a circle instead of
+    // swinging in and out for ever.
+    let calm = -cfg.radial_damping * body.vel.dot(out);
     // Steer the tangential speed onto the orbit's own circular speed plus
     // a share of the ring's turning (t18: fairly stable orbits, still
     // stirred by the deck), capped, so the spin kicks and warp swing are
@@ -1033,7 +1045,10 @@ fn step_body(body: &mut Body, busy: bool, turning: f32, scene: Vec2, dt: f32, cf
     let v_t = body.vel.dot(tang);
     let target = (g * r).sqrt() + turning * r * cfg.turn_share;
     let steer = ((target - v_t) * cfg.steering).clamp(-cfg.max_steer, cfg.max_steer);
-    body.vel += (out * (thrust - sink - g) + tang * steer + pull) * dt;
+    // On the ring the inward pull is exactly what the circle needs at the
+    // planet's speed, so the ring's turning can't push it wide of the ring.
+    let hold = if busy { v_t * v_t / r } else { g };
+    body.vel += (out * (lift + calm - hold) + tang * steer + pull) * dt;
     body.pos += body.vel * dt;
     // Skim, don't fall in: on the floor of the core's well the inward part
     // of the speed is taken away, leaving the planet to circle.
@@ -1046,20 +1061,20 @@ fn step_body(body: &mut Body, busy: bool, turning: f32, scene: Vec2, dt: f32, cf
         body.vel = v_t2;
     }
     // No planet is lost over the edge: it bounces back into the scene.
-    let half = scene * 0.5 - cfg.edge_margin;
+    let wall = half - cfg.edge_margin;
     let keep = cfg.bounce;
-    if body.pos.x < -half.x {
-        body.pos.x = -half.x;
+    if body.pos.x < -wall.x {
+        body.pos.x = -wall.x;
         body.vel.x = body.vel.x.abs() * keep;
-    } else if body.pos.x > half.x {
-        body.pos.x = half.x;
+    } else if body.pos.x > wall.x {
+        body.pos.x = wall.x;
         body.vel.x = -body.vel.x.abs() * keep;
     }
-    if body.pos.y < -half.y {
-        body.pos.y = -half.y;
+    if body.pos.y < -wall.y {
+        body.pos.y = -wall.y;
         body.vel.y = body.vel.y.abs() * keep;
-    } else if body.pos.y > half.y {
-        body.pos.y = half.y;
+    } else if body.pos.y > wall.y {
+        body.pos.y = wall.y;
         body.vel.y = -body.vel.y.abs() * keep;
     }
 }
@@ -1095,6 +1110,18 @@ struct Core;
 
 #[derive(Component)]
 struct Hud;
+
+/// The system stats down the scene's left side (t53).
+#[derive(Component)]
+struct SysPanel;
+
+/// The low-memory alert across the top of the scene (Y, 2026-11-27).
+#[derive(Component)]
+struct MemAlert;
+
+/// The task list at the bottom of the scene's left side: id, title, holder, how long.
+#[derive(Component)]
+struct TaskPanel;
 
 #[derive(Component)]
 struct Dock;
@@ -1375,6 +1402,33 @@ fn setup(
         TextBounds::new_horizontal(800.0),
         TextColor(Color::srgb(0.55, 0.65, 0.8)),
         Anchor::TOP_LEFT,
+        Transform::from_xyz(0.0, 0.0, 5.0),
+    ));
+    commands.spawn((
+        SysPanel,
+        Text2d::new(""),
+        TextFont { font_size: FontSize::Px(14.0), ..default() },
+        TextColor(Color::srgb(0.5, 0.6, 0.75)),
+        Anchor::TOP_LEFT,
+        Transform::from_xyz(0.0, 0.0, 5.0),
+    ));
+    commands.spawn((
+        MemAlert,
+        Text2d::new(""),
+        TextFont { font_size: FontSize::Px(34.0), ..default() },
+        TextLayout::justify(Justify::Center),
+        TextColor(Color::srgb(1.0, 0.7, 0.3)),
+        Anchor::TOP_CENTER,
+        Transform::from_xyz(0.0, 0.0, 6.0),
+        Visibility::Hidden,
+    ));
+    commands.spawn((
+        TaskPanel,
+        Text2d::new(""),
+        TextFont { font_size: FontSize::Px(14.0), ..default() },
+        TextBounds::new_horizontal(520.0),
+        TextColor(Color::srgb(0.62, 0.7, 0.85)),
+        Anchor::BOTTOM_LEFT,
         Transform::from_xyz(0.0, 0.0, 5.0),
     ));
     commands.spawn((
@@ -1874,8 +1928,8 @@ fn layout_seats(
         deck.built = names;
         return;
     }
-    // The planets fly the sim now (t13): gravity, thrust, steering — each
-    // one on its own, so working agents climb to higher orbits while idle
+    // The planets fly the sim now (t13): gravity, the ring, steering — each
+    // one on its own, so working agents climb to a stable ring while idle
     // ones hold a fairly stable circle. On top of the core's pull the
     // planets pull on each other (t18), each weighing its share of the
     // crew's context pool.
@@ -2763,6 +2817,200 @@ fn draw_splash(mut splash: ResMut<Splash>, mods: Res<Mods>, time: Res<Time>, lay
 }
 
 #[allow(clippy::type_complexity)]
+/// The system stats down the left of the scene (t53, Y: "system stats,
+/// like gpu, memory, ram, context, on the left side"). The machine is read
+/// every 2 s (a few /proc and hwmon files); the frame record every frame.
+/// It turns amber when a figure is where trouble starts.
+fn sys_panel(
+    deck: Res<Deck>,
+    mods: Res<Mods>,
+    view: Res<View>,
+    real: Res<Time<Real>>,
+    layout: Res<Layout>,
+    mut panel: Query<(&mut Text2d, &mut Transform, &mut TextColor, &mut Visibility), (With<SysPanel>, Without<MemAlert>)>,
+    mut alert: Query<(&mut Text2d, &mut Transform, &mut TextColor, &mut Visibility), (With<MemAlert>, Without<SysPanel>)>,
+    mut gizmos: Gizmos,
+    mut state: Local<(sys::Frames, sys::Machine, f32)>,
+) {
+    let now = real.elapsed_secs();
+    // Only frames drawn while shown count: hidden, the compositor sends no
+    // frame callbacks and every frame waits out a 1 s swap-chain timeout,
+    // which isn't the GPU stalling (18:46-18:54 on 27 Nov, all hidden).
+    if VISIBLE.load(std::sync::atomic::Ordering::Relaxed) {
+        state.0.frame(now, real.delta_secs());
+    }
+    if state.2 <= 0.0 || now - state.2 >= 2.0 {
+        state.1 = sys::read_machine();
+        state.2 = now.max(1e-3);
+    }
+    let show = mods.cfg.hud.show && mods.cfg.hud.stats && view.hud;
+    let context: Vec<(String, f64)> =
+        deck.seats.iter().filter(|s| s.online()).filter_map(|s| s.ctx.map(|c| (label_for(&s.name), c))).collect();
+    let text = sys::panel_text(&state.1, &state.0, &context);
+    let warn = sys::warning(&state.1, state.0.stalls());
+    let colour = if warn { Color::srgb(1.0, 0.7, 0.3) } else { Color::srgb(0.5, 0.6, 0.75) };
+    for (mut t, mut tf, mut c, mut vis) in &mut panel {
+        let want = if show { Visibility::Inherited } else { Visibility::Hidden };
+        if *vis != want {
+            *vis = want;
+        }
+        if t.0 != text {
+            t.0 = text.clone();
+        }
+        if c.0 != colour {
+            c.0 = colour;
+        }
+        tf.translation.x = -layout.half().x + 18.0;
+        tf.translation.y = layout.half().y - 70.0;
+    }
+    // The low-memory alert shows whatever the HUD toggles say: it is the
+    // one thing on screen that must never be hidden. Amber and breathing
+    // for a warning; red, flashing, with a red frame round the scene when
+    // critical, like a game's low-health screen.
+    // A demo on demand (Y, 22:49: "bring up the low memory alert so I can
+    // see what it looks like"): `touch ~/.config/warp-core/alert-demo` shows
+    // 10 s of the warning, then 10 s of critical, with made-up figures, and
+    // removes the file. Checked with the 2 s machine read.
+    let (mut level, mut mem) = (sys::memory_alert(&state.1.mem), state.1.mem.clone());
+    if let Some(t0) = demo_since(now) {
+        let gb = 1024 * 1024;
+        let (lvl, avail, swap_free) =
+            if now - t0 < 10.0 { (sys::Alert::Warning, gb, 6 * gb) } else { (sys::Alert::Critical, gb / 4, gb / 2) };
+        mem = sys::Memory { total_kb: 7 * gb, available_kb: avail, swap_total_kb: 12 * gb, swap_free_kb: swap_free, shmem_kb: 0 };
+        level = lvl;
+    }
+    let words = sys::alert_text(&mem, level);
+    let (rgb, pulse) = match level {
+        sys::Alert::Critical => ([1.0, 0.15, 0.1], 0.55 + 0.45 * (now * 7.0).sin().abs()),
+        _ => ([1.0, 0.7, 0.25], 0.8 + 0.2 * (now * 2.0).sin()),
+    };
+    for (mut t, mut tf, mut c, mut vis) in &mut alert {
+        let want = if level == sys::Alert::None { Visibility::Hidden } else { Visibility::Inherited };
+        if *vis != want {
+            *vis = want;
+        }
+        if t.0 != words {
+            t.0 = words.clone();
+        }
+        c.0 = Color::srgba(rgb[0], rgb[1], rgb[2], pulse);
+        tf.translation.x = 0.0;
+        tf.translation.y = layout.half().y - 40.0;
+    }
+    if level == sys::Alert::Critical {
+        let h = layout.half();
+        for (inset, a) in [(3.0, pulse), (9.0, pulse * 0.5), (16.0, pulse * 0.25)] {
+            gizmos.rect_2d(
+                Isometry2d::IDENTITY,
+                Vec2::new(2.0 * (h.x - inset), 2.0 * (h.y - inset)),
+                Color::linear_rgba(rgb[0] * 2.0, rgb[1], rgb[2], a),
+            );
+        }
+    }
+}
+
+/// When the alert demo started (see sys_panel), while it runs: the file
+/// ~/.config/warp-core/alert-demo starts it, 20 s ends it.
+fn demo_since(now: f32) -> Option<f32> {
+    use std::sync::Mutex;
+    static START: Mutex<Option<f32>> = Mutex::new(None);
+    static LAST_LOOK: Mutex<f32> = Mutex::new(-10.0);
+    let mut start = START.lock().ok()?;
+    if let Some(t0) = *start {
+        if now - t0 < 20.0 {
+            return Some(t0);
+        }
+        *start = None;
+    }
+    let mut last = LAST_LOOK.lock().ok()?;
+    if now - *last >= 1.0 {
+        *last = now;
+        let f = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/warp-core/alert-demo");
+        if std::fs::remove_file(&f).is_ok() {
+            *start = Some(now);
+        }
+    }
+    *start
+}
+
+/// A task's title cut to `max` characters at a word, with an ellipsis.
+fn short_title(title: &str, max: usize) -> String {
+    let t = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if t.chars().count() <= max {
+        return t;
+    }
+    let cut: String = t.chars().take(max).collect();
+    let head = match cut.rfind(' ') {
+        Some(i) if i > max / 2 => &cut[..i],
+        _ => cut.as_str(),
+    };
+    format!("{}…", head.trim_end_matches(|c: char| c == ',' || c == '.' || c == ':' || c == ';'))
+}
+
+/// How long, the short way: 40s, 12m, 3h 05m, 2d 4h.
+fn short_age(secs: f64) -> String {
+    let s = secs.max(0.0) as u64;
+    match s {
+        0..=59 => format!("{s}s"),
+        60..=3599 => format!("{}m", s / 60),
+        3600..=86_399 => format!("{}h {:02}m", s / 3600, s / 60 % 60),
+        _ => format!("{}d {}h", s / 86_400, s / 3600 % 24),
+    }
+}
+
+/// The task panel's text (Y, 2026-11-27: "who they're with, and how long
+/// they've been with them"): one line per task on the board, in id order.
+fn task_panel_text(tasks: &[TaskInfo], now_epoch: f64) -> String {
+    if tasks.is_empty() {
+        return "TASKS
+none on the board".to_string();
+    }
+    let mut s = String::from("TASKS");
+    for t in tasks {
+        let title = t.title.as_deref().map(|x| short_title(x, 40)).unwrap_or_else(|| "(private)".to_string());
+        let who = match &t.holder {
+            Some(h) => label_for(h),
+            None => "open".to_string(),
+        };
+        let age = t.since.map(|at| format!(", {}", short_age(now_epoch - at))).unwrap_or_default();
+        s.push_str(&format!("\n{}  {}  — {}{}", t.id, title, who, age));
+    }
+    s
+}
+
+/// The current tasks at the bottom of the scene's left side, above the dock.
+/// Shown with the HUD and `[hud] tasks_panel`; refreshed once a second.
+fn task_panel(
+    deck: Res<Deck>,
+    mods: Res<Mods>,
+    view: Res<View>,
+    real: Res<Time<Real>>,
+    layout: Res<Layout>,
+    mut panel: Query<(&mut Text2d, &mut Transform, &mut Visibility), With<TaskPanel>>,
+    mut last: Local<f32>,
+) {
+    let now = real.elapsed_secs();
+    let show = mods.cfg.hud.show && mods.cfg.hud.tasks_panel && view.hud;
+    let refresh = *last <= 0.0 || now - *last >= 1.0;
+    if refresh {
+        *last = now.max(1e-3);
+    }
+    let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+    for (mut t, mut tf, mut vis) in &mut panel {
+        let want = if show { Visibility::Inherited } else { Visibility::Hidden };
+        if *vis != want {
+            *vis = want;
+        }
+        if refresh || t.0.is_empty() {
+            let text = task_panel_text(&deck.tasks, epoch);
+            if t.0 != text {
+                t.0 = text;
+            }
+        }
+        tf.translation.x = -layout.half().x + 18.0;
+        tf.translation.y = -layout.half().y + 70.0;
+    }
+}
+
 fn hud(
     deck: Res<Deck>,
     mods: Res<Mods>,
@@ -3722,7 +3970,7 @@ mod tests {
         // A planet circling at the old ring's radius, steered onto a slow
         // turn (t18: the target is the circular speed plus a share of the
         // ring's turning, so idle planets hold fairly stable orbits).
-        let start = Body { pos: Vec2::new(0.0, 240.0), vel: Vec2::new(24.0, 0.0) };
+        let start = Body { pos: Vec2::new(0.0, 180.0), vel: Vec2::new(24.0, 0.0) };
         let circling = |busy| {
             let mut b = start;
             let mut sum = 0.0;
@@ -3739,12 +3987,76 @@ mod tests {
         assert!(idle_lo > 150.0, "an idle planet keeps a fairly stable orbit, never sinking in: lo {idle_lo}");
         let (busy_mean, _) = circling(true);
         assert!(busy_mean > idle_mean + 20.0, "a working planet rides higher on average: idle {idle_mean:.0} busy {busy_mean:.0}");
-        // Even one that sank all the way in can climb back out at work.
+        // Even one that sank all the way in climbs back out to the ring.
         let mut sunken = Body { pos: Vec2::new(0.0, cfg.min_radius), vel: Vec2::new(9.0, 0.0) };
-        for _ in 0..1800 {
+        for _ in 0..(60 * 60) {
             step_body(&mut sunken, true, 0.1, scene, 1.0 / 60.0, &cfg, Vec2::ZERO);
         }
-        assert!(sunken.pos.length() > 200.0, "thrust is a multiple of the local pull, so it escapes: {}", sunken.pos.length());
+        let ring = ring_radius(scene, &cfg);
+        assert!((sunken.pos.length() - ring).abs() < 15.0, "it climbs to the ring: {} vs {ring}", sunken.pos.length());
+    }
+
+    #[test]
+    fn the_task_panel_says_who_has_what_and_for_how_long() {
+        assert_eq!(short_age(42.0), "42s");
+        assert_eq!(short_age(47.0 * 60.0), "47m");
+        assert_eq!(short_age(2.0 * 3600.0 + 5.0 * 60.0), "2h 05m");
+        assert_eq!(short_age(3.0 * 86_400.0 + 4.0 * 3600.0), "3d 4h");
+        assert_eq!(short_title("Make the warp core public", 40), "Make the warp core public");
+        assert_eq!(short_title("We need system stats, like gpu, memory, ram, context, on the left side", 40), "We need system stats, like gpu, memory…");
+        let tasks = vec![
+            feed::TaskInfo { id: "t50".into(), title: Some("electrons".into()), since: Some(1000.0), from: "owner".into(), holder: Some("vibe".into()), open: false },
+            feed::TaskInfo { id: "t54".into(), title: None, since: Some(4000.0), from: "owner".into(), holder: None, open: true },
+        ];
+        let text = task_panel_text(&tasks, 4000.0 + 300.0);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "TASKS");
+        assert!(lines[1].starts_with("t50  electrons  — ") && lines[1].ends_with(", 55m"), "{}", lines[1]);
+        assert_eq!(lines[2], "t54  (private)  — open, 5m");
+        assert_eq!(task_panel_text(&[], 0.0), "TASKS\nnone on the board");
+    }
+
+    #[test]
+    fn a_busy_planet_holds_a_stable_ring_clear_of_the_edges() {
+        // t52 (Y: "get yourself on a stable ring orbit to the core"). Before,
+        // thrust beat the pull all the way out and a busy planet rode the
+        // screen's edge, bouncing. Now it settles on a circle and stays.
+        let cfg = mods::PhysicsCfg::default();
+        for scene in [Vec2::new(1280.0, 800.0), Vec2::new(2900.0, 2520.0)] {
+            let ring = ring_radius(scene, &cfg);
+            let wall = scene * 0.5 - cfg.edge_margin;
+            for start in [
+                Body { pos: Vec2::new(0.0, cfg.min_radius), vel: Vec2::new(10.0, 0.0) },
+                Body { pos: Vec2::new(wall.x - 5.0, 0.0), vel: Vec2::new(60.0, -80.0) },
+                Body { pos: Vec2::new(150.0, -150.0), vel: Vec2::new(-120.0, 40.0) },
+            ] {
+                let mut b = start;
+                for _ in 0..(90 * 60) {
+                    step_body(&mut b, true, 0.1, scene, 1.0 / 60.0, &cfg, Vec2::ZERO);
+                }
+                // The next half minute: on the ring, round, off the walls.
+                let (mut lo, mut hi) = (f32::MAX, 0.0f32);
+                let a0 = b.pos.y.atan2(b.pos.x);
+                let mut turned = 0.0;
+                let mut last = a0;
+                for _ in 0..(30 * 60) {
+                    step_body(&mut b, true, 0.1, scene, 1.0 / 60.0, &cfg, Vec2::ZERO);
+                    let r = b.pos.length();
+                    lo = lo.min(r);
+                    hi = hi.max(r);
+                    assert!(b.pos.x.abs() < wall.x - 1.0 && b.pos.y.abs() < wall.y - 1.0, "touched a wall at {:?}", b.pos);
+                    let a = b.pos.y.atan2(b.pos.x);
+                    let mut d = a - last;
+                    if d > std::f32::consts::PI { d -= std::f32::consts::TAU; }
+                    if d < -std::f32::consts::PI { d += std::f32::consts::TAU; }
+                    turned += d;
+                    last = a;
+                }
+                assert!((lo - ring).abs() < 10.0 && (hi - ring).abs() < 10.0,
+                        "{scene:?} from {:?}: holds the ring {ring:.0}, swung {lo:.0}..{hi:.0}", start.pos);
+                assert!(turned.abs() > 0.5, "and keeps circling it: turned {turned:.2} rad");
+            }
+        }
     }
 
     #[test]
@@ -4109,6 +4421,7 @@ mod tests {
             from: "owner".into(),
             holder: holder.map(String::from),
             open,
+            ..Default::default()
         };
         let old = [t("t1", Some("vibe"), false), t("t2", None, true), t("t3", Some("claude"), false)];
         let new = [t("t3", Some("claude"), false)];

@@ -89,10 +89,15 @@ pub struct Notice {
 }
 
 /// One task from the load balancer's board (tasks/<id>.json): who asked for
-/// it and who holds it. The summary never leaves the feed, like note text.
+/// it, who holds it, and since when. Its summary is the title on the task
+/// panel (Y, 2026-11-27); a task marked private keeps it in the feed.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TaskInfo {
     pub id: String,
+    /// The summary, None for a private task.
+    pub title: Option<String>,
+    /// When it went to its holder (or was made, while open), epoch seconds.
+    pub since: Option<f64>,
     /// The seat that asked for it: the ring colours tasks by this.
     pub from: String,
     /// The seat carrying it, if any (None while it orbits unassigned).
@@ -358,7 +363,10 @@ pub fn parse_task(v: &Value) -> Option<TaskInfo> {
     }
     let from = seat_id(v.get("from").and_then(Value::as_str).unwrap_or("owner"));
     let holder = v.get("holder").and_then(Value::as_str).filter(|h| !h.is_empty()).map(seat_id);
-    Some(TaskInfo { id, from, open: holder.is_none(), holder })
+    let private = v.get("private").and_then(Value::as_bool).unwrap_or(false);
+    let title = if private { None } else { v.get("summary").and_then(Value::as_str).map(|t| t.trim().to_string()) };
+    let since = v.get("since").or_else(|| v.get("created")).and_then(Value::as_f64);
+    Some(TaskInfo { id, title, since, from, open: holder.is_none(), holder })
 }
 
 /// Every task on the board, in id order. The board is the balancer's own
@@ -695,6 +703,14 @@ mod tests {
         assert_eq!(got, ["7", "8", "9"]);
         assert!(backlog(&dir.join("missing"), 3).is_empty());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_task_carries_its_title_unless_private() {
+        let t = parse_task(&json!({"id": "t54", "from": "owner", "summary": "  Make the warp core public ", "holder": "claude", "since": 10.0, "created": 5.0})).unwrap();
+        assert_eq!((t.title.as_deref(), t.since, t.holder.as_deref()), (Some("Make the warp core public"), Some(10.0), Some("claude")));
+        let p = parse_task(&json!({"id": "t9", "summary": "secret", "private": true, "created": 5.0})).unwrap();
+        assert_eq!((p.title, p.since, p.open), (None, Some(5.0), true));
     }
 
     #[test]
