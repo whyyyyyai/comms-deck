@@ -3337,7 +3337,7 @@ fn fly_comets(
         let pending = std::mem::take(&mut deck.pending);
         for note in pending {
             let look = note_look(&mods.rules, &mods.cfg, &note);
-            deck.warp = stack_warp(deck.warp, look.warp + mods.cfg.warp.per_note, mods.cfg.warp.max);
+            deck.warp = stack_warp(deck.warp, look.warp + note_warp(note.len, &mods.cfg.warp), mods.cfg.warp.max);
             // An agent writing to Y boosts the stars; notes between agents
             // speed the ring up. Always clockwise, the way the core's disk
             // turns: a note never reverses the orbit (Y, t11).
@@ -4250,6 +4250,13 @@ fn chat_input(
             }
         }
     }
+}
+
+/// The warp a note adds: a base kick, plus more for the context it carries
+/// (Y, t158/t159: "the more context you provide to the agents, that factors
+/// the warp demonstration"), up to a 1.0 kick from one note.
+fn note_warp(len: usize, cfg: &mods::WarpCfg) -> f32 {
+    (cfg.per_note + cfg.per_kchar * len as f32 / 1000.0).min(cfg.per_note.max(1.0))
 }
 
 /// A jump compounds existing warp momentum. With identical kicks and
@@ -5390,6 +5397,15 @@ mod tests {
         assert_eq!(recipients("all", &seats), 4, "every agent, not Y");
         assert_eq!(recipients("all -grok", &seats), 3);
         assert!(send_jump(100, 3, &cfg) > send_jump(100, 1, &cfg) * 2.5);
+    }
+
+    #[test]
+    fn more_context_more_warp() {
+        let cfg = mods::WarpCfg::default();
+        let short = note_warp(40, &cfg);
+        let brief = note_warp(1200, &cfg);
+        assert!(short < 0.17 && brief > 0.55, "{short} {brief}");
+        assert_eq!(note_warp(100_000, &cfg), 1.0, "one note caps at a 1.0 kick");
     }
 
     #[test]

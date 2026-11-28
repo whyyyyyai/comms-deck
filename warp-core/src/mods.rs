@@ -561,6 +561,10 @@ pub struct WarpCfg {
     /// Warp every note adds, on top of a broadcast's kick (Y, t88: "more
     /// messages warp the core further"): notes compound remaining warp.
     pub per_note: f32,
+    /// Extra warp per 1,000 characters of a note (Y, t158/t159: "the more
+    /// context you provide to the agents, that factors the warp
+    /// demonstration"): a long, context-rich note pushes harder.
+    pub per_kchar: f32,
     /// The most warp can stack to.
     pub max: f32,
     /// Seconds of moiré interference on the core after warp drops below
@@ -569,7 +573,7 @@ pub struct WarpCfg {
 }
 impl Default for WarpCfg {
     fn default() -> Self {
-        WarpCfg { decay: 0.22, on_broadcast: 1.0, per_note: 0.15, max: 3.0, moire_s: 1.5 }
+        WarpCfg { decay: 0.22, on_broadcast: 1.0, per_note: 0.15, per_kchar: 0.35, max: 3.0, moire_s: 1.5 }
     }
 }
 
