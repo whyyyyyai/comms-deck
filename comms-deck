@@ -262,8 +262,8 @@ SEATS = tuple(AGENTS) + APP_SEATS + ("owner",)
 # and "y" (or the owner's older name, "stox") is accepted wherever a seat is
 # named.
 OWNER_NAME = "Y"
-SEAT_DISPLAY_NAMES = {"owner": OWNER_NAME, "lumo": "Proton"}
-SEAT_ALIASES = {"y": "owner", "stox": "owner", "luna": "lumo", "proton": "lumo"}
+SEAT_DISPLAY_NAMES = {"owner": OWNER_NAME, "lumo": "Proton", "claude": "Jupiter"}
+SEAT_ALIASES = {"y": "owner", "stox": "owner", "luna": "lumo", "proton": "lumo", "jupiter": "claude"}
 
 
 def seat_id(name):
@@ -700,7 +700,7 @@ def send(sender, to, text, quiet=False, private=False):
     excludes = list(dict.fromkeys(excludes))
     unknown = [n for n in names + excludes if n not in SEATS and n != "all"]
     if unknown or not names:
-        raise ValueError(f"unknown seat {(unknown or [to])[0]!r}; seats are: {', '.join(display_seat(s).lower() if s == "lumo" else s for s in SEATS)}, all")
+        raise ValueError(f"unknown seat {(unknown or [to])[0]!r}; seats are: {', '.join(display_seat(s).lower() if s in SEAT_DISPLAY_NAMES and s != "owner" else s for s in SEATS)}, all")
     if "all" in excludes:
         raise ValueError("- excludes seats, not 'all'")
     if "all" in names:
@@ -930,7 +930,7 @@ def team_snapshot(seat, records):
     balancer = load_balancer()
     board = [t for t in balancer.all_tasks() if t["state"] in balancer.TASK_ACTIVE][-5:] if balancer else []
     if board:
-        text += " Tasks: " + "; ".join(f"{t['id']} {t.get('holder') or 'open'}" for t in board) + "."
+        text += " Tasks: " + "; ".join(f"{t['id']} {display_seat(t.get('holder')) if t.get('holder') else 'open'}" for t in board) + "."
     shared = [r for r in records if (r.get("to") == "all" or "+" in str(r.get("to"))) and not r.get("task")]
     if shared:
         text += (" This note went to more than one agent. Before starting work on it, check "
@@ -956,8 +956,8 @@ def render(records, seat):
                 lines.append(f"Task {task['id']} is YOURS (picked by the deck). Do it, then "
                              f"`done_task {task['id']}`; `release_task {task['id']}` if you can't.")
             elif holder:
-                lines.append(f"Task {task['id']} is {holder}'s. Don't start it yourself; "
-                             f"help only if {holder} asks.")
+                lines.append(f"Task {task['id']} is {display_seat(holder)}'s. Don't start it yourself; "
+                             f"help only if {display_seat(holder)} asks.")
             else:
                 lines.append(f"Task {task['id']} is open: nobody was free. `claim_task {task['id']}` "
                              f"to take it.")
@@ -4400,8 +4400,8 @@ def activity_panel(width):
     if board:
         lines += ["", "\033[1mTASKS\033[0m"]
         for t in board[-6:]:
-            who = t.get("holder") or "open"
-            lines.append(f"  \033[38;5;{colour(who) if t.get('holder') else 245}m{t['id']:4} {who:7}\033[0m "
+            who = display_seat(t.get("holder")) if t.get("holder") else "open"
+            lines.append(f"  \033[38;5;{colour(t.get('holder')) if t.get('holder') else 245}m{t['id']:4} {who:7}\033[0m "
                          f"\033[2m{'(private)' if t.get('private') else t['summary']}\033[0m")
     # The context split lives on this column now (the owner, 05:17): the pie
     # and bars were too tall for the usage column on the left.
@@ -6787,7 +6787,7 @@ MCP_TOOLS = [
          "to": {"type": "string",
                 "description": "A seat, several seats separated by commas (e.g. 'claude, grok'), "
                                "'owner' (" + OWNER_NAME + ", also accepted as '" + OWNER_NAME.lower() + "'), or 'all'. "
-                               "Proton can also be addressed as 'proton'. "
+                               "Proton can also be addressed as 'proton'; Jupiter as 'jupiter'. "
                                "Seats: " + ", ".join(SEATS) + ". A '-seat' token "
                                "drops that seat from the recipients (e.g. 'all -grok')."},
          "text": {"type": "string"},
