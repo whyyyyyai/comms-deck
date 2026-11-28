@@ -36,6 +36,7 @@
 
 mod chat;
 mod feed;
+mod kitten;
 mod mods;
 mod sys;
 
@@ -56,7 +57,7 @@ use bevy::{
     sprite_render::{AlphaMode2d, Material2d, Material2dPlugin},
     winit::{UpdateMode, WinitSettings},
 };
-use feed::{Activity, ChatNote, Msg, Notice, NoteInfo, SeatInfo, SubagentInfo, TaskInfo};
+use feed::{Activity, ChatNote, Msg, Notice, NoteInfo, SeatInfo, SubagentInfo, SubagentLife, TaskInfo};
 use mods::{Config, Rule, Val};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{mpsc, Mutex};
@@ -69,6 +70,11 @@ const PLANET_SHADER: Handle<Shader> = uuid_handle!("3c7a1e9b-5d2f-4a8c-9e6b-1f0d
 const FUEL_D: [f32; 3] = [70.0, 82.0, 94.0];
 const HALO_D: f32 = 116.0;
 
+mod kitten_view;
+mod left_panel;
+mod right_panel;
+use kitten_view::KittenView;
+
 fn main() {
     install_crash_log();
     watch_visibility();
@@ -79,6 +85,8 @@ fn main() {
         .insert_resource(ClearColor(Color::srgb(0.01, 0.012, 0.03)))
         .insert_resource(Feed(Mutex::new(rx)))
         .insert_resource(Deck::default())
+        .insert_resource(KittenView::default())
+        .insert_resource(left_panel::Left::default())
         .insert_resource(Mods::default())
         .insert_resource(View::default())
         .insert_resource(Looks::default())
@@ -123,12 +131,13 @@ fn main() {
         .add_systems(
             Update,
             (
-                (watch_mods, pace_frames, read_feed, layout_view, apply_rules, layout_seats, layout_tasks, layout_held_tasks, pointer, chat_input, keys).chain(),
+                (watch_mods, pace_frames, read_feed, layout_view, apply_rules, layout_seats, kitten_view::kitten_step, left_panel::left_keys, layout_tasks, layout_held_tasks, pointer, chat_input, keys).chain(),
                 (
                     glow_seats,
                     draw_rings,
                     pulse_core,
-                    fly_comets,
+                    (fly_comets, update_core_ticker).chain(),
+                    kitten_view::draw_kitten,
                     move_stars,
                     colour_stars,
                     draw_splash,
@@ -138,9 +147,11 @@ fn main() {
                     hud,
                     sys_panel,
                     task_panel,
+                    left_panel::left_panel,
                     tooltip,
                     chat_results,
                     draw_chat,
+                    right_panel::right_panel,
                     health_log,
                 )
                     .chain(),
@@ -509,30 +520,56 @@ impl Default for SeatLook {
 #[derive(Resource, Default)]
 struct Looks(HashMap<String, SeatLook>);
 
-/// Where things go this frame: the scene (ring, core, HUD) on the left, the
-/// chat panel on the right. World x runs -scene.x/2 .. scene.x/2 + panel.
+/// Where things go this frame: the scene (ring, core, HUD) fills the top of
+/// the central column, the chat strip runs along its bottom, the left panel
+/// sits on the left. World x runs -scene.x/2 .. scene.x/2 across the central
+/// column; the chat strip is the `panel`-high band just below the scene.
 #[derive(Resource, Default)]
 struct Layout {
     scene: Vec2,
+    /// The chat strip's height.
     panel: f32,
+    /// The left panel's width (t87), 0 when it's off.
+    left: f32,
+    /// The right edge's width: the Activity/Notify panel when docked
+    /// bottom, the whole chat column when docked right.
+    right: f32,
+    /// Which layout the chat uses.
+    dock: mods::ChatDock,
 }
 
 impl Layout {
     fn half(&self) -> Vec2 {
         self.scene * 0.5
     }
-    /// Is this world point over the chat panel?
+    /// Is this world point over the chat (strip or column)?
     fn in_panel(&self, p: Vec2) -> bool {
-        self.panel > 0.0 && p.x > self.scene.x * 0.5
+        match self.dock {
+            mods::ChatDock::Bottom => {
+                self.panel > 0.0
+                    && p.x.abs() <= self.scene.x * 0.5
+                    && p.y < -self.scene.y * 0.5
+                    && p.y >= -self.scene.y * 0.5 - self.panel
+            }
+            mods::ChatDock::Right => self.right > 0.0 && p.x > self.scene.x * 0.5,
+        }
     }
 }
 
-/// The panel's width for a window: a share of it, kept readable.
+/// The chat column's width for a window: a share of it, kept readable.
 fn panel_width(window_w: f32, cfg: &mods::ChatCfg) -> f32 {
     if !cfg.show {
         return 0.0;
     }
     (window_w * cfg.width).clamp(300.0, 600.0).min(window_w * 0.6)
+}
+
+/// The chat strip's height for a window: a share of it, kept readable.
+fn strip_height(window_h: f32, cfg: &mods::ChatCfg) -> f32 {
+    if !cfg.show {
+        return 0.0;
+    }
+    (window_h * cfg.height).clamp(100.0, window_h * 0.45)
 }
 
 /// What came back from a send (Some(the line)) or a wake (None).
@@ -577,7 +614,13 @@ struct Chat {
     rx: Mutex<mpsc::Receiver<SendResult>>,
     /// The notes need laying out again.
     dirty: bool,
-    drawn_width: f32,
+    drawn_size: f32,
+    /// The right panel's tab (Y, 02:50: "you should still put F2 and F3 on
+    /// the right"): Activity or Notify. Comms lives in the bottom strip.
+    side: Tab,
+    side_dirty: bool,
+    /// Whether the right panel is shown (set by layout_view from [chat] side).
+    side_on: bool,
 }
 
 impl Default for Chat {
@@ -596,7 +639,10 @@ impl Default for Chat {
             tx,
             rx: Mutex::new(rx),
             dirty: true,
-            drawn_width: 0.0,
+            drawn_size: 0.0,
+            side: Tab::Activity,
+            side_dirty: true,
+            side_on: false,
         }
     }
 }
@@ -1108,6 +1154,128 @@ struct HaloRing;
 #[derive(Component)]
 struct Core;
 
+const WARP_ACTIVE: f32 = 0.05;
+const TICKER_STATIC_FRAME: f32 = 0.055;
+
+#[derive(Component, Default)]
+struct CoreTicker {
+    warped: bool,
+    transition_at: Option<f32>,
+}
+
+impl CoreTicker {
+    fn frame(&mut self, warp: f32, now: f32) -> (&'static str, bool) {
+        let warped = warp > WARP_ACTIVE;
+        if warped != self.warped {
+            self.warped = warped;
+            self.transition_at = Some(now);
+        }
+        if let Some(at) = self.transition_at {
+            let static_frames = if warped { ["S#L", "%/+", "X#P", "XR/"] } else { ["X#P", "+/%", "S#L", "SO/"] };
+            let frame = ((now - at).max(0.0) / TICKER_STATIC_FRAME) as usize;
+            if let Some(text) = static_frames.get(frame) {
+                return (text, true);
+            }
+            self.transition_at = None;
+        }
+        (if warped { "XRP" } else { "SOL" }, false)
+    }
+}
+
+/// How surprising the latest price move is (Y, t122: "flicker in according
+/// to price action ... relative distribution function of price action"):
+/// where the newest move's size sits in the empirical distribution of the
+/// recent moves' sizes, 0 (as small as any) to 1 (bigger than all). None
+/// with too few samples. Pure: tested.
+fn price_surprise(history: &[(f64, f64)]) -> Option<(f32, f32)> {
+    let moves: Vec<f64> = history.windows(2).filter(|w| w[0].1 > 0.0 && w[1].1 > 0.0).map(|w| (w[1].1 / w[0].1).ln()).collect();
+    let (latest, past) = moves.split_last()?;
+    if past.len() < 8 {
+        return None;
+    }
+    let below = past.iter().filter(|m| m.abs() < latest.abs()).count() as f32;
+    let ties = past.iter().filter(|m| m.abs() == latest.abs()).count() as f32;
+    let cdf = (below + 0.5 * ties) / past.len() as f32;
+    Some((cdf, latest.signum() as f32))
+}
+
+/// The prices the pricefeed keeps (~/.local/state/warp-core/prices.json).
+fn read_prices() -> HashMap<String, Vec<(f64, f64)>> {
+    let path = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/state/warp-core/prices.json");
+    let Ok(text) = std::fs::read_to_string(path) else { return HashMap::new() };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return HashMap::new() };
+    let mut out = HashMap::new();
+    for sym in ["SOL", "XRP"] {
+        let hist: Vec<(f64, f64)> = v[sym]["history"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|s| Some((s.get(0)?.as_f64()?, s.get(1)?.as_f64()?))).collect())
+            .unwrap_or_default();
+        out.insert(sym.to_string(), hist);
+    }
+    out
+}
+
+/// A glitch frame for `sym` at strength 0..1: the stronger, the more of its
+/// letters turn to static. `k` picks which, deterministically.
+fn glitch_frame(sym: &str, strength: f32, k: u64) -> String {
+    const NOISE: [char; 8] = ['#', '%', '/', '+', '*', '=', '\\', '~'];
+    sym.chars()
+        .enumerate()
+        .map(|(i, c)| {
+            let h = (k ^ (i as u64).wrapping_mul(0x9E37_79B9)).wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33;
+            if (h % 100) as f32 / 100.0 < strength * 0.8 { NOISE[(h % 8) as usize] } else { c }
+        })
+        .collect()
+}
+
+fn update_core_ticker(
+    deck: Res<Deck>,
+    time: Res<Time>,
+    mut ticker: Query<(&mut CoreTicker, &mut Text2d, &mut TextColor)>,
+    mut prices: Local<(f32, HashMap<String, Vec<(f64, f64)>>)>,
+) {
+    let now = time.elapsed_secs();
+    if prices.0 == 0.0 || now - prices.0 > 5.0 {
+        prices.1 = read_prices();
+        prices.0 = now.max(1e-3);
+    }
+    for (mut state, mut text, mut colour) in &mut ticker {
+        let (frame, static_on) = state.frame(deck.warp, now);
+        let sym = if state.warped { "XRP" } else { "SOL" };
+        let mut shown = frame.to_string();
+        let mut flick = false;
+        // Price flicker, between warp transitions: only a move out in the
+        // tail of the recent distribution flickers, more often and harder
+        // the further out it is. A typical move holds steady.
+        if !static_on {
+            if let Some((cdf, dir)) = prices.1.get(sym).and_then(|h| price_surprise(h)) {
+                let strength = ((cdf - 0.6) / 0.4).clamp(0.0, 1.0);
+                let slot = (now / TICKER_STATIC_FRAME) as u64;
+                let roll = (slot.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40) % 1000;
+                if strength > 0.0 && (roll as f32) < strength * strength * 180.0 {
+                    shown = glitch_frame(sym, strength, slot);
+                    flick = true;
+                    // Up moves flash green, down moves red: the direction.
+                    colour.0 = if dir >= 0.0 { Color::srgb(0.55, 1.0, 0.6) } else { Color::srgb(1.0, 0.45, 0.4) };
+                }
+            }
+        }
+        if text.0 != shown {
+            text.0.clear();
+            text.0.push_str(&shown);
+            if !flick {
+                colour.0 = if static_on {
+                    Color::srgb(0.92, 0.95, 1.0)
+                } else if state.warped {
+                    Color::srgb(0.78, 0.77, 1.0)
+                } else {
+                    Color::srgb(0.65, 0.97, 0.89)
+                };
+            }
+        }
+    }
+}
+
 #[derive(Component)]
 struct Hud;
 
@@ -1153,6 +1321,8 @@ struct Comet {
     colour: Color,
     trail: VecDeque<Vec2>,
     shock: Option<([f32; 3], f32)>,
+    /// The note's log id, so the kitten catches each note once (t78).
+    note_id: String,
 }
 
 #[derive(Resource)]
@@ -1381,6 +1551,15 @@ fn setup(
         Mesh2d(assets.quad.clone()),
         MeshMaterial2d(core_materials.add(CoreMaterial::default())),
         Transform::from_xyz(0.0, 0.0, 1.0).with_scale(Vec3::new(170.0, 170.0, 1.0)),
+    ));
+
+    commands.spawn((
+        CoreTicker::default(),
+        Text2d::new("SOL"),
+        TextFont { font_size: FontSize::Px(32.0), ..default() },
+        TextColor(Color::srgb(0.65, 0.97, 0.89)),
+        Anchor::CENTER,
+        Transform::from_xyz(0.0, 0.0, 5.5),
     ));
 
     let star_mat = materials.add(Color::linear_rgb(0.9, 0.95, 1.4));
@@ -1818,7 +1997,7 @@ fn window_size(windows: &Query<&Window>) -> Vec2 {
     windows.iter().next().map(|w| w.size()).unwrap_or(Vec2::new(1280.0, 800.0))
 }
 
-/// Splits the window into the scene and the chat panel, and moves the
+/// Splits the window into the scene and the chat strip, and moves the
 /// camera so the core sits in the middle of the scene.
 fn layout_view(
     windows: Query<&Window>,
@@ -1828,15 +2007,39 @@ fn layout_view(
     mut camera: Query<&mut Transform, With<Camera2d>>,
 ) {
     let w = window_size(&windows);
-    let panel = panel_width(w.x, &mods.cfg.chat);
-    layout.scene = Vec2::new(w.x - panel, w.y);
-    layout.panel = panel;
-    if (chat.drawn_width - panel).abs() > 0.5 {
-        chat.drawn_width = panel;
+    let chat_cfg = &mods.cfg.chat;
+    let left = left_panel::left_width(w.x, &mods.cfg.left);
+    // Bottom: the strip plus, with `side`, the Activity/Notify panel on the
+    // right. Right: one full-height column holding every tab.
+    let (strip, right, side_on) = match chat_cfg.dock {
+        mods::ChatDock::Bottom => {
+            let strip = strip_height(w.y, chat_cfg);
+            let mut right = right_panel::right_width(w.x, chat_cfg);
+            // t99 (Y): when both side panels are on, they are the same width.
+            if left > 0.0 && right > 0.0 {
+                right = left;
+            }
+            (strip, right, right > 0.0)
+        }
+        mods::ChatDock::Right => (0.0, panel_width(w.x, chat_cfg), false),
+    };
+    layout.scene = Vec2::new(w.x - left - right, w.y - strip);
+    layout.panel = strip;
+    layout.left = left;
+    layout.right = right;
+    layout.dock = chat_cfg.dock;
+    if chat.side_on != side_on {
+        chat.side_on = side_on;
+        chat.dirty = true;
+        chat.side_dirty = true;
+    }
+    if (chat.drawn_size - (strip + right)).abs() > 0.5 {
+        chat.drawn_size = strip + right;
         chat.dirty = true;
     }
     for mut tf in &mut camera {
-        tf.translation.x = panel * 0.5;
+        tf.translation.x = (right - left) * 0.5;
+        tf.translation.y = -strip * 0.5;
     }
 }
 
@@ -1868,7 +2071,14 @@ fn layout_seats(
     // planets never change places relative to each other (Y, t8): offline
     // seats leave their slot empty rather than the others closing up.
     let roster = seat_roster(deck.seats.iter().map(|s| s.name.as_str()));
-    let names: Vec<String> = roster.iter().filter(|n| deck.seat(n).is_some_and(|s| s.online())).cloned().collect();
+    // Lumo is the quantum kitten (t78): no planet and no body in the sim.
+    let kitten_on = kitten_view::on(&mods);
+    let names: Vec<String> = roster
+        .iter()
+        .filter(|n| deck.seat(n).is_some_and(|s| s.online()))
+        .filter(|n| !(kitten_on && n.as_str() == kitten_view::SEAT))
+        .cloned()
+        .collect();
     let pos: HashMap<String, (Vec2, f32)> =
         ring_positions(&roster, layout.scene, deck.orbit).into_iter().filter(|(n, _)| names.contains(n)).collect();
     deck.roster = roster;
@@ -2162,9 +2372,17 @@ fn pointer(
         deck.hover = None;
         if mouse.just_pressed(MouseButton::Left) {
             let w = world.unwrap_or_default();
-            if w.y > layout.scene.y * 0.5 - 38.0 {
-                // The header: a click picks a tab by thirds.
-                let k = ((w.x - layout.scene.x * 0.5) / layout.panel.max(1.0) * 3.0).clamp(0.0, 2.0) as usize;
+            // The chat header is the dock's top 38 px: a click picks a tab
+            // by thirds along it.
+            let header_base = match layout.dock {
+                mods::ChatDock::Bottom => -layout.scene.y * 0.5,
+                mods::ChatDock::Right => layout.scene.y * 0.5,
+            };
+            if w.y > header_base - 38.0 {
+                let k = match layout.dock {
+                    mods::ChatDock::Bottom => ((w.x + layout.scene.x * 0.5) / layout.scene.x.max(1.0) * 3.0).clamp(0.0, 2.0) as usize,
+                    mods::ChatDock::Right => ((w.x - layout.scene.x * 0.5) / layout.right.max(1.0) * 3.0).clamp(0.0, 2.0) as usize,
+                };
                 set_tab(&mut chat, Tab::ALL[k]);
             } else {
                 chat.focus = true;
@@ -2210,6 +2428,15 @@ fn pointer(
 }
 
 fn set_tab(chat: &mut Chat, tab: Tab) {
+    // F1 is the strip's Comms; F2/F3 pick the right panel's tab (when it's
+    // on; without it they show in the strip as before).
+    if tab != Tab::Comms && chat.side_on {
+        if chat.side != tab {
+            chat.side = tab;
+            chat.side_dirty = true;
+        }
+        return;
+    }
     if chat.tab != tab {
         chat.tab = tab;
         chat.scroll = 0;
@@ -2558,6 +2785,7 @@ fn draw_moons_and_marks(
     mods: Res<Mods>,
     view: Res<View>,
     looks: Res<Looks>,
+    layout: Res<Layout>,
     time: Res<Time>,
     nodes: Query<(&SeatNode, &Transform)>,
     mut gizmos: Gizmos,
@@ -2565,6 +2793,9 @@ fn draw_moons_and_marks(
     let t = time.elapsed_secs();
     let mc = &mods.cfg.moons;
     let sc = &mods.cfg.subagents;
+    // Standing orbitals, and resumable ones parked stopped, keep their own
+    // ellipses around the core (t106); drawn after the seat loop.
+    let mut ellipse: Vec<(&str, &SubagentInfo)> = Vec::new();
     let positions: HashMap<&str, (Vec2, f32)> =
         nodes.iter().map(|(n, tf)| (n.name.as_str(), (tf.translation.truncate(), tf.scale.x))).collect();
     for (node, tf) in &nodes {
@@ -2588,9 +2819,21 @@ fn draw_moons_and_marks(
         }
         if sc.show && view.moons {
             let mut subs: Vec<&SubagentInfo> =
-                deck.subagents.iter().filter(|s| s.parent == node.name && s.active).collect();
+                deck.subagents.iter().filter(|s| s.parent == node.name).collect();
             subs.sort_by(|a, b| a.id.cmp(&b.id));
-            for (i, sub) in subs.iter().take(sc.max).enumerate() {
+            let mut moons: Vec<&SubagentInfo> = Vec::new();
+            for sub in subs {
+                // Standing orbitals always circle the core on their own
+                // ellipses (t106). A stopped task one is gone with its
+                // task; a parked resumable hides until it's resumed —
+                // the core's ellipse is standing's alone (codex).
+                if sub.lifetime == SubagentLife::Standing {
+                    ellipse.push((node.name.as_str(), sub));
+                } else if sub.active {
+                    moons.push(sub);
+                }
+            }
+            for (i, sub) in moons.iter().take(sc.max).enumerate() {
                 let band = i / 8;
                 let r = (sc.radius + band as f32 * sc.spacing + (i % 8) as f32 * 2.0) * s;
                 let phase = (task_key(&sub.id) % 4096) as f32 / 4096.0 * std::f32::consts::TAU;
@@ -2607,6 +2850,22 @@ fn draw_moons_and_marks(
                 Vec2::splat(9.0 * s),
                 lin(c, (1.0 + 3.0 * k) * dim),
             );
+        }
+    }
+    // The core's own orbitals: each standing one gets a distinct ellipse
+    // around the singularity, dimmed while stopped.
+    if sc.show && view.moons && !ellipse.is_empty() {
+        ellipse.sort_by(|a, b| a.1.id.cmp(&b.1.id));
+        let short = layout.scene.x.min(layout.scene.y).max(1.0);
+        for (i, &(parent, sub)) in ellipse.iter().take(sc.max).enumerate() {
+            let a = short * (sc.ellipse_in + i as f32 * sc.ellipse_step);
+            let b = a * sc.ellipse_flat;
+            let phase = (task_key(&sub.id) % 4096) as f32 / 4096.0 * std::f32::consts::TAU;
+            let ang = t * sc.ellipse_speed * if i % 2 == 0 { 1.0 } else { -0.7 } + phase;
+            let q = Vec2::new(ang.cos() * a, ang.sin() * b);
+            let dim = if deck.focus.as_ref().is_some_and(|f| *f != parent) { 0.25 } else { 1.0 };
+            let bright = sc.bright * dim * if sub.active { 1.0 } else { sc.idle };
+            gizmos.circle_2d(Isometry2d::from_translation(q), sc.size, seat_colour(parent, bright));
         }
     }
     deck.shocks.retain(|sh| t - sh.at < 1.2);
@@ -2633,10 +2892,16 @@ fn fly_comets(
     time: Res<Time>,
     mut comets: Query<(Entity, &mut Comet, &mut Transform), Without<SeatNode>>,
     mut nodes: Query<(&mut SeatNode, &Transform), Without<Comet>>,
+    mut kit: ResMut<KittenView>,
     mut gizmos: Gizmos,
 ) {
-    let positions: HashMap<String, Vec2> =
+    let mut positions: HashMap<String, Vec2> =
         nodes.iter().map(|(n, tf)| (n.name.clone(), tf.translation.truncate())).collect();
+    // The kitten is where notes to and from Lumo start and land (t78).
+    if kit.anchor.is_some() {
+        positions.insert(kitten_view::SEAT.to_string(), kit.pos);
+    }
+    let now_k = time.elapsed_secs();
 
     // Launch what arrived. With no ring (before the first status poll, or
     // when every seat is offline) notes wait rather than vanish or burst
@@ -2645,7 +2910,7 @@ fn fly_comets(
         let pending = std::mem::take(&mut deck.pending);
         for note in pending {
             let look = note_look(&mods.rules, &mods.cfg, &note);
-            deck.warp = deck.warp.max(look.warp);
+            deck.warp = stack_warp(deck.warp, look.warp + mods.cfg.warp.per_note, mods.cfg.warp.max);
             // An agent writing to Y boosts the stars; notes between agents
             // speed the ring up. Always clockwise, the way the core's disk
             // turns: a note never reverses the orbit (Y, t11).
@@ -2659,6 +2924,10 @@ fn fly_comets(
                 }
             }
             let from = positions.get(&note.from).copied().unwrap_or(Vec2::ZERO);
+            if note.from == kitten_view::SEAT && kit.anchor.is_some() {
+                let id = if note.id.is_empty() { format!("t{now_k}") } else { note.id.clone() };
+                kit.sent(&id, &note.to, now_k);
+            }
             let targets: Vec<String> = if note.all {
                 positions.keys().filter(|k| **k != note.from).cloned().collect()
             } else {
@@ -2688,6 +2957,7 @@ fn fly_comets(
                         colour,
                         trail: VecDeque::new(),
                         shock: look.shock,
+                        note_id: note.id.clone(),
                     },
                     Mesh2d(assets.dot.clone()),
                     MeshMaterial2d(materials.add(colour)),
@@ -2701,9 +2971,15 @@ fn fly_comets(
     let now = time.elapsed_secs();
     let trail = mods.cfg.comets.trail.clamp(2, 200);
     for (e, mut comet, mut tf) in &mut comets {
-        // Follow the receiver round the orbit mid-flight.
+        // Follow the receiver round the orbit mid-flight. Lumo's electron
+        // quantum-jumps, so a comet to her eases after her instead of
+        // snapping (a snap kinked its trail into a zigzag, t78).
         if let Some(p) = positions.get(&comet.to) {
-            comet.to_pos = *p;
+            comet.to_pos = if comet.to == kitten_view::SEAT {
+                comet.to_pos.lerp(*p, 1.0 - (-dt * 5.0).exp())
+            } else {
+                *p
+            };
         }
         comet.t += dt / comet.seconds;
         let eased = 1.0 - (1.0 - comet.t.min(1.0)).powi(2);
@@ -2723,6 +2999,10 @@ fn fly_comets(
                 if node.name == comet.to {
                     node.flash = 1.0;
                 }
+            }
+            if comet.to == kitten_view::SEAT && kit.anchor.is_some() {
+                let id = if comet.note_id.is_empty() { format!("t{now}") } else { comet.note_id.clone() };
+                kit.landed(&id, now);
             }
             if let Some((colour, size)) = comet.shock {
                 deck.shocks.push(Shock { seat: comet.to.clone(), at: now, colour, size });
@@ -2749,8 +3029,9 @@ fn move_stars(
     // The walls stars splash on: the scene's edges, the panel's left edge
     // included.
     let walls = layout.half();
-    // The sky fills the whole window (the panel covers its right side).
-    let half = Vec2::new(layout.scene.x * 0.5 + layout.panel, window_size(&windows).y * 0.5);
+    // The sky fills the whole window (the panels cover their edges).
+    let win = window_size(&windows);
+    let half = Vec2::new(win.x * 0.5 + layout.left * 0.5 + layout.right * 0.5, win.y * 0.5 + layout.panel * 0.5);
     let reach = half.length() + 20.0;
     let pace = (deck.notes_last(time.elapsed_secs(), 600.0) as f32).min(30.0);
     let tc = &mods.cfg.typing;
@@ -2823,6 +3104,7 @@ fn draw_splash(mut splash: ResMut<Splash>, mods: Res<Mods>, time: Res<Time>, lay
 /// It turns amber when a figure is where trouble starts.
 fn sys_panel(
     deck: Res<Deck>,
+    left: Res<left_panel::Left>,
     mods: Res<Mods>,
     view: Res<View>,
     real: Res<Time<Real>>,
@@ -2860,8 +3142,14 @@ fn sys_panel(
         if c.0 != colour {
             c.0 = colour;
         }
-        tf.translation.x = -layout.half().x + 18.0;
-        tf.translation.y = layout.half().y - 70.0;
+        let (p, here) = left_panel::place(&layout, &left, left_panel::LeftTab::System, Vec2::new(-layout.half().x + 18.0, layout.half().y - 70.0));
+        if !here {
+            *vis = Visibility::Hidden;
+        }
+        tf.translation.x = p.x;
+        tf.translation.y = p.y;
+        // In front of the left panel's background (z 7) when inside it.
+        tf.translation.z = if layout.left > 0.0 { 10.0 } else { 5.0 };
     }
     // The low-memory alert shows whatever the HUD toggles say: it is the
     // one thing on screen that must never be hidden. Amber and breathing
@@ -2981,6 +3269,7 @@ none on the board".to_string();
 /// Shown with the HUD and `[hud] tasks_panel`; refreshed once a second.
 fn task_panel(
     deck: Res<Deck>,
+    left: Res<left_panel::Left>,
     mods: Res<Mods>,
     view: Res<View>,
     real: Res<Time<Real>>,
@@ -3006,8 +3295,14 @@ fn task_panel(
                 t.0 = text;
             }
         }
-        tf.translation.x = -layout.half().x + 18.0;
-        tf.translation.y = -layout.half().y + 70.0;
+        let (p, here) = left_panel::place(&layout, &left, left_panel::LeftTab::Tasks, Vec2::new(-layout.half().x + 18.0, -layout.half().y + 70.0));
+        if !here {
+            *vis = Visibility::Hidden;
+        }
+        tf.translation.x = p.x;
+        tf.translation.y = p.y;
+        // In front of the left panel's background (z 7) when inside it.
+        tf.translation.z = if layout.left > 0.0 { 10.0 } else { 5.0 };
     }
 }
 
@@ -3052,9 +3347,10 @@ fn hud(
         if !costs.is_empty() {
             line.push_str(&format!(" | ~${:.2} (estimate)", costs.iter().sum::<f64>()));
         }
-        if deck.warp > 0.05 {
+        if deck.warp > WARP_ACTIVE {
             line.push_str(&format!("    >> WARP {:.1}", deck.warp));
-        } else if deck.thrust > 0.05 {
+        }
+        if deck.thrust > 0.05 {
             line.push_str(&format!("    thrust {:.0}%", deck.thrust * 100.0));
         }
         if vtime.is_paused() {
@@ -3404,8 +3700,10 @@ fn chat_input(
                 send_line(&mut chat, &deck, real.elapsed_secs());
                 // A note went out: jump to warp in proportion to its length.
                 if chat.sending > before && mods.cfg.typing.jump_on_send {
-                    deck.warp = deck.warp.max(send_jump(len, reach, &mods.cfg.typing));
-                    deck.thrust = 0.0;
+                    // Sending stacks onto any warp already running, and the
+                    // thrust built while typing keeps pushing (Y, t88:
+                    // "Thrust should continue to apply even when in warp").
+                    deck.warp = stack_warp(deck.warp, send_jump(len, reach, &mods.cfg.typing), mods.cfg.warp.max);
                 }
             }
             Key::Escape => {
@@ -3448,6 +3746,12 @@ fn chat_input(
 
 /// The warp a sent note jumps to: proportional to its length, capped.
 /// Warp drains at a steady rate, so the coast is proportional too.
+/// Warp after a kick of `add`: kicks stack (more notes, further warp, Y
+/// t88), up to `max`.
+fn stack_warp(warp: f32, add: f32, max: f32) -> f32 {
+    (warp + add.max(0.0)).min(max.max(0.0)).max(warp.min(max.max(0.0)))
+}
+
 fn send_jump(len: usize, reach: usize, cfg: &mods::TypingCfg) -> f32 {
     // The more agents a note reaches, the bigger the jump (Y, t9).
     let more = 1.0 + cfg.per_recipient * (reach.max(1) - 1) as f32;
@@ -3575,6 +3879,30 @@ fn to_label(to: &str) -> String {
 }
 
 /// The panel's spans for the notes shown: newest last, `scroll` notes back.
+/// How many of the newest notes (before `scroll`) fit in `lines` rows of
+/// `cols` characters, each note taking its header plus its wrapped text.
+/// The strip is short (t91), and the log grows upward from its input line:
+/// drawn whole, 60 notes climbed over the whole scene.
+fn notes_that_fit(notes: &VecDeque<ChatNote>, scroll: usize, cols: usize, lines: usize) -> usize {
+    let end = notes.len().saturating_sub(scroll);
+    let cols = cols.max(20);
+    let mut used = 0;
+    let mut n = 0;
+    for note in notes.range(..end).rev() {
+        let head = note.from.len() + note.to.len() + 12;
+        let rows = (head + note.text.chars().count()).div_ceil(cols).max(1);
+        if used + rows > lines && n > 0 {
+            break;
+        }
+        used += rows;
+        n += 1;
+        if used >= lines {
+            break;
+        }
+    }
+    n.max(1)
+}
+
 fn chat_spans(notes: &VecDeque<ChatNote>, scroll: usize, cap: usize) -> Vec<(String, Color)> {
     let end = notes.len().saturating_sub(scroll);
     let start = end.saturating_sub(cap);
@@ -3666,12 +3994,24 @@ fn draw_chat(
     mut title: Query<(&mut Text2d, &mut Transform, &mut Visibility), (With<ChatTitle>, Without<ChatPanel>, Without<ChatHeader>, Without<ChatLog>, Without<ChatLine>, Without<ChatStatus>)>,
 ) {
     let cfg = &mods.cfg.chat;
-    let show = layout.panel > 0.0;
+    // Bottom dock: the strip spans the central column. Right dock: a
+    // full-height column on the right edge holding every tab.
+    let show = match layout.dock {
+        mods::ChatDock::Bottom => layout.panel > 0.0,
+        mods::ChatDock::Right => layout.right > 0.0,
+    };
     let vis = if show { Visibility::Inherited } else { Visibility::Hidden };
-    let h = layout.scene.y;
-    let left = layout.scene.x * 0.5;
+    let (dock_w, dock_h, cx, top, bottom) = match layout.dock {
+        mods::ChatDock::Bottom => (layout.scene.x, layout.panel, 0.0, -layout.scene.y * 0.5, -layout.scene.y * 0.5 - layout.panel),
+        mods::ChatDock::Right => (layout.right, layout.scene.y, layout.scene.x * 0.5 + layout.right * 0.5, layout.scene.y * 0.5, -layout.scene.y * 0.5),
+    };
+    let cy = (top + bottom) * 0.5;
     let pad = 14.0;
-    let inner = (layout.panel - pad * 2.0).max(50.0);
+    let inner = (dock_w - pad * 2.0).max(50.0);
+    let text_x = match layout.dock {
+        mods::ChatDock::Bottom => -layout.scene.x * 0.5 + pad,
+        mods::ChatDock::Right => layout.scene.x * 0.5 + pad,
+    };
     let header_h = 38.0;
     // A long draft wraps upward: the status line and the notes sit above it.
     let line_h = line
@@ -3681,38 +4021,40 @@ fn draw_chat(
         .filter(|y| *y > 1.0)
         .unwrap_or(20.0);
     let input_h = line_h + 46.0;
-    let bottom = -h * 0.5;
-    let top = h * 0.5;
 
     for (mut tf, mut v, header) in &mut panels {
         *v = vis;
         if header.is_some() {
-            tf.translation = Vec3::new(left + layout.panel * 0.5, top - header_h * 0.5, 9.0);
-            tf.scale = Vec3::new(layout.panel, header_h, 1.0);
+            tf.translation = Vec3::new(cx, top - header_h * 0.5, 9.0);
+            tf.scale = Vec3::new(dock_w, header_h, 1.0);
         } else {
-            tf.translation = Vec3::new(left + layout.panel * 0.5, 0.0, 7.0);
-            tf.scale = Vec3::new(layout.panel, h, 1.0);
+            tf.translation = Vec3::new(cx, cy, 7.0);
+            tf.scale = Vec3::new(dock_w, dock_h, 1.0);
         }
     }
     for (mut text, mut tf, mut v) in &mut title {
         *v = vis;
-        let mut t = Tab::ALL
-            .iter()
-            .enumerate()
-            .map(|(i, tab)| if *tab == chat.tab { format!("[F{} {}]", i + 1, tab.name()) } else { format!(" F{} {} ", i + 1, tab.name()) })
-            .collect::<Vec<_>>()
-            .join(" ");
+        let mut t = if chat.side_on {
+            "[F1 COMMS]     F2 ACTIVITY · F3 NOTIFY on the right".to_string()
+        } else {
+            Tab::ALL
+                .iter()
+                .enumerate()
+                .map(|(i, tab)| if *tab == chat.tab { format!("[F{} {}]", i + 1, tab.name()) } else { format!(" F{} {} ", i + 1, tab.name()) })
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
         if chat.scroll > 0 {
             t.push_str(&format!("  (back {}, PgDn)", chat.scroll));
         }
         if text.0 != t {
             text.0 = t;
         }
-        tf.translation = Vec3::new(left + pad, top - 12.0, 10.0);
+        tf.translation = Vec3::new(text_x, top - 12.0, 10.0);
     }
     for (e, mut tf, mut bounds, mut v, mut font) in &mut log {
         *v = vis;
-        tf.translation = Vec3::new(left + pad, bottom + input_h + 10.0, 8.0);
+        tf.translation = Vec3::new(text_x, bottom + input_h + 10.0, 8.0);
         if bounds.width != Some(inner) {
             bounds.width = Some(inner);
         }
@@ -3727,10 +4069,13 @@ fn draw_chat(
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs_f64())
                 .unwrap_or(0.0);
+            // Only what fits between the header and the input line.
+            let rows = ((dock_h - header_h - input_h - 14.0) / (cfg.font * 1.25)).max(1.0) as usize;
+            let cols = (inner / (cfg.font * 0.6)) as usize;
             let spans = match chat.tab {
-                Tab::Comms => chat_spans(&chat.notes, chat.scroll, 60),
-                Tab::Activity => activity_spans(&chat.activity, chat.scroll, 80, now_epoch),
-                Tab::Notify => notice_spans(&chat.notices, chat.scroll, 50, now_epoch),
+                Tab::Comms => chat_spans(&chat.notes, chat.scroll, notes_that_fit(&chat.notes, chat.scroll, cols, rows)),
+                Tab::Activity => activity_spans(&chat.activity, chat.scroll, rows, now_epoch),
+                Tab::Notify => notice_spans(&chat.notices, chat.scroll, rows, now_epoch),
             };
             commands.entity(e).with_children(|p| {
                 for (text, colour) in spans {
@@ -3757,7 +4102,7 @@ fn draw_chat(
         if bounds.width != Some(inner) {
             bounds.width = Some(inner);
         }
-        tf.translation = Vec3::new(left + pad, bottom + 12.0, 10.0);
+        tf.translation = Vec3::new(text_x, bottom + 12.0, 10.0);
     }
     for (mut text, mut colour, mut tf, mut v) in &mut status {
         *v = vis;
@@ -3777,7 +4122,7 @@ fn draw_chat(
             text.0 = t;
         }
         colour.0 = if err { Color::srgb(1.0, 0.45, 0.4) } else { Color::srgb(0.5, 0.56, 0.68) };
-        tf.translation = Vec3::new(left + pad, bottom + 12.0 + line_h + 8.0, 10.0);
+        tf.translation = Vec3::new(text_x, bottom + 12.0 + line_h + 8.0, 10.0);
     }
 }
 
@@ -3788,6 +4133,18 @@ mod tests {
     /// Bevy refuses, at start, two queries in one system that could touch
     /// the same component mutably (B0001): 1.32 died in a restart loop on
     /// exactly that. Initialising the systems catches it without a GPU.
+    #[test]
+    fn core_ticker_switches_through_static_in_both_directions() {
+        let mut ticker = CoreTicker::default();
+        assert_eq!(ticker.frame(0.0, 0.0), ("SOL", false));
+        assert_eq!(ticker.frame(WARP_ACTIVE, 1.0), ("SOL", false));
+        assert_eq!(ticker.frame(1.0, 2.0), ("S#L", true));
+        assert_eq!(ticker.frame(2.0, 2.1), ("%/+", true));
+        assert_eq!(ticker.frame(1.0, 2.3), ("XRP", false));
+        assert_eq!(ticker.frame(0.0, 3.0), ("X#P", true));
+        assert_eq!(ticker.frame(0.0, 3.3), ("SOL", false));
+    }
+
     #[test]
     fn workspace_and_scratchpad_events_wake_the_visibility_check() {
         assert!(shows_change("activespecial>>special:magic,DP-1\n"));
@@ -4288,12 +4645,30 @@ mod tests {
     }
 
     #[test]
-    fn the_panel_keeps_a_readable_width() {
+    fn the_strip_keeps_a_readable_height() {
         let cfg = mods::ChatCfg::default();
-        assert_eq!(panel_width(2000.0, &cfg), 600.0);
-        assert_eq!(panel_width(1100.0, &cfg), 352.0);
-        assert!((panel_width(400.0, &cfg) - 240.0).abs() < 0.01, "never more than 60% of a narrow window");
-        assert_eq!(panel_width(1100.0, &mods::ChatCfg { show: false, ..cfg }), 0.0);
+        assert!((strip_height(1000.0, &cfg) - 200.0).abs() < 0.01);
+        assert!((strip_height(600.0, &cfg) - 120.0).abs() < 0.01);
+        assert!((strip_height(300.0, &cfg) - 100.0).abs() < 0.01, "never under 100 px");
+        assert!((strip_height(1000.0, &mods::ChatCfg { height: 0.9, ..cfg }) - 450.0).abs() < 0.01, "never over 45% of the window");
+        assert_eq!(strip_height(1000.0, &mods::ChatCfg { show: false, ..cfg }), 0.0);
+    }
+
+    #[test]
+    fn the_chat_area_sits_on_its_docked_edge() {
+        let bottom = Layout { scene: Vec2::new(1000.0, 800.0), panel: 200.0, left: 0.0, right: 300.0, dock: mods::ChatDock::Bottom };
+        assert!(bottom.in_panel(Vec2::new(0.0, -410.0)));
+        assert!(bottom.in_panel(Vec2::new(490.0, -450.0)));
+        assert!(!bottom.in_panel(Vec2::new(0.0, -390.0)), "above the strip is scene");
+        assert!(!bottom.in_panel(Vec2::new(0.0, -610.0)), "below the strip is off-window");
+        assert!(!bottom.in_panel(Vec2::new(510.0, -450.0)), "past the column's edge");
+        assert!(!bottom.in_panel(Vec2::new(600.0, 0.0)), "the side panel isn't the strip");
+        let right = Layout { scene: Vec2::new(800.0, 1000.0), panel: 0.0, left: 0.0, right: 300.0, dock: mods::ChatDock::Right };
+        assert!(right.in_panel(Vec2::new(410.0, 0.0)));
+        assert!(right.in_panel(Vec2::new(410.0, -490.0)), "the column runs the full height");
+        assert!(!right.in_panel(Vec2::new(390.0, 0.0)), "left of the column is scene");
+        assert!(!Layout { panel: 0.0, ..bottom }.in_panel(Vec2::new(0.0, -450.0)), "chat off: nothing is the panel");
+        assert!(!Layout { right: 0.0, ..right }.in_panel(Vec2::new(410.0, 0.0)), "column off: nothing is the panel");
     }
 
     #[test]
@@ -4470,6 +4845,51 @@ mod tests {
         assert_eq!(recipients("all", &seats), 4, "every agent, not Y");
         assert_eq!(recipients("all -grok", &seats), 3);
         assert!(send_jump(100, 3, &cfg) > send_jump(100, 1, &cfg) * 2.5);
+    }
+
+    #[test]
+    fn notes_stack_warp_up_to_the_max() {
+        // t88: more notes, further warp; no longer just the biggest kick.
+        let mut w = 0.0;
+        for _ in 0..4 {
+            w = stack_warp(w, 0.15, 3.0);
+        }
+        assert!((w - 0.6).abs() < 1e-5);
+        assert_eq!(stack_warp(2.9, 1.0, 3.0), 3.0);
+        // A lowered max never yanks a running warp up, and never adds past it.
+        assert_eq!(stack_warp(0.5, 0.0, 3.0), 0.5);
+        assert_eq!(stack_warp(1.0, -2.0, 3.0), 1.0);
+    }
+
+    #[test]
+    fn only_the_notes_that_fit_the_strip_are_drawn() {
+        let note = |text: &str| ChatNote { from: "claude".into(), to: "owner".into(), time: String::new(), text: text.into(), quiet: false };
+        let notes: VecDeque<ChatNote> = (0..60).map(|_| note(&"x".repeat(170))).collect();
+        // 200 columns: each note is 1 row of header+text; 6 rows fit 6 notes.
+        assert_eq!(notes_that_fit(&notes, 0, 200, 6), 6);
+        // 100 columns: each note wraps to 2 rows, so 3 fit.
+        assert_eq!(notes_that_fit(&notes, 0, 100, 6), 3);
+        // A single note too long for the strip is still shown.
+        assert_eq!(notes_that_fit(&notes, 0, 20, 2), 1);
+        assert_eq!(notes_that_fit(&VecDeque::new(), 0, 100, 6), 1);
+    }
+
+    #[test]
+    fn price_surprise_is_where_the_latest_move_sits_in_the_recent_ones() {
+        let h = |ps: &[f64]| ps.iter().enumerate().map(|(i, p)| (i as f64 * 30.0, *p)).collect::<Vec<_>>();
+        // Small wiggles, then a big jump up: far in the tail, upward.
+        let calm = [100.0, 100.1, 100.0, 100.1, 100.0, 100.1, 100.0, 100.1, 100.0, 100.1, 103.0];
+        let (cdf, dir) = price_surprise(&h(&calm)).unwrap();
+        assert!(cdf > 0.95 && dir > 0.0);
+        // The same wiggles, then another ordinary wiggle: in the middle.
+        let typical = [100.0, 100.1, 100.0, 100.2, 100.0, 100.05, 100.0, 100.15, 100.0, 100.1, 100.0];
+        assert!(price_surprise(&h(&typical)).unwrap().0 < 0.8);
+        // Too few samples: no verdict.
+        assert!(price_surprise(&h(&[1.0, 2.0, 3.0])).is_none());
+        // Glitches are deterministic and stronger means more static.
+        assert_eq!(glitch_frame("SOL", 0.0, 7), "SOL");
+        assert_eq!(glitch_frame("SOL", 1.0, 7), glitch_frame("SOL", 1.0, 7));
+        assert_ne!(glitch_frame("SOL", 1.0, 7), "SOL");
     }
 
     #[test]

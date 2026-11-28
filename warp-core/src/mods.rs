@@ -367,19 +367,120 @@ impl Default for PlanetsCfg {
     }
 }
 
+/// Lumo's quantum kitten (t78): her own movement law, poses, hops, yarn and
+/// the event queue are all tuned here. The drawing itself lives in kitten.rs
+/// and main.rs; this is only the numbers.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct KittenCfg {
+    pub enable: bool,
+    /// The kitten's body size in px (gizmo line recipes scale from it).
+    pub size: f32,
+    /// How far she may hop from her anchor, as a share of the seat spacing.
+    pub reach: f32,
+    /// Seconds she dwells between hops when nothing waits.
+    pub base_dwell_s: f32,
+    /// Dwell multiplier floor: the most restlessness age can buy (×0.6 at 1 h+).
+    pub dwell_floor: f32,
+    /// Dwell never drops below this many seconds, however restless.
+    pub dwell_min_s: f32,
+    /// How long the ghost kittens show before a hop collapses.
+    pub ghost_s: f32,
+    /// Ghost opacity.
+    pub ghost_alpha: f32,
+    /// Ghosts only draw while the measured fps is at least this.
+    pub ghost_min_fps: f32,
+    /// Yarn balls drawn beside the anchor before "+N" takes over.
+    pub yarn_max: u8,
+    /// Seconds each queue event animates for.
+    pub catch_s: f32,
+    pub perch_s: f32,
+    pub rattle_s: f32,
+    pub relay_s: f32,
+    /// Title words that mark a held task as physics work (the busy pose bats
+    /// at an orbit preview). Case-insensitive substring match.
+    pub physics_words: Vec<String>,
+}
+impl Default for KittenCfg {
+    fn default() -> Self {
+        KittenCfg {
+            enable: true,
+            size: 30.0,
+            reach: 0.22,
+            base_dwell_s: 4.0,
+            dwell_floor: 0.6,
+            dwell_min_s: 1.5,
+            ghost_s: 0.5,
+            ghost_alpha: 0.25,
+            ghost_min_fps: 30.0,
+            yarn_max: 3,
+            catch_s: 1.5,
+            perch_s: 0.8,
+            rattle_s: 0.4,
+            relay_s: 1.2,
+            physics_words: ["physic", "orbit", "gravity", "warp", "solver"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        }
+    }
+}
+
+/// The left panel (t87, Y: "Let's start building the left panel in the
+/// warp core. The right panel is the comms, activity, and notify."): the
+/// machine, the task board and the crew, on F4-F6.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LeftCfg {
+    pub show: bool,
+    /// Share of the window (kept 260..520 px).
+    pub width: f32,
+    pub font: f32,
+}
+impl Default for LeftCfg {
+    fn default() -> Self {
+        LeftCfg { show: true, width: 0.22, font: 14.0 }
+    }
+}
+
+/// Ghost kittens cost draw calls the M1 can ill afford during stalls: they
+/// only appear while the measured frame rate clears the configured floor.
+pub fn ghosts_allowed(fps: f32, cfg: &KittenCfg) -> bool {
+    cfg.enable && fps >= cfg.ghost_min_fps
+}
+
+/// Where the chat lives: `bottom` keeps F1 Comms in the strip and, with
+/// `side`, F2/F3 in the right panel; `right` is the old full-height column
+/// on the right holding all three tabs (Devin's t97 fold, claude's ask).
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ChatDock {
+    #[default]
+    Bottom,
+    Right,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ChatCfg {
     pub show: bool,
-    /// The panel's share of the window's width (clamped to 300..600 px).
+    /// The right panel's width share (F2 Activity, F3 Notify; Y, 02:50),
+    /// or the whole chat column's when dock = "right".
     pub width: f32,
+    /// Show the right panel. Off: F2/F3 show in the bottom strip instead.
+    /// Ignored while dock = "right" (the column holds every tab).
+    pub side: bool,
+    /// The bottom strip's share of the window's height.
+    pub height: f32,
+    /// Where the chat docks.
+    pub dock: ChatDock,
     pub font: f32,
     /// How many notes the panel keeps (older ones scroll away).
     pub keep: usize,
 }
 impl Default for ChatCfg {
     fn default() -> Self {
-        ChatCfg { show: true, width: 0.32, font: 14.0, keep: 200 }
+        ChatCfg { show: true, width: 0.22, side: true, height: 0.2, dock: ChatDock::Bottom, font: 14.0, keep: 200 }
     }
 }
 
@@ -402,10 +503,15 @@ impl Default for CometsCfg {
 pub struct WarpCfg {
     pub decay: f32,
     pub on_broadcast: f32,
+    /// Warp every note adds, on top of a broadcast's kick (Y, t88: "more
+    /// messages warp the core further"): notes stack, they don't just top up.
+    pub per_note: f32,
+    /// The most warp can stack to.
+    pub max: f32,
 }
 impl Default for WarpCfg {
     fn default() -> Self {
-        WarpCfg { decay: 0.22, on_broadcast: 1.0 }
+        WarpCfg { decay: 0.22, on_broadcast: 1.0, per_note: 0.15, max: 3.0 }
     }
 }
 
@@ -484,10 +590,34 @@ pub struct SubagentsCfg {
     pub size: f32,
     pub bright: f32,
     pub max: usize,
+    /// Standing orbitals circle the core on their own ellipses (t106):
+    /// the innermost semi-major axis and the step each further one takes,
+    /// as shares of the scene's short side.
+    pub ellipse_in: f32,
+    pub ellipse_step: f32,
+    /// Semi-minor / semi-major.
+    pub ellipse_flat: f32,
+    pub ellipse_speed: f32,
+    /// A stopped orbital's brightness, as a share of `bright` (the dim
+    /// idle cue on a standing ellipse).
+    pub idle: f32,
 }
 impl Default for SubagentsCfg {
     fn default() -> Self {
-        SubagentsCfg { show: true, speed: 1.6, radius: 34.0, spacing: 7.0, size: 2.0, bright: 1.2, max: 8 }
+        SubagentsCfg {
+            show: true,
+            speed: 1.6,
+            radius: 34.0,
+            spacing: 7.0,
+            size: 2.0,
+            bright: 1.2,
+            max: 8,
+            ellipse_in: 0.14,
+            ellipse_step: 0.035,
+            ellipse_flat: 0.7,
+            ellipse_speed: 0.22,
+            idle: 0.35,
+        }
     }
 }
 
@@ -583,6 +713,8 @@ pub struct Config {
     pub splash: SplashCfg,
     pub conduits: ConduitsCfg,
     pub planets: PlanetsCfg,
+    pub kitten: KittenCfg,
+    pub left: LeftCfg,
     pub rule: Vec<RuleSpec>,
 }
 

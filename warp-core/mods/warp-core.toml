@@ -100,6 +100,8 @@ size = 1.0
 [warp]
 decay = 0.22                  # warp lost per second
 on_broadcast = 1.0            # warp a note to `all` kicks in (0 turns it off)
+per_note = 0.15               # every note adds this too: more notes, further warp (t88)
+max = 3.0                     # warp stacks up to this
 
 [seats]
 size = 1.0
@@ -141,6 +143,14 @@ spacing = 7
 size = 2.0
 bright = 1.2
 max = 8
+# t106: standing orbitals circle the core on their own ellipses.
+# ellipse_in/ellipse_step are shares of the scene's short side;
+# ellipse_flat is semi-minor / semi-major.
+ellipse_in = 0.14
+ellipse_step = 0.035
+ellipse_flat = 0.7
+ellipse_speed = 0.22
+idle = 0.35                   # a stopped orbital's brightness, share of bright
 
 [hud]
 show = true
@@ -164,9 +174,18 @@ bright = 1.1
 
 # The chat panel on the right: the notes, and a chat box that sends as Y.
 # The terminal chat screen keeps working alongside it.
+# The left panel (t87): F4 SYSTEM, F5 TASKS, F6 CREW. The right one is chat.
+[left]
+show = true
+width = 0.22                  # share of the window (260..520 px)
+font = 14
+
 [chat]
 show = true
-width = 0.32                  # share of the window (300..600 px)
+height = 0.2                   # bottom dock: share of the window's height
+dock = "bottom"               # "bottom" = strip (F1) + right panel (F2/F3); "right" = one column with all tabs
+side = true                    # bottom dock only: the right panel for F2 Activity and F3 Notify
+width = 0.22                   # the right panel's share of the window's width (follows [left].width when both panels are on, t99; or the column's, dock = "right")
 font = 14
 keep = 200                    # notes kept for scrolling back
 
@@ -206,6 +225,26 @@ packet_seconds = 1.4
 [planets]
 show = true
 full_minutes = 20
+
+# Lumo's seat is a quantum kitten, not a planet (t78): she hops round a fixed
+# anchor on her own law — never in the gravity sim — and every deck metric
+# shows as a behaviour. enable = false falls back to a plain planet.
+[kitten]
+enable = true
+size = 30.0                  # body size in px; pose line-recipes scale from it
+reach = 0.22                 # hop distance, as a share of the seat spacing
+base_dwell_s = 4.0           # seconds between hops when nothing waits
+dwell_floor = 0.6            # dwell multiplier floor: restlessness at 1 h+ old
+dwell_min_s = 1.5            # dwell never drops below this, however restless
+ghost_s = 0.5                # how long the pre-hop ghosts show before collapse
+ghost_alpha = 0.25           # ghost opacity
+ghost_min_fps = 30.0         # ghosts only draw while fps stays above this
+yarn_max = 3                 # yarn balls beside the anchor before "+N"
+catch_s = 1.5                # receive: two-paw catch + sparkle
+perch_s = 0.8                # relay: perches at the recipient's rim
+rattle_s = 0.4                # box: rattle when a new note arrives
+relay_s = 1.2                # relay: the whole carry-and-return beat
+physics_words = ["physic", "orbit", "gravity", "warp", "solver"]  # held-task titles that switch the busy pose to orbit-preview batting
 
 # ---------------------------------------------------------------- rules
 #
