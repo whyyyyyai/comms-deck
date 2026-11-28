@@ -69,6 +69,9 @@ const PLANET_SHADER: Handle<Shader> = uuid_handle!("3c7a1e9b-5d2f-4a8c-9e6b-1f0d
 const FUEL_D: [f32; 3] = [70.0, 82.0, 94.0];
 const HALO_D: f32 = 116.0;
 
+mod kitten_view;
+use kitten_view::KittenView;
+
 fn main() {
     install_crash_log();
     watch_visibility();
@@ -79,6 +82,7 @@ fn main() {
         .insert_resource(ClearColor(Color::srgb(0.01, 0.012, 0.03)))
         .insert_resource(Feed(Mutex::new(rx)))
         .insert_resource(Deck::default())
+        .insert_resource(KittenView::default())
         .insert_resource(Mods::default())
         .insert_resource(View::default())
         .insert_resource(Looks::default())
@@ -123,12 +127,13 @@ fn main() {
         .add_systems(
             Update,
             (
-                (watch_mods, pace_frames, read_feed, layout_view, apply_rules, layout_seats, layout_tasks, layout_held_tasks, pointer, chat_input, keys).chain(),
+                (watch_mods, pace_frames, read_feed, layout_view, apply_rules, layout_seats, kitten_view::kitten_step, layout_tasks, layout_held_tasks, pointer, chat_input, keys).chain(),
                 (
                     glow_seats,
                     draw_rings,
                     pulse_core,
                     fly_comets,
+                    kitten_view::draw_kitten,
                     move_stars,
                     colour_stars,
                     draw_splash,
@@ -1153,6 +1158,8 @@ struct Comet {
     colour: Color,
     trail: VecDeque<Vec2>,
     shock: Option<([f32; 3], f32)>,
+    /// The note's log id, so the kitten catches each note once (t78).
+    note_id: String,
 }
 
 #[derive(Resource)]
@@ -1868,7 +1875,14 @@ fn layout_seats(
     // planets never change places relative to each other (Y, t8): offline
     // seats leave their slot empty rather than the others closing up.
     let roster = seat_roster(deck.seats.iter().map(|s| s.name.as_str()));
-    let names: Vec<String> = roster.iter().filter(|n| deck.seat(n).is_some_and(|s| s.online())).cloned().collect();
+    // Lumo is the quantum kitten (t78): no planet and no body in the sim.
+    let kitten_on = kitten_view::on(&mods);
+    let names: Vec<String> = roster
+        .iter()
+        .filter(|n| deck.seat(n).is_some_and(|s| s.online()))
+        .filter(|n| !(kitten_on && n.as_str() == kitten_view::SEAT))
+        .cloned()
+        .collect();
     let pos: HashMap<String, (Vec2, f32)> =
         ring_positions(&roster, layout.scene, deck.orbit).into_iter().filter(|(n, _)| names.contains(n)).collect();
     deck.roster = roster;
@@ -2633,10 +2647,16 @@ fn fly_comets(
     time: Res<Time>,
     mut comets: Query<(Entity, &mut Comet, &mut Transform), Without<SeatNode>>,
     mut nodes: Query<(&mut SeatNode, &Transform), Without<Comet>>,
+    mut kit: ResMut<KittenView>,
     mut gizmos: Gizmos,
 ) {
-    let positions: HashMap<String, Vec2> =
+    let mut positions: HashMap<String, Vec2> =
         nodes.iter().map(|(n, tf)| (n.name.clone(), tf.translation.truncate())).collect();
+    // The kitten is where notes to and from Lumo start and land (t78).
+    if kit.anchor.is_some() {
+        positions.insert(kitten_view::SEAT.to_string(), kit.pos);
+    }
+    let now_k = time.elapsed_secs();
 
     // Launch what arrived. With no ring (before the first status poll, or
     // when every seat is offline) notes wait rather than vanish or burst
@@ -2659,6 +2679,10 @@ fn fly_comets(
                 }
             }
             let from = positions.get(&note.from).copied().unwrap_or(Vec2::ZERO);
+            if note.from == kitten_view::SEAT && kit.anchor.is_some() {
+                let id = if note.id.is_empty() { format!("t{now_k}") } else { note.id.clone() };
+                kit.sent(&id, &note.to, now_k);
+            }
             let targets: Vec<String> = if note.all {
                 positions.keys().filter(|k| **k != note.from).cloned().collect()
             } else {
@@ -2688,6 +2712,7 @@ fn fly_comets(
                         colour,
                         trail: VecDeque::new(),
                         shock: look.shock,
+                        note_id: note.id.clone(),
                     },
                     Mesh2d(assets.dot.clone()),
                     MeshMaterial2d(materials.add(colour)),
@@ -2723,6 +2748,10 @@ fn fly_comets(
                 if node.name == comet.to {
                     node.flash = 1.0;
                 }
+            }
+            if comet.to == kitten_view::SEAT && kit.anchor.is_some() {
+                let id = if comet.note_id.is_empty() { format!("t{now}") } else { comet.note_id.clone() };
+                kit.landed(&id, now);
             }
             if let Some((colour, size)) = comet.shock {
                 deck.shocks.push(Shock { seat: comet.to.clone(), at: now, colour, size });
