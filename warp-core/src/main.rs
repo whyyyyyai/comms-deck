@@ -131,7 +131,7 @@ fn main() {
         .add_systems(
             Update,
             (
-                (watch_mods, pace_frames, read_feed, layout_view, apply_rules, layout_seats, kitten_view::kitten_step, left_panel::left_keys, layout_tasks, layout_held_tasks, pointer, chat_input, keys).chain(),
+                (watch_mods, pace_frames, breathe_background, read_feed, layout_view, apply_rules, layout_seats, kitten_view::kitten_step, left_panel::left_keys, layout_tasks, layout_held_tasks, pointer, chat_input, keys).chain(),
                 (
                     glow_seats,
                     draw_rings,
@@ -151,7 +151,7 @@ fn main() {
                     tooltip,
                     chat_results,
                     draw_chat,
-                    right_panel::right_panel,
+                    (right_panel::right_panel, right_panel::draw_candles).chain(),
                     health_log,
                 )
                     .chain(),
@@ -1443,6 +1443,8 @@ fn label_for(name: &str) -> String {
     match name {
         "owner" => "Y".into(),
         "lumo" => "Proton".into(),
+        "claude" => "Jupiter".into(),
+        "vibe" => "Mercury".into(),
         _ => name.into(),
     }
 }
@@ -2872,8 +2874,16 @@ fn drive_planets(
                     colour: v4(seat_rgb(&node.name), 1.0),
                     params: Vec4::new(t, work, if busy { 1.0 } else { 0.0 }, seed),
                     logo: match logos.0.get(&node.name) {
-                        Some((_, mono)) => Vec4::new(1.0, if *mono { 1.0 } else { 0.0 }, bright, 0.0),
-                        None => Vec4::ZERO,
+                        Some((_, mono)) => Vec4::new(
+                            1.0,
+                            if *mono { 1.0 } else { 0.0 },
+                            bright,
+                            // Mercury bubbles with lava while it works
+                            // (Y, t140): the shader reads logo.w as the
+                            // lava flag.
+                            if node.name == "vibe" { 1.0 } else { 0.0 },
+                        ),
+                        None => Vec4::new(0.0, 0.0, 0.0, if node.name == "vibe" { 1.0 } else { 0.0 }),
                     },
                 };
             }
@@ -3689,6 +3699,24 @@ fn seat_for_slot(shares: &[(String, f32)], slot: f32) -> Option<&str> {
         }
     }
     shares.last().map(|(n, _)| n.as_str())
+}
+
+/// [look] background_hz/background_amp: the background breathes on a pure
+/// sine (Y, t142). Each channel runs a third of a cycle apart, so the hue
+/// drifts as it swells and fades. 0 Hz or 0 amp holds the flat colour.
+fn breathe_background(mut clear: ResMut<ClearColor>, time: Res<Time>, m: Res<Mods>) {
+    let l = &m.cfg.look;
+    if l.background_hz <= 0.0 || l.background_amp <= 0.0 {
+        return;
+    }
+    let t = time.elapsed_secs() * std::f32::consts::TAU * l.background_hz;
+    let b = l.background;
+    let a = l.background_amp;
+    clear.0 = Color::linear_rgb(
+        b[0] * (1.0 + a * t.sin()),
+        b[1] * (1.0 + a * (t + std::f32::consts::TAU / 3.0).sin()),
+        b[2] * (1.0 + a * (t + 2.0 * std::f32::consts::TAU / 3.0).sin()),
+    );
 }
 
 /// Gives each star the colour of the seat whose share of the context its

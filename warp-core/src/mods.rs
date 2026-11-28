@@ -85,10 +85,17 @@ pub struct Look {
     /// memory traffic on the 4480x2520 display; the shapes are drawn smooth
     /// by their shaders, so only thin lines gain from it.
     pub msaa: u32,
+    /// The background breathing on a pure sine: cycles a second, and how
+    /// far each channel swings either side of `background` (a fraction).
+    /// The channels run a third of a cycle apart, so the hue drifts too.
+    /// 0 holds the flat colour (Y, t142).
+    pub background_hz: f32,
+    pub background_amp: f32,
 }
 impl Default for Look {
     fn default() -> Self {
-        Look { background: [0.01, 0.012, 0.03], bloom: 0.28, fps: 60.0, fps_unfocused: 60.0, fps_hidden: 24.0, msaa: 1 }
+        Look { background: [0.01, 0.012, 0.03], bloom: 0.28, fps: 60.0, fps_unfocused: 60.0, fps_hidden: 24.0, msaa: 1,
+              background_hz: 0.0, background_amp: 0.0 }
     }
 }
 
@@ -484,6 +491,26 @@ impl Default for ChatCfg {
     }
 }
 
+/// The SOL/XRP candlestick chart pinned to the bottom of the right panel
+/// (Y, t145), built from the pricefeed's samples - the oracle is Coinbase
+/// spot, bucketed here into candles.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ChartCfg {
+    pub show: bool,
+    /// Seconds per candle. The feed samples every 30 s, so 300 gives ten
+    /// samples a candle and two hours of history fills ~24 of them.
+    pub bucket_s: f32,
+    /// Which prices.json keys get a row, top to bottom. Futures land as
+    /// their own keys (e.g. "SOL-PERP") once pricefeed writes them (t146).
+    pub symbols: Vec<String>,
+}
+impl Default for ChartCfg {
+    fn default() -> Self {
+        ChartCfg { show: true, bucket_s: 300.0, symbols: vec!["SOL".into(), "XRP".into()] }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CometsCfg {
@@ -709,6 +736,7 @@ pub struct Config {
     pub hud: HudCfg,
     pub tasks: TasksCfg,
     pub chat: ChatCfg,
+    pub chart: ChartCfg,
     pub typing: TypingCfg,
     pub splash: SplashCfg,
     pub conduits: ConduitsCfg,

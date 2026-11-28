@@ -13,6 +13,8 @@ fps = 60                      # frames a second while shown: 60 at least (Y, 05:
 fps_unfocused = 60            # the same with another window focused (Y, 05:26)
 msaa = 1                      # multisampling 1 (off), 2 or 4: off is far lighter on the GPU at 4480x2520
 fps_hidden = 24               # while hidden in the scratchpad: low, but tabbing back is snappy (Y, 06:18)
+background_hz = 0.05          # the background breathes on a pure sine (Y, t142): this many cycles a second
+background_amp = 0.6          # each channel swings ±this fraction of its colour either side of `background`
 
 [core]
 cool = [0.25, 0.9, 3.2]       # the core's colour when the crew has room
@@ -188,6 +190,16 @@ side = true                    # bottom dock only: the right panel for F2 Activi
 width = 0.22                   # the right panel's share of the window's width (follows [left].width when both panels are on, t99; or the column's, dock = "right")
 font = 14
 keep = 200                    # notes kept for scrolling back
+
+# The SOL/XRP candlestick chart pinned to the bottom of the right panel
+# (Y, t145). Candles are bucketed from the pricefeed's 30 s samples -
+# Coinbase spot is the oracle.
+[chart]
+show = true
+bucket_s = 300                # seconds per candle: 10 samples each, ~24 fit two hours
+symbols = ["SOL", "XRP", "SOL-PERP", "XRP-PERP"]  # prices.json keys, one row each,
+                              # top to bottom; the -PERP rows show "--" until
+                              # pricefeed writes the Deribit futures (t146)
 
 # Typing in the chat box builds thrust: the longer the note, the faster the
 # stars stream. It drains away when you stop; sending jumps to warp.

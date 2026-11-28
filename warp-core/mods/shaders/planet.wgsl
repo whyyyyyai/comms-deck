@@ -54,24 +54,50 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // 10 particles to start, up to 28 after a long stretch of work, each
     // on its own orbit inside the planet, swirling faster as work grows.
     // `swirl` is the particles' pull on the surface: the logo ripples with it.
+    // Mercury (logo.w = 1) bubbles with lava instead of sparkling (Y, t140):
+    // cells of molten light rise through the surface, hottest at the top.
     var light = 0.0;
     var swirl = vec2<f32>(0.0);
+    var lava = 0.0;
+    var lava_heat = vec3<f32>(0.0);
     if (busy > 0.5) {
-        let count = i32(10.0 + 18.0 * work);
-        for (var i = 0; i < 28; i = i + 1) {
-            if (i >= count) {
-                break;
+        if (planet.logo.w > 0.5) {
+            let count = i32(8.0 + 14.0 * work);
+            for (var i = 0; i < 22; i = i + 1) {
+                if (i >= count) {
+                    break;
+                }
+                let k = f32(i) + seed;
+                let bx = (hash1(k) * 2.0 - 1.0) * 0.85;
+                let wob = 0.06 * sin(t * (1.5 + hash1(k + 4.0)) + k);
+                let speed = 0.10 + 0.45 * hash1(k + 8.0);
+                let rise = fract(hash1(k + 12.0) + t * speed);
+                let by = -0.95 + rise * 1.9;
+                let br = 0.05 + 0.11 * hash1(k + 2.0) + 0.05 * work * rise;
+                let d = p - vec2<f32>(bx + wob, by);
+                let dd = dot(d, d);
+                let g = exp(-dd / (br * br * 0.6));
+                lava = lava + g * (0.5 + 0.8 * rise);
+                lava_heat = lava_heat + vec3<f32>(1.0, 0.45 + 0.4 * rise, 0.08) * g;
+                swirl = swirl + vec2<f32>(-d.y, d.x) * exp(-dd / 0.03) * 0.7;
             }
-            let k = f32(i) + seed;
-            let orbit_r = 0.15 + 0.7 * hash1(k);
-            let speed = (0.8 + 1.8 * hash1(k + 3.1)) * (0.6 + 1.6 * work);
-            let dir = select(-1.0, 1.0, hash1(k + 7.7) > 0.5);
-            let a = hash1(k + 1.3) * 6.2831853 + dir * t * speed / max(orbit_r, 0.2);
-            let q = vec2<f32>(cos(a), sin(a)) * orbit_r;
-            let d = p - q;
-            let g = exp(-dot(d, d) / 0.0035) * (0.6 + 0.4 * sin(t * 6.0 + k));
-            light = light + g;
-            swirl = swirl + vec2<f32>(-d.y, d.x) * exp(-dot(d, d) / 0.03) * dir;
+        } else {
+            let count = i32(10.0 + 18.0 * work);
+            for (var i = 0; i < 28; i = i + 1) {
+                if (i >= count) {
+                    break;
+                }
+                let k = f32(i) + seed;
+                let orbit_r = 0.15 + 0.7 * hash1(k);
+                let speed = (0.8 + 1.8 * hash1(k + 3.1)) * (0.6 + 1.6 * work);
+                let dir = select(-1.0, 1.0, hash1(k + 7.7) > 0.5);
+                let a = hash1(k + 1.3) * 6.2831853 + dir * t * speed / max(orbit_r, 0.2);
+                let q = vec2<f32>(cos(a), sin(a)) * orbit_r;
+                let d = p - q;
+                let g = exp(-dot(d, d) / 0.0035) * (0.6 + 0.4 * sin(t * 6.0 + k));
+                light = light + g;
+                swirl = swirl + vec2<f32>(-d.y, d.x) * exp(-dot(d, d) / 0.03) * dir;
+            }
         }
     }
 
@@ -94,16 +120,19 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // Particles flare where they cross the logo and stay faint elsewhere.
+    // Mercury's are lava cells: hot orange-white, brightest near the top
+    // of their rise, still rippling the logo through `swirl`.
     let on_logo = select(1.0, mix(0.45, 3.0, mask), has_logo);
-    let lit = light * on_logo;
+    let lit = light * on_logo + lava * on_logo;
     let core_glow = (1.0 - smoothstep(0.0, 0.9, r)) * 0.25 * (0.5 + work) * busy;
     let edge = 1.0 - smoothstep(0.85, 0.95, r);
-    let particles = planet.colour.rgb * (lit * (2.5 + 3.0 * work) + core_glow) + vec3<f32>(lit * 0.6);
+    let particles = planet.colour.rgb * (lit * (2.5 + 3.0 * work) + core_glow)
+        + lava_heat * (2.0 + 1.5 * work) + vec3<f32>(lit * 0.6, lit * 0.25, lit * 0.08);
 
     // The surface: darkened a little round the logo so it reads, the logo
     // itself glowing steadily, brighter at work and where particles pass.
     let shade = select(0.0, 0.45, has_logo) * (1.0 - mask);
-    let glow = mask * (0.55 + 0.6 * busy + 2.5 * light * busy) * bright;
+    let glow = mask * (0.55 + 0.6 * busy + 2.5 * light * busy + 3.5 * lava * busy) * bright;
     let colour = logo_rgb * glow + particles;
     let alpha = clamp(shade + mask + lit + core_glow, 0.0, 1.0) * edge;
     return vec4<f32>(colour, alpha);
