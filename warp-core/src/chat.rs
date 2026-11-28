@@ -75,7 +75,11 @@ fn words_with_prefix(text: &str, mark: char) -> Vec<String> {
         }
         let name: String = rest.iter().take_while(|&&c| word(c) || c == '-').collect();
         let name = name.to_lowercase();
-        out.push(if matches!(name.as_str(), "luna" | "proton") { "lumo".into() } else { name });
+        out.push(match name.as_str() {
+            "luna" | "proton" => "lumo".into(),
+            "jupiter" => "claude".into(),
+            _ => name,
+        });
     }
     out
 }
@@ -246,6 +250,8 @@ mod tests {
         assert_eq!(route("@all -Luna", &seats()).unwrap(), "all -lumo");
         assert_eq!(route("@Proton hello", &[]).unwrap(), "lumo");
         assert_eq!(route("@all -Proton", &seats()).unwrap(), "all -lumo");
+        assert_eq!(route("@Jupiter hello", &seats()).unwrap(), "claude");
+        assert_eq!(route("@all -Jupiter", &seats()).unwrap(), "all -claude");
     }
 
     #[test]

@@ -1405,6 +1405,7 @@ fn label_for(name: &str) -> String {
     match name {
         "owner" => "Y".into(),
         "lumo" => "Proton".into(),
+        "claude" => "Jupiter".into(),
         _ => name.into(),
     }
 }
