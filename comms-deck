@@ -407,7 +407,10 @@ def orbital_cli(action, oid, kind, task, seat=None):
     (a terminal, a CLI call; Y, t103) puts them on the warp core. The parent
     is the seat whose agent is calling, never one named on the command line.
     Start prints the id to stop it with."""
-    seat = seat or find_agent()[0]
+    # Who's calling comes from the process tree only, never from an
+    # environment variable any process could set (Vibe's review): a process
+    # that isn't running under a seat's agent can't mint orbitals for it.
+    seat = seat or find_agent(trust_env=False)[0]
     if seat not in AGENTS:
         return json.dumps({"ok": False, "reason": "not run from a seat's agent"})
     session = f"cli:{seat}"
@@ -465,13 +468,14 @@ def parent_of(pid):
         return 0
 
 
-def find_agent():
+def find_agent(trust_env=True):
     """Walk up from this process to the nearest agent. Return (seat, pid).
 
-    $COMMS_DECK_SEAT wins if set. The program agy is the seat gravity.
-    Returns (None, 0) outside any agent, e.g. in a plain terminal.
+    $COMMS_DECK_SEAT wins if set and `trust_env` (app seats' MCP servers
+    need it). The program agy is the seat gravity. Returns (None, 0) outside
+    any agent, e.g. in a plain terminal.
     """
-    forced = setting("SEAT")
+    forced = setting("SEAT") if trust_env else None
     if forced:
         return forced, 0
     by_proc = {proc: seat for seat, proc in AGENTS.items()}
@@ -8398,6 +8402,12 @@ def self_test():
         "x.orbital_cli('stop', out['id'], '', '', seat='codex')",
         "assert not any(i['id'] == out['orbital'] for i in x.read_json(x.DATA / 'subagents.json', {})['subagents'])",
         "assert not x.json.loads(x.orbital_cli('start', '', 'x', '', seat='nobody'))['ok']",
+        # Vibe's review: $COMMS_DECK_SEAT can't claim a seat for an orbital.
+        "real_name = x.proc_name; x.proc_name = lambda pid: 'bash'",  # a caller under no agent
+        "x.os.environ['COMMS_DECK_SEAT'] = 'claude'",
+        "assert x.find_agent()[0] == 'claude' and x.find_agent(trust_env=False)[0] is None",
+        "assert not x.json.loads(x.orbital_cli('start', '', 'x', ''))['ok'], 'a spoofed seat is refused'",
+        "del x.os.environ['COMMS_DECK_SEAT']; x.proc_name = real_name",
         "assert x.task_summary('<system-reminder> fixing the chat layout now', []) == 'fixing the chat layout now'",
         "assert x.task_summary('<system-reminder>', [('p', {'text': 'merge the PR', 'private': False})]) == 'merge the PR'",
         "assert x.describe('<system-reminder>\\nhook text\\n</system-reminder>\\nreview PR 36') == 'review PR 36'",
