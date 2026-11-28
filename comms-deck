@@ -333,6 +333,55 @@ def append_log(record):
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+# Subagent orbitals (Y, t101/t102: "There's the core connector that needs
+# to be aligned with the warp core. We need to be creating our subagent
+# orbitals." ... "It needs to be secure and effective."). The SubagentStart
+# and SubagentStop hooks of a seat's own agent are turned into
+# subagents.json, which the warp core draws as bodies orbiting that seat.
+SUBAGENT_EXPIRE = 30 * 60   # an entry with no Stop for this long is dropped
+SUBAGENT_MAX = 16           # per seat
+_KIND_RE = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def subagent_entry(seat, data, now):
+    """One subagents.json entry from a hook payload, or None. Secure by
+    construction: only an opaque id, the parent seat, a short sanitised kind
+    and times leave the payload. Never the prompt, description, transcript
+    path or anything else an agent wrote."""
+    raw_id = str(data.get("agent_id") or data.get("subagent_id") or data.get("subagentId") or "")
+    if not raw_id or seat not in AGENTS:
+        return None
+    kind = str(data.get("agent_type") or data.get("subagent_type") or data.get("subagentType") or "subagent")
+    kind = _KIND_RE.sub("", kind)[:24] or "subagent"
+    # The id is hashed: it orders and matches orbitals, and says nothing else.
+    sid = hashlib.sha256(f"{seat}:{raw_id}".encode()).hexdigest()[:12]
+    return {"id": sid, "parent": seat, "kind": kind, "active": True, "since": now}
+
+
+def record_subagent(seat, event, data, now=None):
+    """Start or stop a subagent orbital for `seat`, under a lock."""
+    now = time.time() if now is None else now
+    entry = subagent_entry(seat, data, now)
+    if entry is None and event != "SessionEnd":
+        return
+    path = DATA / "subagents.json"
+    DATA.mkdir(parents=True, exist_ok=True)
+    with open(DATA / "subagents.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        items = (read_json(path, {}) or {}).get("subagents") or []
+        items = [i for i in items if isinstance(i, dict) and now - float(i.get("since") or 0) < SUBAGENT_EXPIRE]
+        if event == "SessionEnd":
+            items = [i for i in items if i.get("parent") != seat]
+        elif event == "SubagentStart":
+            items = [i for i in items if i.get("id") != entry["id"]] + [entry]
+            mine = [i for i in items if i.get("parent") == seat]
+            for old in mine[:-SUBAGENT_MAX]:
+                items.remove(old)
+        elif event == "SubagentStop":
+            items = [i for i in items if i.get("id") != entry["id"]]
+        write_json(path, {"time": now, "subagents": items})
+
+
 def notify(title, body):
     """Show a desktop notification. Never fails. Off under the self-test."""
     if setting("NO_NOTIFY"):
@@ -1062,6 +1111,11 @@ def hook(source, event):
     except ValueError:
         data = {}
     event = event or data.get("hook_event_name") or ""
+    if event in ("SubagentStart", "SubagentStop"):
+        seat, _ = find_agent()
+        if seat in AGENTS:
+            record_subagent(seat, event, data)
+        return
     if data.get("subagentType"):
         return
     seat, pid = find_agent()
@@ -1149,6 +1203,7 @@ def hook(source, event):
         update_seat(seat, state="idle")
     elif event == "SessionEnd":
         update_seat(seat, state="away")
+        record_subagent(seat, "SessionEnd", {})  # its subagents end with it
 
 
 def owner_waiting(seat):
@@ -7021,11 +7076,11 @@ def claude_hooks(cmd):
         if matcher:
             h["matcher"] = matcher
         return h
-    return {e: [entry(e)] for e in ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd")} | {
+    return {e: [entry(e)] for e in ("SessionStart", "UserPromptSubmit", "Stop", "SubagentStart", "SubagentStop", "SessionEnd")} | {
         "Notification": [entry("Notification", "idle_prompt")]}
 
 
-DEVIN_HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd")
+DEVIN_HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "SubagentStart", "SubagentStop", "SessionEnd")
 DEVIN_ALLOW = "mcp__comms-deck__*"  # the deck's MCP tools run without a prompt, as for Vibe
 
 
@@ -8261,6 +8316,29 @@ def self_test():
         "assert x.task_summary('', []) == ''",
         "j = x.status_json(); assert set(j['seats']) >= {'claude', 'grok'} and 'shown' in j['seats']['claude']",
         "assert x.wake_seat('alice')[0] is False",
+        # Subagent orbitals (t101/t102): start, stop, expiry, the cap, SessionEnd,
+        # and nothing but id/parent/kind/times ever reaches the file.
+        "secret = {'agent_id': 'a1', 'agent_type': 'Explore', 'prompt': 'SECRET-PROMPT', 'description': 'SECRET-DESC', 'agent_transcript_path': '/tmp/SECRET'}",
+        "x.record_subagent('claude', 'SubagentStart', secret, now=1000.0)",
+        "sub = x.read_json(x.DATA / 'subagents.json', {})['subagents']",
+        "assert len(sub) == 1 and sub[0]['parent'] == 'claude' and sub[0]['kind'] == 'Explore' and sub[0]['active']",
+        "assert 'SECRET' not in (x.DATA / 'subagents.json').read_text() and sub[0]['id'] != 'a1' and len(sub[0]['id']) == 12 and int(sub[0]['id'], 16) >= 0",
+        "assert set(sub[0]) == {'id', 'parent', 'kind', 'active', 'since'}",
+        "x.record_subagent('claude', 'SubagentStart', {'agent_id': 'a2', 'agent_type': '<script>alert(1)</script>long-long-long-kind'}, now=1001.0)",
+        "kinds = [i['kind'] for i in x.read_json(x.DATA / 'subagents.json', {})['subagents']]",
+        "assert all(k.replace('-', '').replace('_', '').isalnum() and len(k) <= 24 for k in kinds), kinds",
+        "x.record_subagent('claude', 'SubagentStop', {'agent_id': 'a1'}, now=1002.0)",
+        "assert [i['kind'] for i in x.read_json(x.DATA / 'subagents.json', {})['subagents']] == [kinds[1]]",
+        "x.record_subagent('notaseat', 'SubagentStart', {'agent_id': 'z'}, now=1003.0)",
+        "assert all(i['parent'] == 'claude' for i in x.read_json(x.DATA / 'subagents.json', {})['subagents'])",
+        "x.record_subagent('devin', 'SubagentStart', {'agent_id': 'old'}, now=1004.0)",
+        "x.record_subagent('devin', 'SubagentStart', {'agent_id': 'new'}, now=1004.0 + x.SUBAGENT_EXPIRE + 1)",
+        "assert len(x.read_json(x.DATA / 'subagents.json', {})['subagents']) == 1, 'a Start-without-Stop expires'",
+        "[x.record_subagent('grok', 'SubagentStart', {'agent_id': f'g{i}'}, now=5000.0 + i) for i in range(x.SUBAGENT_MAX + 4)]",
+        "assert sum(i['parent'] == 'grok' for i in x.read_json(x.DATA / 'subagents.json', {})['subagents']) == x.SUBAGENT_MAX",
+        "x.record_subagent('grok', 'SessionEnd', {}, now=5100.0)",
+        "assert not any(i['parent'] == 'grok' for i in x.read_json(x.DATA / 'subagents.json', {})['subagents'])",
+        "assert 'SubagentStart' in x.claude_hooks('comms-deck') and 'SubagentStop' in x.DEVIN_HOOK_EVENTS",
         "assert x.task_summary('<system-reminder> fixing the chat layout now', []) == 'fixing the chat layout now'",
         "assert x.task_summary('<system-reminder>', [('p', {'text': 'merge the PR', 'private': False})]) == 'merge the PR'",
         "assert x.describe('<system-reminder>\\nhook text\\n</system-reminder>\\nreview PR 36') == 'review PR 36'",
