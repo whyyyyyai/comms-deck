@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# twitch-stream — send the desktop to Twitch over RTMP.
+#
+#   twitch-stream            stream until Ctrl-C
+#   twitch-stream status     is a stream running?
+#   twitch-stream stop       ask the running stream to stop
+#
+# Needs: wf-recorder (screen) + parecord (desktop audio monitor) + ffmpeg.
+# Config: ~/.config/comms-deck/twitch.secret, chmod 600, the stream key on
+# line 1. Optional ~/.config/comms-deck/twitch.json:
+#   {"width": 1920, "height": 1080, "fps": 30, "bitrate": "4500k"}
+#
+# Written by: Devin
+set -euo pipefail
+
+CONF_DIR="$HOME/.config/comms-deck"
+SECRET="$CONF_DIR/twitch.secret"
+CONF="$CONF_DIR/twitch.json"
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/comms-deck"
+STATE="$STATE_DIR/twitch-stream.pid"
+URL="rtmp://live.twitch.tv/app"
+
+mkdir -p "$STATE_DIR"
+
+cfg() {  # cfg key default — pull one key out of twitch.json with python3
+    python3 - "$CONF" "$1" "$2" <<'PY'
+import json, sys, os
+try:
+    v = json.load(open(sys.argv[1])).get(sys.argv[2])
+except Exception:
+    v = None
+print(v if v is not None else sys.argv[3])
+PY
+}
+
+case "${1:-start}" in
+    start) ;;
+    -h|--help)
+        sed -n '2,12p' "$0"; exit 0 ;;
+    status)
+        if [ -f "$STATE" ] && kill -0 "$(cat "$STATE")" 2>/dev/null; then
+            echo "streaming (pid $(cat "$STATE"))"
+        else
+            echo "idle"
+        fi
+        exit 0 ;;
+    stop)
+        if [ -f "$STATE" ] && kill -0 "$(cat "$STATE")" 2>/dev/null; then
+            kill "$(cat "$STATE")" && echo "stopping"
+        else
+            echo "not streaming"
+        fi
+        exit 0 ;;
+    *)
+        echo "usage: twitch-stream [start|status|stop]" >&2; exit 2 ;;
+esac
+
+[ -f "$SECRET" ] || { echo "no $SECRET — put the Twitch stream key there (chmod 600)" >&2; exit 1; }
+perm=$(stat -c %a "$SECRET")
+[ "$perm" = "600" ] || [ "$perm" = "400" ] || \
+    echo "warning: $SECRET is mode $perm, expected 600" >&2
+KEY=$(head -1 "$SECRET" | tr -d '[:space:]')
+[ -n "$KEY" ] || { echo "$SECRET is empty" >&2; exit 1; }
+
+command -v wf-recorder >/dev/null || { echo "wf-recorder not installed (sudo pacman -S wf-recorder)" >&2; exit 1; }
+command -v parecord   >/dev/null || { echo "parecord not installed (pipewire-pulse)" >&2; exit 1; }
+command -v ffmpeg      >/dev/null || { echo "ffmpeg not installed" >&2; exit 1; }
+
+W=$(cfg width 1920); H=$(cfg height 1080); FPS=$(cfg fps 30); BR=$(cfg bitrate 4500k)
+# bitrate is kilobits ("4500k" or "4500"); bufsize wants ~2x that, as "Nk".
+BRN=$(echo "$BR" | tr 'A-Z' 'a-z' | sed 's/[^0-9.].*//')
+BUFSIZE="$(( ${BRN%.*} * 2 ))k"
+MONITOR=$(pactl get-default-sink 2>/dev/null).monitor
+[ "$MONITOR" != ".monitor" ] || MONITOR=""
+
+# ffmpeg is the pid we track: killing it closes the rtmp socket and both
+# capture pipes die with it.
+ffmpeg -hide_banner -loglevel warning -stats \
+    -f matroska -i <(wf-recorder -f /dev/stdout -m matroska -y) \
+    ${MONITOR:+-f s16le -ar 48000 -ac 2 -i <(parecord --raw --device="$MONITOR" --format=s16le --rate=48000 --channels=2)} \
+    -map 0:v ${MONITOR:+-map 1:a} \
+    -vf "scale=${W}:${H},fps=${FPS}" -r "$FPS" \
+    -c:v libx264 -preset veryfast -tune zerolatency \
+    -b:v "$BR" -maxrate "$BR" -bufsize "$BUFSIZE" -g $((FPS * 2)) \
+    -pix_fmt yuv420p \
+    ${MONITOR:+-c:a aac -b:a 160k -ar 48000} \
+    -f flv "$URL/$KEY" &
+FF=$!
+echo "$FF" > "$STATE"
+trap 'kill "$FF" 2>/dev/null; rm -f "$STATE"' EXIT INT TERM
+wait "$FF"
+rm -f "$STATE"
