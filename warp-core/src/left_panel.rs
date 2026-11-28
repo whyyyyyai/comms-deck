@@ -107,67 +107,73 @@ pub fn crew_text(seats: &[SeatInfo], tasks: &[feed::TaskInfo]) -> String {
 
 /// A task's title as a person would write it (t87, Y: "it should be human
 /// readable"): the board keeps the first words of Y's chat line, so drop the
-/// lead-in ("Right, once those are done,", "can you", "we need a", "let's",
+/// lead-in ("Right,", "can you", "we need a", "let's",
 /// "@claude") and start with a capital.
 pub fn clean_title(raw: &str) -> String {
-    let mut t = raw.trim().trim_end_matches('…').trim().to_string();
+    let mut title = raw.trim();
     let fillers = [
-        "right,", "right", "okay,", "okay", "ok,", "ok", "so,", "so", "hey,", "please", "and", "also,", "also",
-        "once those are done,", "once that's done,", "then,", "now,",
-        "can you please", "could you please", "can you", "could you", "can we", "could we",
-        "we need a", "we need an", "we need to", "we need", "i need", "i'd like to", "i'd like", "i want to",
-        "i think", "let's", "lets", "let us", "go ahead and", "make sure",
+        "right,", "can you please", "could you please",
+        "can you", "could you", "can we", "we need an", "we need a",
+        "we need to", "let's", "let us", "please",
     ];
     loop {
-        let before = t.clone();
-        while t.starts_with('@') {
-            t = t.split_once(char::is_whitespace).map(|x| x.1.trim_start().to_string()).unwrap_or_default();
+        let before = title;
+        if title.starts_with('@') {
+            title = title.split_once(char::is_whitespace).map_or(title, |(_, rest)| rest.trim_start());
         }
-        let lower = t.to_lowercase();
-        for f in fillers {
-            if lower.starts_with(f) && lower[f.len()..].starts_with(|c: char| c.is_whitespace() || c == ',') {
-                t = t[f.len()..].trim_start_matches([',', ' ']).to_string();
+        for filler in fillers {
+            let Some(prefix) = title.get(..filler.len()) else { continue };
+            let rest = &title[filler.len()..];
+            if prefix.eq_ignore_ascii_case(filler) && rest.starts_with(char::is_whitespace) {
+                title = rest.trim_start();
                 break;
             }
         }
-        if t == before {
+        if title == before {
             break;
         }
     }
-    let mut c = t.chars();
-    match c.next() {
-        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-        None => raw.trim().to_string(),
-    }
+    let mut chars = title.chars();
+    chars.next().map_or_else(String::new, |first| first.to_uppercase().collect::<String>() + chars.as_str())
 }
 
-/// Word-wrap to `cols`, at most `max_lines`, with an ellipsis if cut.
+/// Wrap at word boundaries and split any token wider than the available line.
 pub fn wrap(text: &str, cols: usize, max_lines: usize) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    let words: Vec<&str> = text.split_whitespace().collect();
-    let mut cut = false;
-    for (i, w) in words.iter().enumerate() {
-        if !cur.is_empty() && cur.chars().count() + 1 + w.chars().count() > cols {
-            lines.push(std::mem::take(&mut cur));
-            if lines.len() == max_lines {
-                cut = i < words.len();
-                break;
-            }
-        }
-        if !cur.is_empty() {
-            cur.push(' ');
-        }
-        cur.push_str(w);
+    if cols == 0 || max_lines == 0 {
+        return Vec::new();
     }
-    if !cur.is_empty() && lines.len() < max_lines {
-        lines.push(cur);
-    }
-    if cut || text.ends_with('…') {
-        if let Some(last) = lines.last_mut() {
-            while last.chars().count() + 1 > cols {
-                last.pop();
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut width = 0;
+    for word in text.split_whitespace() {
+        let word_width = word.chars().count();
+        if width > 0 && width + 1 + word_width > cols {
+            lines.push(std::mem::take(&mut line));
+            width = 0;
+        }
+        if width > 0 {
+            line.push(' ');
+            width += 1;
+        }
+        for ch in word.chars() {
+            if width == cols {
+                lines.push(std::mem::take(&mut line));
+                width = 0;
             }
+            line.push(ch);
+            width += 1;
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    if lines.len() > max_lines {
+        lines.truncate(max_lines);
+        let last = &mut lines[max_lines - 1];
+        if last.chars().count() == cols {
+            last.pop();
+        }
+        if !last.ends_with('…') {
             last.push('…');
         }
     }
@@ -188,7 +194,7 @@ pub fn age_colour(secs: f64) -> [f32; 3] {
 
 /// The TASKS tab as coloured runs: a summary line, then the open tasks (they
 /// need someone), then each holder's tasks under its name in its colour.
-/// Each task: "t82 · 1h 14m" coloured by age, then its cleaned title, wrapped.
+/// Each task leads with its title, followed by the ID and assignment age.
 pub fn task_spans(tasks: &[feed::TaskInfo], now: f64, cols: usize) -> Vec<(String, Color)> {
     let dim = Color::srgb(0.5, 0.58, 0.72);
     let text = Color::srgb(0.82, 0.86, 0.94);
@@ -206,11 +212,15 @@ pub fn task_spans(tasks: &[feed::TaskInfo], now: f64, cols: usize) -> Vec<(Strin
     ));
     let card = |out: &mut Vec<(String, Color)>, t: &feed::TaskInfo| {
         let a = age(t);
-        out.push((format!("\n  {} · {}\n", t.id, ago(a)), lin(age_colour(a), 1.0)));
+        out.push(("\n".into(), dim));
         let title = t.title.as_deref().map(clean_title).unwrap_or_else(|| "Private task".into());
-        for line in wrap(&title, cols.saturating_sub(4).max(16), 2) {
+        for line in wrap(&title, cols.saturating_sub(2), 2) {
             out.push((format!("  {line}\n"), text));
         }
+        let age = t.since.map_or_else(|| "age unavailable".into(), |_| {
+            format!("{} {}", if t.holder.is_none() { "Waiting" } else { "Held" }, ago(a))
+        });
+        out.push((format!("  {} · {}\n", t.id, age), lin(age_colour(a), 1.0)));
     };
     if !open.is_empty() {
         out.push((format!("\nOPEN · needs someone · {}\n", open.len()), Color::srgb(1.0, 0.72, 0.3)));
@@ -234,6 +244,58 @@ pub fn task_spans(tasks: &[feed::TaskInfo], now: f64, cols: usize) -> Vec<(Strin
 /// The TASKS tab's text root: its coloured runs are child spans.
 #[derive(Component)]
 pub struct LeftTasks;
+
+type Row = (String, Color);
+
+#[derive(Default)]
+pub struct LeftRows {
+    tasks: Vec<feed::TaskInfo>,
+    seats: Vec<SeatInfo>,
+    source: Option<(LeftTab, usize, f32, f32)>,
+    rows: Vec<Row>,
+    revision: u64,
+    drawn: Option<(u64, usize, usize)>,
+    scroll: [usize; 2],
+}
+
+fn visible_rows(total: usize, requested: usize, capacity: usize) -> (usize, usize, bool) {
+    let overflow = total > capacity && capacity > 1;
+    let count = capacity.saturating_sub(usize::from(overflow)).min(total);
+    let first = requested.min(total.saturating_sub(count));
+    (first, first + count, overflow)
+}
+
+fn compact_header(tab: LeftTab, cols: usize) -> String {
+    let full = header_text(tab);
+    if full.chars().count() <= cols {
+        return full;
+    }
+    let short = match tab {
+        LeftTab::System => "[F4 SYSTEM] F5 F6",
+        LeftTab::Tasks => "F4 [F5 TASKS] F6",
+        LeftTab::Crew => "F4 F5 [F6 CREW]",
+    };
+    wrap(short, cols, 1).pop().unwrap_or_default()
+}
+
+fn panel_rows(tab: LeftTab, deck: &Deck, unix: f64, cols: usize) -> Vec<Row> {
+    let spans = match tab {
+        LeftTab::Tasks => task_spans(&deck.tasks, unix, cols),
+        LeftTab::Crew => vec![(crew_text(&deck.seats, &deck.tasks), Color::srgb(0.72, 0.79, 0.89))],
+        LeftTab::System => Vec::new(),
+    };
+    let mut rows = Vec::new();
+    for (text, colour) in spans {
+        for line in text.lines() {
+            if line.chars().count() <= cols {
+                rows.push((line.to_owned(), colour));
+            } else {
+                rows.extend(wrap(line, cols, usize::MAX).into_iter().map(|line| (line, colour)));
+            }
+        }
+    }
+    rows
+}
 
 /// netwatch's last word (~/.local/state/netwatch/status.json), as a line.
 pub fn net_line(status: Option<&serde_json::Value>, now_unix: f64) -> String {
@@ -285,13 +347,15 @@ pub fn left_panel(
     mut materials: ResMut<Assets<ColorMaterial>>,
     real: Res<Time<Real>>,
     mut bg: Query<(&mut Transform, &mut Visibility), (With<LeftBg>, Without<LeftHeader>, Without<LeftBody>)>,
-    mut header: Query<(&mut Text2d, &mut Transform, &mut Visibility), (With<LeftHeader>, Without<LeftBg>, Without<LeftBody>)>,
+    mut header: Query<(&mut Text2d, &mut TextFont, &mut Transform, &mut Visibility), (With<LeftHeader>, Without<LeftBg>, Without<LeftBody>, Without<LeftTasks>)>,
     mut body: Query<(&mut Text2d, &mut Transform, &mut Visibility), (With<LeftBody>, Without<LeftBg>, Without<LeftHeader>, Without<LeftTasks>)>,
     mut tasks_text: Query<(Entity, &mut Transform, &mut Visibility), (With<LeftTasks>, Without<LeftBg>, Without<LeftHeader>, Without<LeftBody>)>,
     mut state: Local<(bool, f32, Option<serde_json::Value>)>,
-    mut drawn: Local<(String, f32)>,
+    mut rows: Local<LeftRows>,
+    windows: Query<&Window>,
+    mut wheel: MessageReader<MouseWheel>,
 ) {
-    let font = mods.cfg.left.font;
+    let font = mods.cfg.left.font.max(1.0);
     if !state.0 {
         let panel_bg = materials.add(Color::srgb(0.028, 0.032, 0.058));
         commands.spawn((LeftBg, Mesh2d(assets.quad.clone()), MeshMaterial2d(panel_bg), Transform::from_xyz(0.0, 0.0, 7.0), Visibility::Hidden));
@@ -335,9 +399,13 @@ pub fn left_panel(
         tf.translation.y = -layout.panel * 0.5;
         tf.scale = Vec3::new(layout.left, layout.scene.y + layout.panel, 1.0);
     }
-    for (mut t, mut tf, mut vis) in &mut header {
+    let cols = ((layout.left - 28.0) / (font * 0.8)).max(1.0) as usize;
+    for (mut t, mut text_font, mut tf, mut vis) in &mut header {
         *vis = want;
-        let text = header_text(left.tab);
+        if !matches!(text_font.font_size, FontSize::Px(size) if size == font) {
+            text_font.font_size = FontSize::Px(font);
+        }
+        let text = compact_header(left.tab, cols);
         if t.0 != text {
             t.0 = text;
         }
@@ -352,39 +420,80 @@ pub fn left_panel(
     }
     let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
     for (mut t, mut tf, mut vis) in &mut body {
-        *vis = want;
-        let (text, y) = match left.tab {
-            // The stats themselves are the SysPanel text, placed above this.
-            LeftTab::System => (net_line(state.2.as_ref(), unix), -h.y + 90.0),
-            LeftTab::Tasks => (String::new(), h.y - 50.0), // drawn by LeftTasks below
-            LeftTab::Crew => (crew_text(&deck.seats, &deck.tasks), h.y - 50.0),
-        };
-        if t.0 != text {
-            t.0 = text;
+        let on_system = show && left.tab == LeftTab::System;
+        *vis = if on_system { Visibility::Inherited } else { Visibility::Hidden };
+        if on_system {
+            let text = net_line(state.2.as_ref(), unix);
+            if t.0 != text {
+                t.0 = text;
+            }
         }
         tf.translation.x = x0 + 14.0;
-        tf.translation.y = y;
+        tf.translation.y = -h.y + 90.0;
     }
-    // TASKS: rebuilt when the board changes, and each minute for the ages.
-    let on_tasks = show && left.tab == LeftTab::Tasks;
-    let cols = ((layout.left - 28.0) / (font * 0.6)).max(20.0) as usize;
-    for (e, mut tf, mut vis) in &mut tasks_text {
-        *vis = if on_tasks { Visibility::Inherited } else { Visibility::Hidden };
+
+    let scroll_slot = match left.tab {
+        LeftTab::Tasks => Some(0),
+        LeftTab::Crew => Some(1),
+        LeftTab::System => None,
+    };
+    let on_rows = show && scroll_slot.is_some();
+    let over_left = windows.iter().next().and_then(Window::cursor_position)
+        .is_some_and(|position| position.x >= 0.0 && position.x < layout.left);
+    for ev in wheel.read() {
+        if let Some(slot) = scroll_slot.filter(|_| on_rows && over_left) {
+            if ev.y > 0.0 {
+                rows.scroll[slot] = rows.scroll[slot].saturating_sub(3);
+            } else if ev.y < 0.0 {
+                rows.scroll[slot] = rows.scroll[slot].saturating_add(3);
+            }
+        }
+    }
+
+    for (entity, mut tf, mut vis) in &mut tasks_text {
+        *vis = if on_rows { Visibility::Inherited } else { Visibility::Hidden };
         tf.translation.x = x0 + 14.0;
         tf.translation.y = h.y - 50.0;
-        if !on_tasks {
+        let Some(slot) = scroll_slot.filter(|_| on_rows) else { continue };
+        let snapshot_changed = rows.tasks != deck.tasks
+            || (left.tab == LeftTab::Crew && rows.seats != deck.seats);
+        let source_changed = rows.source.is_none_or(|(tab, previous_cols, previous_font, last)| {
+            tab != left.tab || previous_cols != cols || previous_font != font || now - last >= 30.0
+        });
+        if snapshot_changed || source_changed {
+            rows.tasks.clone_from(&deck.tasks);
+            if left.tab == LeftTab::Crew {
+                rows.seats.clone_from(&deck.seats);
+            }
+            rows.rows = panel_rows(left.tab, &deck, unix, cols);
+            rows.source = Some((left.tab, cols, font, now));
+            rows.revision = rows.revision.wrapping_add(1);
+        }
+        let capacity = ((layout.scene.y + layout.panel - 64.0) / (font * 1.2)).max(0.0) as usize;
+        let (first, end, overflow) = visible_rows(rows.rows.len(), rows.scroll[slot], capacity);
+        rows.scroll[slot] = first;
+        let draw_key = (rows.revision, first, capacity);
+        if rows.drawn == Some(draw_key) {
             continue;
         }
-        let key = format!("{:?}{cols}", deck.tasks);
-        if key == drawn.0 && now - drawn.1 < 30.0 {
-            continue;
-        }
-        *drawn = (key, now);
-        commands.entity(e).despawn_related::<Children>();
-        let spans = task_spans(&deck.tasks, unix, cols);
-        commands.entity(e).with_children(|p| {
-            for (text, colour) in spans {
-                p.spawn((TextSpan::new(text), TextColor(colour), TextFont { font_size: FontSize::Px(font), ..default() }));
+        rows.drawn = Some(draw_key);
+        commands.entity(entity).despawn_related::<Children>();
+        commands.entity(entity).with_children(|parent| {
+            for (text, colour) in &rows.rows[first..end] {
+                parent.spawn((
+                    TextSpan::new(format!("{text}\n")),
+                    TextColor(*colour),
+                    TextFont { font_size: FontSize::Px(font), ..default() },
+                ));
+            }
+            if overflow {
+                let cue = format!("Rows {}–{} of {} · Scroll", first + 1, end, rows.rows.len());
+                let cue = wrap(&cue, cols, 1).pop().unwrap_or_default();
+                parent.spawn((
+                    TextSpan::new(cue),
+                    TextColor(Color::srgb(0.55, 0.65, 0.8)),
+                    TextFont { font_size: FontSize::Px(font), ..default() },
+                ));
             }
         });
     }
@@ -406,8 +515,8 @@ mod tests {
 
     #[test]
     fn titles_read_like_a_person_wrote_them() {
-        assert_eq!(clean_title("Right, once those are done, can we resolve the task obiters on claude?"), "Resolve the task obiters on claude?");
-        assert_eq!(clean_title("we need a local script that ticks away checking to see if we're conne…"), "Local script that ticks away checking to see if we're conne");
+        assert_eq!(clean_title("Right, once those are done, can we resolve the task obiters on claude?"), "Once those are done, can we resolve the task obiters on claude?");
+        assert_eq!(clean_title("we need a local script that ticks away checking to see if we're conne…"), "Local script that ticks away checking to see if we're conne…");
         assert_eq!(clean_title("@claude let's start building the left panel"), "Start building the left panel");
         assert_eq!(clean_title("Fix the ring"), "Fix the ring");
         assert_eq!(clean_title("okay"), "Okay");
@@ -417,6 +526,17 @@ mod tests {
     fn wrap_keeps_words_and_marks_a_cut() {
         assert_eq!(wrap("one two three four", 9, 2), vec!["one two", "three…"]);
         assert_eq!(wrap("short", 20, 2), vec!["short"]);
+        assert_eq!(wrap("abcdefghijk", 4, 2), vec!["abcd", "efg…"]);
+        assert_eq!(wrap("partial…", 12, 2), vec!["partial…"]);
+        assert!(wrap("short", 0, 2).is_empty());
+    }
+
+    #[test]
+    fn row_window_reserves_a_scroll_cue_and_clamps_after_resize() {
+        assert_eq!(visible_rows(12, 1, 5), (1, 5, true));
+        assert_eq!(visible_rows(12, 40, 5), (8, 12, true));
+        assert_eq!(visible_rows(3, 40, 5), (0, 3, false));
+        assert_eq!(visible_rows(0, 40, 0), (0, 0, false));
     }
 
     #[test]
