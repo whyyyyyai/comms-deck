@@ -3843,14 +3843,16 @@ fn chat_input(
     }
 }
 
-/// The warp a sent note jumps to: proportional to its length, capped.
-/// Warp drains at a steady rate, so the coast is proportional too.
-/// Warp after a kick of `add`: kicks stack (more notes, further warp, Y
-/// t88), up to `max`.
+/// A jump compounds existing warp momentum. With identical kicks and
+/// no decay between them, each increment is 1 + 2 * kick times the last.
 fn stack_warp(warp: f32, add: f32, max: f32) -> f32 {
-    (warp + add.max(0.0)).min(max.max(0.0)).max(warp.min(max.max(0.0)))
+    let limit = max.max(0.0);
+    let current = warp.clamp(0.0, limit);
+    let kick = add.max(0.0);
+    (current + kick * (1.0 + 2.0 * current)).min(limit)
 }
 
+/// The warp kick of a sent note is proportional to its length, capped.
 fn send_jump(len: usize, reach: usize, cfg: &mods::TypingCfg) -> f32 {
     // The more agents a note reaches, the bigger the jump (Y, t9).
     let more = 1.0 + cfg.per_recipient * (reach.max(1) - 1) as f32;
@@ -4976,15 +4978,16 @@ mod tests {
     }
 
     #[test]
-    fn notes_stack_warp_up_to_the_max() {
-        // t88: more notes, further warp; no longer just the biggest kick.
-        let mut w = 0.0;
-        for _ in 0..4 {
-            w = stack_warp(w, 0.15, 3.0);
-        }
-        assert!((w - 0.6).abs() < 1e-5);
+    fn jumps_compound_existing_warp_up_to_the_max() {
+        let kick = 0.15;
+        let first = stack_warp(0.0, kick, 3.0);
+        let second = stack_warp(first, kick, 3.0);
+        let third = stack_warp(second, kick, 3.0);
+        assert_eq!(first, kick);
+        assert!((second - first - kick * 1.3).abs() < 1e-5);
+        assert!((third - second - kick * 1.3 * 1.3).abs() < 1e-5);
         assert_eq!(stack_warp(2.9, 1.0, 3.0), 3.0);
-        // A lowered max never yanks a running warp up, and never adds past it.
+        assert_eq!(stack_warp(4.0, 1.0, 3.0), 3.0);
         assert_eq!(stack_warp(0.5, 0.0, 3.0), 0.5);
         assert_eq!(stack_warp(1.0, -2.0, 3.0), 1.0);
     }

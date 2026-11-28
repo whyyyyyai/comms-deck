@@ -504,7 +504,7 @@ pub struct WarpCfg {
     pub decay: f32,
     pub on_broadcast: f32,
     /// Warp every note adds, on top of a broadcast's kick (Y, t88: "more
-    /// messages warp the core further"): notes stack, they don't just top up.
+    /// messages warp the core further"): notes compound remaining warp.
     pub per_note: f32,
     /// The most warp can stack to.
     pub max: f32,
