@@ -1157,6 +1157,9 @@ struct Core;
 const WARP_ACTIVE: f32 = 0.05;
 const TICKER_STATIC_FRAME: f32 = 0.055;
 const WARP_R_AFTER_S: f32 = 3.0;
+/// t128 (Y: "and the after more hyperdrive ... to P"): six seconds of
+/// unbroken warp, X -> R -> P, spelling the ticker one glyph at a time.
+const WARP_P_AFTER_S: f32 = 6.0;
 
 #[derive(Component, Default)]
 struct CoreTicker {
@@ -1172,6 +1175,7 @@ enum WarpGlyph {
     Sol,
     X,
     R,
+    P,
 }
 
 impl CoreTicker {
@@ -1183,6 +1187,8 @@ impl CoreTicker {
         self.warped = warped;
         let glyph = if !warped {
             WarpGlyph::Sol
+        } else if now - self.warp_started >= WARP_P_AFTER_S {
+            WarpGlyph::P
         } else if now - self.warp_started >= WARP_R_AFTER_S {
             WarpGlyph::R
         } else {
@@ -1197,6 +1203,7 @@ impl CoreTicker {
                 WarpGlyph::Sol => ["#", "/", "=", "-"],
                 WarpGlyph::X => ["X", "/", "#", "X"],
                 WarpGlyph::R => ["X", "#", "/", "R"],
+                WarpGlyph::P => ["R", "/", "#", "P"],
             };
             let frame = ((now - at).max(0.0) / TICKER_STATIC_FRAME) as usize;
             if let Some(&text) = static_frames.get(frame) {
@@ -1208,6 +1215,7 @@ impl CoreTicker {
             WarpGlyph::Sol => "SOL",
             WarpGlyph::X => "X",
             WarpGlyph::R => "R",
+            WarpGlyph::P => "P",
         }, false)
     }
 }
@@ -4269,10 +4277,16 @@ mod tests {
         assert_eq!(ticker.frame(2.0, 4.9), ("X", false));
         assert_eq!(ticker.frame(1.0, 5.0), ("X", true));
         assert_eq!(ticker.frame(1.0, 5.3), ("R", false));
-        assert_eq!(ticker.frame(0.0, 6.0), ("#", true));
+        // t128: three seconds more and R glitches into P.
+        assert_eq!(ticker.frame(1.0, 7.9), ("R", false));
+        assert_eq!(ticker.frame(1.0, 8.0), ("R", true));
+        assert_eq!(ticker.frame(1.0, 8.3), ("P", false));
+        assert_eq!(ticker.frame(0.0, 8.5), ("#", true));
+        assert_eq!(ticker.frame(0.0, 8.8), ("SOL", false));
+        assert_eq!(ticker.frame(0.0, 9.0), ("SOL", false));
         assert_eq!(ticker.frame(0.0, 6.3), ("SOL", false));
-        assert_eq!(ticker.frame(1.0, 8.0), ("X", true));
-        assert_eq!(ticker.frame(1.0, 8.3), ("X", false));
+        assert_eq!(ticker.frame(1.0, 10.0), ("X", true));
+        assert_eq!(ticker.frame(1.0, 10.3), ("X", false));
     }
 
     #[test]
