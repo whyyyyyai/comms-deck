@@ -40,7 +40,9 @@ cp "$here/warp-core.service" "$HOME/.config/systemd/user/warp-core.service"
 cp "$here/pricefeed" "$lib/pricefeed.new" && mv -f "$lib/pricefeed.new" "$lib/pricefeed"
 cp "$here/warp-core-prices.service" "$HOME/.config/systemd/user/warp-core-prices.service"
 systemctl --user daemon-reload
-systemctl --user enable --now warp-core-prices >/dev/null 2>&1 || true
+systemctl --user enable warp-core-prices >/dev/null 2>&1 || true
+# Restart it so a new pricefeed (e.g. the seats' stocks) runs at once.
+systemctl --user restart warp-core-prices >/dev/null 2>&1 || true
 # Live at once (Y, 2026-11-27: every improvement goes live when it's done;
 # a restart with each one is fine).
 # A restart opens a new GPU window: never on a GPU that has just faulted
