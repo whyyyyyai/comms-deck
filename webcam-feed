@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""webcam-feed: turn the webcam into files the warp core can draw.
+
+Reads the camera through ffmpeg/v4l2 and writes the newest frame, atomically,
+to ~/.local/state/warp-core/webcam/:
+
+    frame.rgba   raw RGBA pixels, WIDTH x HEIGHT x 4 bytes
+    frame.json   {"w": WIDTH, "h": HEIGHT, "device": "/dev/videoN", "fps": FPS}
+
+The warp core polls the directory ([webcam] in warp-core.toml, Y t156:
+"top left should be webcam") and pins the latest frame top-left of the
+scene. Nothing here needs root: the camera node is group-accessible.
+
+The camera is picked by --device, else the first /dev/videoN that isn't
+the Android emulator's (avd). ffmpeg is restarted if it exits; the loop
+backs off a few seconds between tries.
+
+  webcam-feed [--device /dev/video1] [--size 640x480] [--fps 8]
+
+Written by: devin (Y, t156, 2026-11-28)
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+OUT_DIR = os.path.join(HOME, ".local/state/warp-core/webcam")
+RAW = os.path.join(OUT_DIR, "frame.rgba")
+META = os.path.join(OUT_DIR, "frame.json")
+TMP = os.path.join(OUT_DIR, ".frame.rgba.tmp")
+
+
+def log(msg):
+    print(f"webcam-feed: {msg}", flush=True)
+
+
+def find_device(preferred):
+    if preferred:
+        return preferred
+    # v4l2-ctl --list-devices groups nodes under a header line; take the
+    # first video node whose header isn't the emulator (avd).
+    try:
+        out = subprocess.run(
+            ["v4l2-ctl", "--list-devices"], capture_output=True, text=True, timeout=5
+        ).stdout
+        header = ""
+        for line in out.splitlines():
+            if line.startswith("\t"):
+                node = line.strip()
+                if node.startswith("/dev/video") and "avd" not in header.lower():
+                    return node
+            elif line.strip():
+                header = line.strip()
+    except Exception:
+        pass
+    for node in ("/dev/video1", "/dev/video0", "/dev/video2"):
+        if os.path.exists(node):
+            return node
+    return None
+
+
+def grab(args):
+    os.makedirs(OUT_DIR, exist_ok=True)
+    device = find_device(args.device)
+    if not device:
+        log("no camera found (/dev/video*); waiting and retrying")
+        time.sleep(10)
+        return
+    w, h = (int(x) for x in args.size.lower().split("x"))
+    frame_bytes = w * h * 4
+    with open(META, "w") as f:
+        json.dump({"w": w, "h": h, "device": device, "fps": args.fps}, f)
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+        "-f", "v4l2",
+        "-video_size", args.size, "-framerate", str(args.fps * 2),
+        "-i", device,
+        "-vf", f"fps={args.fps},format=rgba",
+        "-f", "rawvideo", "-pix_fmt", "rgba", "-",
+    ]
+    log(f"{device} {args.size} @{args.fps}fps -> {OUT_DIR}")
+    # stderr goes to a file, not the frame pipe: an error line mid-stream
+    # would corrupt the raw RGBA.
+    errlog = open(os.path.join(OUT_DIR, "ffmpeg.log"), "wb")
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errlog)
+    n = 0
+    try:
+        while True:
+            chunk = proc.stdout.read(frame_bytes)
+            if len(chunk) != frame_bytes:
+                break
+            with open(TMP, "wb") as f:
+                f.write(chunk)
+            os.replace(TMP, RAW)
+            n += 1
+            if n == 1:
+                log("first frame written")
+    finally:
+        proc.kill()
+        proc.wait()
+        errlog.close()
+    tail = ""
+    try:
+        with open(os.path.join(OUT_DIR, "ffmpeg.log"), "rb") as f:
+            tail = f.read()[-400:].decode(errors="replace").strip().splitlines()
+        tail = tail[-1] if tail else ""
+    except OSError:
+        pass
+    log(f"ffmpeg exited after {n} frames" + (f": {tail}" if tail else ""))
+    time.sleep(3)
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("--device", help="v4l2 node (default: first non-avd camera)")
+    p.add_argument("--size", default="640x480")
+    p.add_argument("--fps", type=int, default=8)
+    args = p.parse_args()
+    while True:
+        try:
+            grab(args)
+        except Exception as e:
+            log(f"{e}; retrying in 10s")
+            time.sleep(10)
+
+
+if __name__ == "__main__":
+    main()
