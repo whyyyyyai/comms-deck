@@ -426,6 +426,23 @@ impl Default for KittenCfg {
     }
 }
 
+/// The left panel (t87, Y: "Let's start building the left panel in the
+/// warp core. The right panel is the comms, activity, and notify."): the
+/// machine, the task board and the crew, on F4-F6.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LeftCfg {
+    pub show: bool,
+    /// Share of the window (kept 260..520 px).
+    pub width: f32,
+    pub font: f32,
+}
+impl Default for LeftCfg {
+    fn default() -> Self {
+        LeftCfg { show: true, width: 0.22, font: 14.0 }
+    }
+}
+
 /// Ghost kittens cost draw calls the M1 can ill afford during stalls: they
 /// only appear while the measured frame rate clears the configured floor.
 pub fn ghosts_allowed(fps: f32, cfg: &KittenCfg) -> bool {
@@ -649,6 +666,7 @@ pub struct Config {
     pub conduits: ConduitsCfg,
     pub planets: PlanetsCfg,
     pub kitten: KittenCfg,
+    pub left: LeftCfg,
     pub rule: Vec<RuleSpec>,
 }
 

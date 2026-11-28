@@ -71,6 +71,7 @@ const FUEL_D: [f32; 3] = [70.0, 82.0, 94.0];
 const HALO_D: f32 = 116.0;
 
 mod kitten_view;
+mod left_panel;
 use kitten_view::KittenView;
 
 fn main() {
@@ -84,6 +85,7 @@ fn main() {
         .insert_resource(Feed(Mutex::new(rx)))
         .insert_resource(Deck::default())
         .insert_resource(KittenView::default())
+        .insert_resource(left_panel::Left::default())
         .insert_resource(Mods::default())
         .insert_resource(View::default())
         .insert_resource(Looks::default())
@@ -128,7 +130,7 @@ fn main() {
         .add_systems(
             Update,
             (
-                (watch_mods, pace_frames, read_feed, layout_view, apply_rules, layout_seats, kitten_view::kitten_step, layout_tasks, layout_held_tasks, pointer, chat_input, keys).chain(),
+                (watch_mods, pace_frames, read_feed, layout_view, apply_rules, layout_seats, kitten_view::kitten_step, left_panel::left_keys, layout_tasks, layout_held_tasks, pointer, chat_input, keys).chain(),
                 (
                     glow_seats,
                     draw_rings,
@@ -144,6 +146,7 @@ fn main() {
                     hud,
                     sys_panel,
                     task_panel,
+                    left_panel::left_panel,
                     tooltip,
                     chat_results,
                     draw_chat,
@@ -521,6 +524,8 @@ struct Looks(HashMap<String, SeatLook>);
 struct Layout {
     scene: Vec2,
     panel: f32,
+    /// The left panel's width (t87), 0 when it's off.
+    left: f32,
 }
 
 impl Layout {
@@ -1837,14 +1842,16 @@ fn layout_view(
 ) {
     let w = window_size(&windows);
     let panel = panel_width(w.x, &mods.cfg.chat);
-    layout.scene = Vec2::new(w.x - panel, w.y);
+    let left = left_panel::left_width(w.x, &mods.cfg.left);
+    layout.scene = Vec2::new(w.x - panel - left, w.y);
     layout.panel = panel;
+    layout.left = left;
     if (chat.drawn_width - panel).abs() > 0.5 {
         chat.drawn_width = panel;
         chat.dirty = true;
     }
     for mut tf in &mut camera {
-        tf.translation.x = panel * 0.5;
+        tf.translation.x = (panel - left) * 0.5;
     }
 }
 
@@ -2859,6 +2866,7 @@ fn draw_splash(mut splash: ResMut<Splash>, mods: Res<Mods>, time: Res<Time>, lay
 /// It turns amber when a figure is where trouble starts.
 fn sys_panel(
     deck: Res<Deck>,
+    left: Res<left_panel::Left>,
     mods: Res<Mods>,
     view: Res<View>,
     real: Res<Time<Real>>,
@@ -2896,8 +2904,14 @@ fn sys_panel(
         if c.0 != colour {
             c.0 = colour;
         }
-        tf.translation.x = -layout.half().x + 18.0;
-        tf.translation.y = layout.half().y - 70.0;
+        let (p, here) = left_panel::place(&layout, &left, left_panel::LeftTab::System, Vec2::new(-layout.half().x + 18.0, layout.half().y - 70.0));
+        if !here {
+            *vis = Visibility::Hidden;
+        }
+        tf.translation.x = p.x;
+        tf.translation.y = p.y;
+        // In front of the left panel's background (z 7) when inside it.
+        tf.translation.z = if layout.left > 0.0 { 10.0 } else { 5.0 };
     }
     // The low-memory alert shows whatever the HUD toggles say: it is the
     // one thing on screen that must never be hidden. Amber and breathing
@@ -3017,6 +3031,7 @@ none on the board".to_string();
 /// Shown with the HUD and `[hud] tasks_panel`; refreshed once a second.
 fn task_panel(
     deck: Res<Deck>,
+    left: Res<left_panel::Left>,
     mods: Res<Mods>,
     view: Res<View>,
     real: Res<Time<Real>>,
@@ -3042,8 +3057,14 @@ fn task_panel(
                 t.0 = text;
             }
         }
-        tf.translation.x = -layout.half().x + 18.0;
-        tf.translation.y = -layout.half().y + 70.0;
+        let (p, here) = left_panel::place(&layout, &left, left_panel::LeftTab::Tasks, Vec2::new(-layout.half().x + 18.0, -layout.half().y + 70.0));
+        if !here {
+            *vis = Visibility::Hidden;
+        }
+        tf.translation.x = p.x;
+        tf.translation.y = p.y;
+        // In front of the left panel's background (z 7) when inside it.
+        tf.translation.z = if layout.left > 0.0 { 10.0 } else { 5.0 };
     }
 }
 
