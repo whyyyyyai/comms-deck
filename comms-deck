@@ -607,6 +607,95 @@ def orbital_report(action, oid, to, seat=None):
         return json.dumps({"ok": False, "reason": str(error)})
 
 
+HYPERDRIVE_BRIEF_MAX = 6000   # bytes per work brief (Codex's encode_brief budget)
+
+
+def orbital_hyperdrive(plan, max_parallel=3, seat=None, log_dir=None, poll=0.2):
+    """`comms-deck orbital hyperdrive PLAN.json`: run a task's independent
+    slices in parallel, each as its own orbital (Y, t107 "Hyperdrive";
+    Codex's scheduler and work briefs, Claude's runner).
+
+    PLAN is {"slices": [{"id", "task", "kind", "workspace", "depends_on",
+    "write_scope", "brief": {"objective", "inputs", "deliverable", "checks"},
+    "command": [...]}]}. Each pass, Codex's select_ready picks what may start
+    within `max_parallel`: its prerequisites succeeded, and its write scope
+    doesn't overlap a running slice in the same workspace. Each started slice
+    gets an orbital (the warp core shows it), its validated brief on stdin
+    only (never in the orbital feed), and its own 0600 log. A slice that
+    fails blocks the slices that depend on it. Returns a summary dict."""
+    sys.path.insert(0, str(PROGRAM.parent))
+    from orbital_schedule import WorkSlice, select_ready
+    from orbital_context import WorkBrief, encode_brief
+
+    seat = seat or find_agent(trust_env=False)[0]
+    if seat not in AGENTS:
+        return {"ok": False, "reason": "not run from a seat's agent"}
+    slices, briefs, commands, meta = [], {}, {}, {}
+    try:
+        for row in plan.get("slices") or []:
+            sid = str(row["id"])
+            ws = WorkSlice(sid, str(row.get("workspace") or "."), tuple(row.get("depends_on") or ()),
+                           tuple(row.get("write_scope") or ()))
+            b = row.get("brief") or {}
+            briefs[sid] = encode_brief(WorkBrief(
+                task_id=str(row.get("task") or ""), objective=str(b.get("objective") or ""),
+                workspace=ws.workspace, inputs=tuple(b.get("inputs") or ()),
+                deliverable=str(b.get("deliverable") or ""), checks=tuple(b.get("checks") or ()),
+                write_scope=ws.write_scope, dependencies=ws.depends_on), max_bytes=HYPERDRIVE_BRIEF_MAX)
+            cmd = row.get("command")
+            if not isinstance(cmd, list) or not cmd or not all(isinstance(c, str) for c in cmd):
+                raise ValueError(f"slice {sid}: command must be a list of strings")
+            commands[sid] = cmd
+            meta[sid] = (str(row.get("kind") or "subagent"), str(row.get("task") or ""))
+            slices.append(ws)
+    except (KeyError, ValueError, TypeError) as error:
+        return {"ok": False, "reason": f"plan refused: {error}"}
+    if len({w.id for w in slices}) != len(slices):
+        return {"ok": False, "reason": "plan refused: slice ids repeat"}
+    log_dir = Path(log_dir or (HOME / ".local/state/comms-deck/hyperdrive" / time.strftime("%Y%m%d-%H%M%S")))
+    log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    pending = list(slices)
+    active, completed, failed, results = {}, set(), set(), {}
+    while True:
+        for work in select_ready(pending, [a[0] for a in active.values()], completed, max_parallel=max_parallel):
+            pending.remove(work)
+            kind, task = meta[work.id]
+            started = json.loads(orbital_cli("start", "", kind, task, seat=seat))
+            log_path = log_dir / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', work.id)}.log"
+            log = os.fdopen(os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb")
+            try:
+                proc = subprocess.Popen(commands[work.id], stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT)
+                proc.stdin.write(briefs[work.id])  # the brief goes to the worker only
+                proc.stdin.close()
+            except OSError as error:
+                log.write(f"could not start: {error}\n".encode())
+                log.close()
+                orbital_cli("stop", started.get("id", ""), "", "", seat=seat)
+                failed.add(work.id)
+                results[work.id] = {"exit": 127, "log": str(log_path)}
+                continue
+            active[work.id] = (work, proc, started.get("id", ""), log, time.time(), log_path)
+        for sid in list(active):
+            work, proc, oid, log, t0, log_path = active[sid]
+            if proc.poll() is None:
+                continue
+            log.close()
+            orbital_cli("stop", oid, "", "", seat=seat)
+            (completed if proc.returncode == 0 else failed).add(sid)
+            results[sid] = {"exit": proc.returncode, "seconds": round(time.time() - t0, 1), "log": str(log_path)}
+            del active[sid]
+        if not active:
+            # Nothing running: whatever is still pending can never start
+            # (a prerequisite failed): it's blocked, not silently dropped.
+            if not select_ready(pending, [], completed, max_parallel=max(1, max_parallel)):
+                for work in pending:
+                    results[work.id] = {"exit": None, "blocked_by": [d for d in work.depends_on if d not in completed]}
+                break
+        time.sleep(poll)
+    return {"ok": not failed and all(r.get("exit") == 0 for r in results.values()), "slices": results,
+            "logs": str(log_dir)}
+
+
 def orbital_run(cmd, kind="subagent", task="", seat=None):
     """`comms-deck orbital run -- CMD`: an orbital that lives exactly as long
     as a piece of work (Y, t103/t108: "created dynamically for a task and
@@ -8628,6 +8717,32 @@ def self_test():
         # Vibe's review: a child killed outright (SIGKILL) still ends its orbital.
         "assert x.orbital_run(['sh', '-c', 'kill -9 $$'], 'test', '', seat='devin') == -9",
         "assert len(x.read_json(x.DATA / 'subagents.json', {})['subagents']) == n_before, 'stopped after SIGKILL of the child'",
+        # t107 Hyperdrive: parallel slices, dependencies, private briefs, blocked on failure.
+        "hd = x.Path(x.tempfile.mkdtemp())",
+        "rec = lambda sid, code=0: ['sh', '-c', f'date +%s.%N > {hd}/{sid}.start; cat > {hd}/{sid}.brief; sleep 0.4; date +%s.%N > {hd}/{sid}.end; exit {code}']",
+        "brief = lambda o: {'objective': o, 'inputs': ['README.md'], 'deliverable': 'a note', 'checks': ['self-test passes']}",
+        "plan = {'slices': [dict(id='a', task='t7', kind='build', workspace='w', write_scope=['src/a'], brief=brief('OBJECTIVE-A'), command=rec('a')),"
+        " dict(id='b', task='t7', kind='test', workspace='w', depends_on=['a'], write_scope=['src/b'], brief=brief('OBJECTIVE-B'), command=rec('b')),"
+        " dict(id='c', task='t7', kind='research', workspace='w', write_scope=['docs'], brief=brief('OBJECTIVE-C'), command=rec('c')),"
+        " dict(id='f', task='t7', kind='build', workspace='v', brief=brief('OBJECTIVE-F'), command=rec('f', 3)),"
+        " dict(id='d', task='t7', kind='build', workspace='v', depends_on=['f'], brief=brief('OBJECTIVE-D'), command=rec('d'))]}",
+        "snap = []",
+        "real_sleep = x.time.sleep",
+        "x.time.sleep = lambda s: (snap.append((x.DATA / 'subagents.json').read_text()), real_sleep(s))[1]",
+        "out = x.orbital_hyperdrive(plan, max_parallel=3, seat='devin', log_dir=hd / 'logs', poll=0.05)",
+        "x.time.sleep = real_sleep",
+        "t = lambda sid, w: float((hd / f'{sid}.{w}').read_text())",
+        "assert not out['ok'] and out['slices']['f']['exit'] == 3 and out['slices']['d']['exit'] is None and out['slices']['d']['blocked_by'] == ['f'], out",
+        "assert all(out['slices'][k]['exit'] == 0 for k in 'abc'), out",
+        "assert t('c', 'start') < t('a', 'end') and t('b', 'start') >= t('a', 'end'), 'c ran beside a; b waited for a'",
+        "assert x.json.loads((hd / 'a.brief').read_text())['objective'] == 'OBJECTIVE-A', 'the brief reaches the worker on stdin'",
+        "assert not (hd / 'd.brief').exists(), 'a blocked slice never starts'",
+        "assert snap and not any('OBJECTIVE' in sn for sn in snap), 'no brief text in the orbital feed'",
+        "assert any('build' in sn for sn in snap), 'orbitals were up while slices ran'",
+        "assert (hd / 'logs' / 'a.log').stat().st_mode & 0o077 == 0, 'logs are private'",
+        "assert not any(i['parent'] == 'devin' and i.get('active') for i in x.read_json(x.DATA / 'subagents.json', {})['subagents']), 'every orbital stopped'",
+        "assert 'refused' in x.orbital_hyperdrive({'slices': [dict(id='z', workspace='w', brief={'objective': 'o'}, command=['true'])]}, seat='devin')['reason'], 'a brief with no checks is refused'",
+        "assert 'refused' in x.orbital_hyperdrive({'slices': [dict(id='z', workspace='w', brief=brief('o'), command='rm -rf /')]}, seat='devin')['reason'], 'a command must be a list, never a shell string'",
         "real_name = x.proc_name; x.proc_name = lambda pid: 'bash'",  # a caller under no agent
         "x.os.environ['COMMS_DECK_SEAT'] = 'claude'",
         "assert x.find_agent()[0] == 'claude' and x.find_agent(trust_env=False)[0] is None",
@@ -9490,7 +9605,8 @@ def main():
     p.add_argument("seat")
     p.add_argument("--stale", action="store_true", help="treat a long-unchanged busy seat as idle")
     p = sub.add_parser("orbital", help="register and manage a subagent orbital (start, stop, run -- CMD, park, resume, stand, report)")
-    p.add_argument("action", choices=["start", "stop", "run", "park", "resume", "stand", "report", "accept-report", "reporter"])
+    p.add_argument("action", choices=["start", "stop", "run", "hyperdrive", "park", "resume", "stand", "report", "accept-report", "reporter"])
+    p.add_argument("--max", type=int, default=3, help="hyperdrive: slices running at once")
     p.add_argument("id", nargs="?", default="")
     p.add_argument("--kind", default="subagent")
     p.add_argument("--lifetime", choices=["task", "resumable"], default="task")
@@ -9574,6 +9690,15 @@ def main():
             except Exception as error:  # a status line must never break the agent
                 print(f"comms-deck: {error}")
         elif args.cmd == "orbital":
+            if args.action == "hyperdrive":
+                try:
+                    plan = json.loads(Path(args.id).read_text())
+                except (OSError, ValueError) as error:
+                    print(json.dumps({"ok": False, "reason": f"can't read the plan: {error}"}), file=sys.stderr)
+                    sys.exit(2)
+                out = orbital_hyperdrive(plan, max(1, args.max))
+                print(json.dumps(out, indent=1))
+                sys.exit(0 if out.get("ok") else 1)
             if args.action == "run":
                 cmd = [c for c in ([args.id] if args.id else []) + args.command if c != "--"]
                 sys.exit(orbital_run(cmd, args.kind, args.task))
