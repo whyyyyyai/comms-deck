@@ -2727,9 +2727,15 @@ fn fly_comets(
     let now = time.elapsed_secs();
     let trail = mods.cfg.comets.trail.clamp(2, 200);
     for (e, mut comet, mut tf) in &mut comets {
-        // Follow the receiver round the orbit mid-flight.
+        // Follow the receiver round the orbit mid-flight. Lumo's electron
+        // quantum-jumps, so a comet to her eases after her instead of
+        // snapping (a snap kinked its trail into a zigzag, t78).
         if let Some(p) = positions.get(&comet.to) {
-            comet.to_pos = *p;
+            comet.to_pos = if comet.to == kitten_view::SEAT {
+                comet.to_pos.lerp(*p, 1.0 - (-dt * 5.0).exp())
+            } else {
+                *p
+            };
         }
         comet.t += dt / comet.seconds;
         let eased = 1.0 - (1.0 - comet.t.min(1.0)).powi(2);

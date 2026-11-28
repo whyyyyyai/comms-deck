@@ -137,14 +137,24 @@ fn mix(mut v: u64) -> u64 {
     v ^ (v >> 31)
 }
 
-/// Pick the next group: weighted to the shared orbits (a triple counts 3,
-/// a pair 2, one planet 1), never the group she is on if there's another,
-/// by a hash of the seed, the jump number and the stable state.
+/// Pick the next group, by a hash of the seed, the jump number and the
+/// stable state. Shared orbits come first (Y: "it should orbit agents that
+/// are close together"): when any pair or triple of planets is close, she
+/// picks among those (a triple weighs 3, a pair 2); she only takes a lone
+/// planet when no group is free. Never the group she is on if there's
+/// another, so with one close pair she alternates it with lone planets.
 /// Returns the pick and up to two runners-up for the ghosts.
 pub fn pick(all: &[Vec<String>], current: &[String], seed: u64, index: u64, key: u64) -> Option<(Vec<String>, Vec<Vec<String>>)> {
     let pool: Vec<&Vec<String>> = {
         let other: Vec<&Vec<String>> = all.iter().filter(|g| g.as_slice() != current).collect();
-        if other.is_empty() { all.iter().collect() } else { other }
+        let shared: Vec<&Vec<String>> = other.iter().copied().filter(|g| g.len() > 1).collect();
+        if !shared.is_empty() {
+            shared
+        } else if other.is_empty() {
+            all.iter().collect()
+        } else {
+            other
+        }
     };
     if pool.is_empty() {
         return None;
@@ -198,7 +208,7 @@ pub fn orbit_at(hosts: &[Vec2], phase: f32, r: f32) -> Vec2 {
 /// figure 8 crosses in the middle, within sensible bounds.
 fn loop_radius(hosts: &[Vec2]) -> f32 {
     if hosts.len() < 2 {
-        return 44.0;
+        return 52.0;
     }
     let c = hosts.iter().copied().sum::<Vec2>() / hosts.len() as f32;
     let d = hosts.iter().map(|h| h.distance(c)).fold(0.0f32, f32::max);
@@ -527,6 +537,10 @@ mod tests {
         assert_eq!(one, pick(&all, &["a".to_string()], 7, 3, 11).unwrap(), "same state, same jump");
         assert_ne!(one.0, vec!["a".to_string()]);
         assert!(pick(&[], &[], 1, 1, 1).is_none());
+        // A close pair is always chosen over lone planets while it's free.
+        for i in 0..20 {
+            assert_eq!(pick(&all, &["b".to_string()], 7, i, 11).unwrap().0.len(), 2);
+        }
         // With only the current group there is nowhere else: she stays.
         assert_eq!(pick(&[vec!["a".to_string()]], &["a".to_string()], 1, 1, 1).unwrap().0, vec!["a".to_string()]);
     }
