@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Vibe's seat now presents as Mercury across the navigation surfaces.** The
+  seat roster, usage meters, event tail, workspace list, warp-core contacts,
+  and scratchpad layout use the new display name. The stable `vibe` seat id,
+  `vibe-rs` process lookup, and `~/.vibe` settings stay intact for routing and
+  compatibility. Mercury is also accepted as a navigation workspace alias.
+  By Codex.
+
 - **A seat that comes online is told who's down, so bots help bots get
   back.** The service now watches the roster every 15 seconds (the owner's
   t64, 2026-11-27). When a seat starts answering notes - a live agent

@@ -4,7 +4,7 @@
     Super+`  comms   the terminal chat, fullscreen
     Super+1  claude      Super+5  gravity
     Super+2  grok        Super+6  lumo
-    Super+3  vibe        Super+7  alice (Grok Bot)
+    Super+3  Mercury     Super+7  alice (Grok Bot)
     Super+4  devin       Super+8  nav deck    Super+9  mail
     Super+S  the warp core, fullscreen on the scratchpad (special:magic)
 
@@ -57,7 +57,7 @@ CHAT_WORKSPACE = "comms"       # comms-deck's own desktop, Super+`
 AGENT_DESKS = [
     ("Claude", "claude", ("run", "claude")),
     ("Grok", "grok", ("run", "grok")),
-    ("Vibe", "vibe", ("run", "vibe-rs")),
+    ("Mercury", "vibe", ("run", "vibe-rs")),
     ("Devin", "devin", ("run", "devin")),
     ("Gravity", "gravity", ("run", "agy")),
     ("Lumo", "lumo", ("app", "lumo-desktop")),
@@ -372,7 +372,7 @@ def self_check():
             302: (301, "vibe-rs"), 101: (1, "kitty"), 201: (1, "kitty"), 301: (1, "kitty")}
     plan = [(label, w["address"], desk) for label, w, desk in plan_desks(clients, tree)]
     assert sorted(plan) == sorted([("Claude", "0x1", "claude"), ("Claude", "0x2", "claude"),
-                                   ("Vibe", "0x3", "vibe"), ("Alice", "0x4", "alice")]), plan
+                                   ("Mercury", "0x3", "vibe"), ("Alice", "0x4", "alice")]), plan
     assert window_holding(clients, tree, "grok") is None, "closed agents are skipped"
     print("desktops ok")
 

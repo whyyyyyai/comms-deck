@@ -129,9 +129,10 @@ It sets up each agent it finds:
   `~/.gemini/antigravity-cli/settings.json`: Antigravity prompts interactively
   before calling unknown MCP tools, and stalling on one in an automated turn
   sits badly;
-- **Mistral Vibe:** comms-deck's `[[hooks]]` tables (named `comms-deck-*`) in
+- **Mercury (Mistral Vibe):** comms-deck's `[[hooks]]` tables (named `comms-deck-*`) in
   `~/.vibe/hooks.toml`, and a `[[mcp_servers]]` entry named `comms-deck` in
-  `~/.vibe/config.toml`, if `vibe` is installed. Other hooks are kept.
+  `~/.vibe/config.toml`, if `vibe` is installed. The deck seat id and app
+  paths remain `vibe` for compatibility. Other hooks are kept.
 - **Codex:** the MCP server in `~/.codex/config.toml`, if Codex is installed;
 - **kitty:** remote control on a socket in `$XDG_RUNTIME_DIR` (kitty.conf);
 - **the desktop:** app menu entries for the chat and mail screens, and, for

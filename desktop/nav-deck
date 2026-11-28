@@ -79,10 +79,26 @@ REFRESH_S = 1.0
 # scratchpad-layout's DESKS.
 DESKS = {"comms": 1, "claude": 2, "grok": 3, "vibe": 4, "devin": 5, "gravity": 6,
          "lumo": 7, "alice": 8, "nav": 9, "mail": 10, "0": 11}
+SEAT_LABELS = {"vibe": "Mercury"}
+DESK_ALIASES = {"mercury": "vibe"}
+
+
+def display_seat(name):
+    """User-facing label for a stable deck seat id."""
+    name = str(name)
+    return SEAT_LABELS.get(name, name)
+
+
+def display_recipients(value):
+    """Render recipient seat ids with their current display names."""
+    if value == "all":
+        return value
+    return ", ".join(display_seat(part.strip()) for part in str(value).split(","))
 
 
 def goto_target(label):
     """The Lua workspace value for `goto <label>`."""
+    label = DESK_ALIASES.get(label.lower(), label)
     if label in DESKS:
         return str(DESKS[label])
     return '"name:' + label.replace("\\", "").replace('"', "") + '"'
@@ -445,7 +461,7 @@ def seats_panel(status, width):
             note = f"since {human_dur(d.get('since_s', 0))}"
         elif waiting:
             note = f"oldest {human_dur(d.get('oldest_waiting_s', 0))}"
-        rows.append(fit(f"  {colour(col)}{name:<7}{colour(0)}   ", 11) + " "
+        rows.append(fit(f"  {colour(col)}{display_seat(name):<7}{colour(0)}   ", 11) + " "
                     + bar(min(1.0, waiting / 30), 16, load_col)
                     + f" {colour(load_col)}{waiting:>3}{colour(245)} waiting{colour(0)}"
                     + f" {dim(human_dur(d.get('since_s', 0)))} {dim(note)}")
@@ -463,7 +479,7 @@ def meters_panel(width, limits=None):
             col = 78 if frac < 0.8 else (226 if frac < 0.95 else 214)
             parts.append(f"{dim(f'{label}:')}{bar(frac, 10, col)}"
                          + (f" {dim('reset ' + human_dur(reset - time.time()))}" if reset else ""))
-        rows.append(fit(f"  {colour(81)}{seat:<8}{colour(0)}", 11) + "   ".join(parts))
+        rows.append(fit(f"  {colour(81)}{display_seat(seat):<8}{colour(0)}", 11) + "   ".join(parts))
     return rows
 
 
@@ -496,7 +512,7 @@ def ws_row(name, cls_list, width, own_class):
         if c.get("fullscreen"):
             chip += f"{colour(81)}▣{colour(0)}"
         chips.append(chip)
-    return (fit(f"  {colour(245)}{name:<14}{colour(0)}", 16)
+    return (fit(f"  {colour(245)}{display_seat(name):<14}{colour(0)}", 16)
             + (" ".join(chips) if chips else dim("(empty)")))[:width]
 
 
@@ -651,15 +667,17 @@ def event_tail_panel(width, height, now, records=None, live=None):
         if rec.get("kind") != "message":
             continue
         t = CD.record_stamp(rec) if CD else 0.0
-        to = "all" if rec.get("to") == "all" else str(rec.get("to", "?"))
+        to = display_recipients(rec.get("to", "?"))
         text = "(private)" if rec.get("private") else CD.redact(" ".join(str(rec.get("text", "")).split()))
-        evs.append((t, f"{colour(CD.colour(rec.get('from', 'vibe'))) if CD else ''}{rec.get('from', '?')}"
+        sender = display_seat(rec.get("from", "?"))
+        evs.append((t, f"{colour(CD.colour(rec.get('from', 'vibe'))) if CD else ''}{sender}"
                        f"{colour(0) if CD else ''} → {to}: {text}"))
     for act in activity_events(height):
         t = float(act.get("time") or 0)
         doing = " ".join(str(act.get("doing", "")).split())
         suffix = f"{colour(241)}{dim('· ' + doing[:max(0, width - 22)])}" if doing else ""
-        evs.append((t, f"{colour(CD.colour(act.get('seat', '?'))) if CD else ''}{act.get('seat', '?')}"
+        seat = act.get("seat", "?")
+        evs.append((t, f"{colour(CD.colour(seat)) if CD else ''}{display_seat(seat)}"
                        f"{colour(0) if CD else ''} {act.get('state', '?')} {suffix}{colour(0) if CD else ''}"))
     # a nan or boundless time is truthy but undrawable: isfinite drops it
     # before the sort (nan poisons sorting, inf floats to the end), and the
@@ -1020,7 +1038,7 @@ def warp_canvas(fit_w, field_w, field_h, status, hours, info, load, cy):
     rows.append(f"  {colour(81)}WARP {warp:3.1f}{colour(0)} {bar(warp / 9.9, 8, 81)}"
                 f"  {colour(78)}SHLD{colour(0)} {bar(shield, 8, 78 if shield > 0.3 else 214)}"
                 f" {mem_gib:.1f}G")
-    contacts = " ".join(f"{name[0].upper()}{min(999, d.get('waiting', 0))}"
+    contacts = " ".join(f"{display_seat(name)[0].upper()}{min(999, d.get('waiting', 0))}"
                         for name, d in live[:6]) or "clear"
     alert_now = shield < 0.15 and int(time.time()) % 2 == 0
     flag = f" {colour(196)}⚠ LOW SHIELD{colour(0)}" if alert_now else ""
@@ -1431,7 +1449,7 @@ def self_test():
         probe(CD.look_ticker(120, recs, time.time()) is not None, "look_ticker")
         probe(CD.context_split() is not None, "context_split")
         tail_plain = ANSI.sub("", "\n".join(event_tail_panel(60, 8, now, recs)))
-        assert "vibe → all" in tail_plain, tail_plain
+        assert "Mercury → all" in tail_plain, tail_plain
         # nan/1e30 through the event tail must drop the line, not the frame
         # (the event-tail twin of #129's cockpit-chat stamp guard)
         hostile = recs + [

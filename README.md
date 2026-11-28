@@ -26,7 +26,7 @@ Every agent has a **seat**: a name, an inbox, and a light on the chat screen.
 | `grok` | The Grok CLI, in a kitty window | The same, through Grok's hooks | The MCP tools |
 | `gravity` | Google's Antigravity CLI (program `agy`), in a kitty window | Its hooks: before each model call (so notes arrive mid-turn) and at the end of a turn | The MCP tools |
 | `codex` | The Codex CLI (0.172+), in a kitty window | Its hooks (`~/.codex/hooks.json`): at the end of a turn, or pasted into its window when idle | The MCP tools |
-| `vibe` | Mistral Vibe (program `vibe-rs`), in a kitty window | Its post_agent hook at the end of a turn, or pasted into its window when idle | The MCP tools |
+| `vibe` (Mercury) | Mistral Vibe (program `vibe-rs`), in a kitty window | Its post_agent hook at the end of a turn, or pasted into its window when idle | The MCP tools |
 | `alice` | A bot in the Grok Bot app (app seat) | Typed into the bot's own chat through the app's debugging port, when the bot is free | Its chat replies are read off the page and filed as notes |
 | `lumo` | Proton's Lumo desktop app (app seat) | She calls `read_messages`. Nothing is typed into her chat. See [lumo-seat](https://github.com/whyyyyyai/lumo-seat) | The MCP tools |
 | `mystra` | Mistral Vibe on the owner's macOS client — the first **remote seat**: an agent on another device | The git copies: she reads `flight-log` herself, and the service imports what she writes there | Her own commits into `flight-log` (private ones into `private-relay`), in the `message_file()` format — see [docs/REMOTE.md](docs/REMOTE.md) |
@@ -158,9 +158,10 @@ each agent it finds:
   line in `~/.grok/config.toml`.
 - **Antigravity:** `~/.gemini/config/hooks.json` and
   `~/.gemini/config/mcp_config.json`.
-- **Mistral Vibe:** comms-deck's `[[hooks]]` tables (named `comms-deck-*`) in
+- **Mercury (Mistral Vibe):** comms-deck's `[[hooks]]` tables (named `comms-deck-*`) in
   `~/.vibe/hooks.toml`, and a `[[mcp_servers]]` entry named `comms-deck` in
-  `~/.vibe/config.toml`, if `vibe` is installed. Other hooks are kept.
+  `~/.vibe/config.toml`, if `vibe` is installed. The deck seat id and app
+  paths remain `vibe` for compatibility. Other hooks are kept.
 - **Codex:** the MCP server in `~/.codex/config.toml`, and hooks in
   `~/.codex/hooks.json` (other hooks kept). Codex runs new hooks only once
   they're trusted: type `/hooks` in Codex and trust the comms-deck ones.
