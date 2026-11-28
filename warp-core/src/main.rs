@@ -1228,10 +1228,14 @@ fn glitch_frame(sym: &str, strength: f32, k: u64) -> String {
         .collect()
 }
 
+#[derive(Component)]
+struct SolMark;
+
 fn update_core_ticker(
     deck: Res<Deck>,
     time: Res<Time>,
     mut ticker: Query<(&mut CoreTicker, &mut Text2d, &mut TextColor)>,
+    mut sol_mark: Query<&mut Visibility, With<SolMark>>,
     mut prices: Local<(f32, HashMap<String, Vec<(f64, f64)>>)>,
 ) {
     let now = time.elapsed_secs();
@@ -1260,9 +1264,17 @@ fn update_core_ticker(
                 }
             }
         }
+        let mark_visible = !state.warped && !static_on && !flick;
+        let visibility = if mark_visible { Visibility::Inherited } else { Visibility::Hidden };
+        for mut vis in &mut sol_mark {
+            if *vis != visibility {
+                *vis = visibility;
+            }
+        }
+        let shown = if mark_visible { "" } else { shown.as_str() };
         if text.0 != shown {
             text.0.clear();
-            text.0.push_str(&shown);
+            text.0.push_str(shown);
             if !flick {
                 colour.0 = if static_on {
                     Color::srgb(0.92, 0.95, 1.0)
@@ -1555,12 +1567,25 @@ fn setup(
 
     commands.spawn((
         CoreTicker::default(),
-        Text2d::new("SOL"),
-        TextFont { font_size: FontSize::Px(32.0), ..default() },
+        Text2d::new(""),
+        TextFont { font_size: FontSize::Px(14.0), ..default() },
         TextColor(Color::srgb(0.65, 0.97, 0.89)),
         Anchor::CENTER,
         Transform::from_xyz(0.0, 0.0, 5.5),
     ));
+
+    for (y, colour) in [
+        (4.0, Color::srgb(0.63, 0.87, 1.0)),
+        (0.0, Color::srgb(0.52, 0.95, 0.86)),
+        (-4.0, Color::srgb(0.67, 0.78, 1.0)),
+    ] {
+        commands.spawn((
+            SolMark,
+            Mesh2d(assets.quad.clone()),
+            MeshMaterial2d(materials.add(colour)),
+            Transform::from_xyz(0.0, y, 5.5).with_scale(Vec3::new(17.0, 2.0, 1.0)),
+        ));
+    }
 
     let star_mat = materials.add(Color::linear_rgb(0.9, 0.95, 1.4));
     for _ in 0..STARS {
