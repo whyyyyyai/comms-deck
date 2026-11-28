@@ -94,6 +94,7 @@ fn main() {
         .insert_resource(Chat::default())
         .insert_resource(Layout::default())
         .insert_resource(WebcamView::default())
+        .insert_resource(StockFlicker::default())
         .insert_resource(Rng(0x9E37_79B9_7F4A_7C15))
         // 30 fps until the mods say otherwise ([look] fps): it is a display,
         // not a game, and half the CPU of drawing at the refresh rate.
@@ -134,7 +135,7 @@ fn main() {
         .add_systems(
             Update,
             (
-                (watch_mods, pace_frames, breathe_background, read_feed, layout_view, apply_rules, layout_seats, kitten_view::kitten_step, left_panel::left_keys, layout_tasks, layout_held_tasks, pointer, chat_input, keys, webcam).chain(),
+                (watch_mods, pace_frames, breathe_background, read_feed, read_stocks, layout_view, apply_rules, layout_seats, kitten_view::kitten_step, left_panel::left_keys, layout_tasks, layout_held_tasks, pointer, chat_input, keys, webcam).chain(),
                 (
                     glow_seats,
                     draw_rings,
@@ -1519,6 +1520,73 @@ fn read_prices() -> HashMap<String, Vec<(f64, f64)>> {
         out.insert(sym.to_string(), hist);
     }
     out
+}
+
+/// A seat's company stock (Y, 2026-11-28: "Planets should flicker the stock
+/// ticker of their relevant agent ... lighting up flickering for a second
+/// either green or red depending if the stock price is up or down"). The
+/// pricefeed writes prices.json "stocks" by seat (claude: ANT); each new
+/// quote flickers that planet for a second, green when the stock is up on
+/// the session, red when it's down.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct StockState {
+    /// The pricefeed's time for the last quote seen.
+    seen: f64,
+    /// Elapsed seconds when the flicker ends.
+    until: f32,
+    up: bool,
+}
+
+#[derive(Resource, Default)]
+struct StockFlicker(HashMap<String, StockState>);
+
+const STOCK_FLICKER_S: f32 = 1.0;
+const STOCK_UP: [f32; 3] = [0.15, 1.0, 0.3];
+const STOCK_DOWN: [f32; 3] = [1.0, 0.12, 0.1];
+
+/// A new quote (a later pricefeed time than the last seen) starts a
+/// flicker; the same quote again doesn't. Pure: tested.
+fn stock_seen(state: &mut StockState, quote_time: f64, up: bool, now: f32) {
+    if quote_time > state.seen {
+        state.seen = quote_time;
+        state.up = up;
+        state.until = now + STOCK_FLICKER_S;
+    }
+}
+
+/// The colour a planet shows `now`: green or red while its flicker is on
+/// (a strobe, about 6 flashes in the second), None otherwise. Pure: tested.
+fn stock_flash(state: &StockState, now: f32) -> Option<[f32; 3]> {
+    let left = state.until - now;
+    if left <= 0.0 || left > STOCK_FLICKER_S {
+        return None;
+    }
+    let on = ((left * 12.0) as i32) % 2 == 0;
+    on.then_some(if state.up { STOCK_UP } else { STOCK_DOWN })
+}
+
+/// prices.json "stocks": seat -> (quote time, up on the session).
+fn parse_stocks(text: &str) -> Vec<(String, f64, bool)> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else { return Vec::new() };
+    let Some(stocks) = v["stocks"].as_object() else { return Vec::new() };
+    stocks
+        .iter()
+        .filter_map(|(seat, q)| Some((seat.clone(), q["time"].as_f64()?, q["up"].as_bool()?)))
+        .collect()
+}
+
+/// Every 5 s, the seats' stock quotes from the pricefeed.
+fn read_stocks(time: Res<Time>, mut flicker: ResMut<StockFlicker>, mut last: Local<f32>) {
+    let now = time.elapsed_secs();
+    if *last != 0.0 && now - *last < 5.0 {
+        return;
+    }
+    *last = now.max(1e-3);
+    let path = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/state/warp-core/prices.json");
+    let Ok(text) = std::fs::read_to_string(path) else { return };
+    for (seat, quote_time, up) in parse_stocks(&text) {
+        stock_seen(flicker.0.entry(seat).or_default(), quote_time, up, now);
+    }
 }
 
 /// A glitch frame for `sym` at strength 0..1: the stronger, the more of its
@@ -2912,6 +2980,7 @@ fn glow_seats(
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut nodes: Query<(&mut SeatNode, &MeshMaterial2d<ColorMaterial>, &mut Transform, &Children)>,
     mut labels: Query<&mut Text2d, With<SeatLabel>>,
+    stocks: Res<StockFlicker>,
 ) {
     let t = time.elapsed_secs();
     let cfg = &mods.cfg;
@@ -2930,8 +2999,12 @@ fn glow_seats(
             b *= 0.3;
         }
         b += node.flash * 6.0;
+        let stock = stocks.0.get(&node.name).and_then(|s| stock_flash(s, t));
         if let Some(mut m) = materials.get_mut(&mat.0) {
-            m.color = lin(look.tint.unwrap_or_else(|| seat_rgb(&node.name)), b);
+            m.color = match stock {
+                Some(c) => lin(c, b.max(1.0) * 3.0),
+                None => lin(look.tint.unwrap_or_else(|| seat_rgb(&node.name)), b),
+            };
         }
         let hovered = cfg.hud.hover_card && deck.hover.as_ref() == Some(&node.name);
         let share = shares.iter().find(|(n, _)| n == &node.name).map(|(_, s)| *s).unwrap_or(1.0 / shares.len().max(1) as f32);
@@ -3271,6 +3344,7 @@ fn drive_planets(
     mut faces: Query<(&MeshMaterial2d<PlanetMaterial>, &mut Visibility), With<PlanetFace>>,
     mut mats: ResMut<Assets<PlanetMaterial>>,
     logos: Res<Logos>,
+    stocks: Res<StockFlicker>,
 ) {
     let pc = &mods.cfg.planets;
     let t = time.elapsed_secs();
@@ -3290,7 +3364,7 @@ fn drive_planets(
             }
             if let Some(mut m) = mats.get_mut(&mat.0) {
                 m.u = PlanetUniform {
-                    colour: v4(seat_rgb(&node.name), 1.0),
+                    colour: v4(stocks.0.get(&node.name).and_then(|s| stock_flash(s, t)).unwrap_or_else(|| seat_rgb(&node.name)), 1.0),
                     params: Vec4::new(t, work, if busy { 1.0 } else { 0.0 }, seed),
                     logo: match logos.0.get(&node.name) {
                         Some((_, mono)) => Vec4::new(
@@ -4841,6 +4915,32 @@ mod tests {
     }
 
     #[test]
+    fn a_new_stock_quote_flickers_its_planet_for_a_second() {
+        let mut s = StockState::default();
+        stock_seen(&mut s, 100.0, true, 10.0);
+        assert!((10.0..11.0).any_flash(&s), "flickers within the second");
+        assert_eq!(stock_flash(&s, 11.01), None, "and stops after it");
+        assert!([10.0f32, 10.1, 10.2, 10.3].iter().filter_map(|t| stock_flash(&s, *t)).all(|c| c == STOCK_UP), "green when up");
+        stock_seen(&mut s, 100.0, false, 20.0);
+        assert_eq!(stock_flash(&s, 20.0), None, "the same quote again doesn't flicker");
+        stock_seen(&mut s, 130.0, false, 20.0);
+        assert!([20.0f32, 20.1, 20.2, 20.3].iter().filter_map(|t| stock_flash(&s, *t)).all(|c| c == STOCK_DOWN));
+        assert!([20.0f32, 20.05, 20.1, 20.15].iter().any(|t| stock_flash(&s, *t).is_none()), "it strobes");
+        let stocks = parse_stocks(r#"{"SOL":{},"stocks":{"claude":{"symbol":"ANT","price":91.88,"prev_close":82.79,"up":true,"time":5.5}}}"#);
+        assert_eq!(stocks, vec![("claude".to_string(), 5.5, true)]);
+        assert!(parse_stocks("{}").is_empty());
+    }
+
+    trait AnyFlash {
+        fn any_flash(self, s: &StockState) -> bool;
+    }
+    impl AnyFlash for std::ops::Range<f32> {
+        fn any_flash(self, s: &StockState) -> bool {
+            (0..20).any(|i| stock_flash(s, self.start + (self.end - self.start) * i as f32 / 20.0).is_some())
+        }
+    }
+
+    #[test]
     fn the_systems_queries_do_not_clash() {
         let mut world = World::new();
         let mut init = |mut s: Box<dyn System<In = (), Out = ()>>| {
@@ -4850,6 +4950,7 @@ mod tests {
         init(Box::new(IntoSystem::into_system(layout_tasks)));
         init(Box::new(IntoSystem::into_system(layout_seats)));
         init(Box::new(IntoSystem::into_system(drive_planets)));
+        init(Box::new(IntoSystem::into_system(glow_seats)));
         init(Box::new(IntoSystem::into_system(draw_moons_and_marks)));
         init(Box::new(IntoSystem::into_system(hud)));
     }

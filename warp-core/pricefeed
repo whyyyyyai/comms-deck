@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""pricefeed: SOL/XRP spot and perpetual futures prices. No AI.
+"""pricefeed: SOL/XRP spot and perpetual futures prices, and the seats' company
+stocks (claude: ANT). No AI.
 
 Y, 2026-11-28 (t121/t122): SOL at the core, XRP in warp, and the ticker
 should "flicker in according to price action ... relative distribution
@@ -27,6 +28,11 @@ FUTURES = {
     "SOL-PERP": ("SOL_USDC-PERPETUAL", "SOL", "USDC"),
     "XRP-PERP": ("XRP_USDC-PERPETUAL", "XRP", "USDC"),
 }
+# Each seat's company stock (Y, 2026-11-28: "Planets should flicker the
+# stock ticker of their relevant agent"). Only listed companies: the other
+# seats' makers (xAI, OpenAI, Mistral, Cognition, Proton) have no ticker.
+SEAT_STOCKS = {"claude": "ANT", "gravity": "GOOGL"}
+STOCK_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{}?interval=1d&range=5d"
 DERIBIT_URL = "https://www.deribit.com/api/v2/public/ticker?instrument_name={}"
 OUT = Path(os.environ.get("PRICEFEED_OUT", Path.home() / ".local/state/warp-core/prices.json"))
 EVERY_S = 30
@@ -47,6 +53,30 @@ def fetch_future(instrument, timeout=10):
     """Return Deribit's public perpetual mark, in the instrument's quote currency."""
     result = request_json(DERIBIT_URL.format(instrument), timeout)["result"]
     return float(result["mark_price"])
+
+
+def fetch_stock(symbol, timeout=10):
+    """The latest price and the session close before it, from daily bars."""
+    result = request_json(STOCK_URL.format(symbol), timeout)["chart"]["result"][0]
+    return stock_quote(result)
+
+
+def stock_quote(result):
+    """(price, previous close) from a chart result. Pure: tested."""
+    closes = [c for c in result["indicators"]["quote"][0]["close"] if c is not None]
+    price = float(result["meta"].get("regularMarketPrice") or closes[-1])
+    if len(closes) < 2:
+        raise ValueError("fewer than two closes")
+    return price, float(closes[-2])
+
+
+def merge_stock(doc, seat, symbol, price, prev_close, now):
+    """One stock sample for a seat's planet: up or down on the session."""
+    doc.setdefault("stocks", {})[seat] = {
+        "symbol": symbol, "price": price, "prev_close": prev_close,
+        "up": price >= prev_close, "time": round(now, 1),
+    }
+    return doc
 
 
 def merge(doc, symbol, price, now, *, source=None, quote=None, instrument=None):
@@ -83,6 +113,12 @@ def once():
                         source="deribit", quote=quote, instrument=instrument)
         except (OSError, ValueError, KeyError) as error:
             print(time.strftime("%H:%M:%S"), f"{key}: {error}", flush=True)
+    for seat, symbol in SEAT_STOCKS.items():
+        try:
+            price, prev_close = fetch_stock(symbol)
+            doc = merge_stock(doc, seat, symbol, price, prev_close, now)
+        except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
+            print(time.strftime("%H:%M:%S"), f"{symbol}: {error}", flush=True)
     OUT.parent.mkdir(parents=True, exist_ok=True)
     tmp = OUT.with_suffix(".tmp")
     tmp.write_text(json.dumps(doc))
@@ -98,6 +134,15 @@ def self_test():
         ("samples kept in order, the price is the latest", doc["SOL"]["price"] == 71.0 and doc["SOL"]["history"][-1][1] == 71.0),
         ("samples older than two hours are dropped", [s[1] for s in doc["SOL"]["history"]] == [69.9, 71.0]),
         ("the other symbol is untouched", "XRP" not in doc),
+    ]
+    bars = {"meta": {"regularMarketPrice": 91.88},
+            "indicators": {"quote": [{"close": [87.64, 81.91, None, 82.79, 91.88]}]}}
+    price, prev = stock_quote(bars)
+    doc = merge_stock(doc, "claude", "ANT", price, prev, 2000.0)
+    checks += [
+        ("a stock compares with the session before", (price, prev) == (91.88, 82.79)),
+        ("a stock up on the session is up", doc["stocks"]["claude"]["up"] is True),
+        ("a stock down is not up", merge_stock({}, "claude", "ANT", 80.0, 82.79, 1.0)["stocks"]["claude"]["up"] is False),
     ]
     bad = 0
     for name, ok in checks:
