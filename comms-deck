@@ -262,12 +262,23 @@ SEATS = tuple(AGENTS) + APP_SEATS + ("owner",)
 # and "y" (or the owner's older name, "stox") is accepted wherever a seat is
 # named.
 OWNER_NAME = "Y"
-OWNER_ALIASES = ("y", "stox")   # lowercase tokens that name the owner
+SEAT_DISPLAY_NAMES = {"owner": OWNER_NAME, "lumo": "Proton", "claude": "Jupiter", "codex": "Saturn", "devin": "Venus"}
+SEAT_ALIASES = {"y": "owner", "stox": "owner", "luna": "lumo", "proton": "lumo", "jupiter": "claude", "saturn": "codex", "venus": "devin"}
+
+
+def seat_id(name):
+    """Resolve a public name to its existing mailbox ID."""
+    name = name.lower()
+    return name if name in SEATS else SEAT_ALIASES.get(name, name)
+
+
+def display_seat(seat):
+    return SEAT_DISPLAY_NAMES.get(seat, seat)
 
 
 def shown_name(seat):
-    """How a seat is named on screens and in notes: the owner is Y."""
-    return OWNER_NAME if seat == "owner" else seat.title()
+    """How a seat is named on screens and in notes."""
+    return SEAT_DISPLAY_NAMES.get(seat, seat.title())
 
 # The repos the notes are copied to. A missing clone just means no copy.
 PUBLIC_REPO = Path(setting("PUBLIC_REPO") or HOME / "flight-log")
@@ -692,14 +703,14 @@ def send(sender, to, text, quiet=False, private=False):
         token = token.strip().lstrip("@")
         if not token:
             continue
-        token = re.sub(rf"^(-?)({'|'.join(map(re.escape, OWNER_ALIASES))})$",
-                       r"\1owner", token)  # Y (or the older stox) is the owner
-        (excludes if token.startswith("-") else names).append(token.lstrip("-"))
+        exclude = token.startswith("-")
+        name = seat_id(token.lstrip("-").lstrip("@"))
+        (excludes if exclude else names).append(name)
     names = list(dict.fromkeys(names))
     excludes = list(dict.fromkeys(excludes))
     unknown = [n for n in names + excludes if n not in SEATS and n != "all"]
     if unknown or not names:
-        raise ValueError(f"unknown seat {(unknown or [to])[0]!r}; seats are: {', '.join(SEATS)}, all")
+        raise ValueError(f"unknown seat {(unknown or [to])[0]!r}; seats are: {', '.join(display_seat(s).lower() if s in SEAT_DISPLAY_NAMES and s != "owner" else s for s in SEATS)}, all")
     if "all" in excludes:
         raise ValueError("- excludes seats, not 'all'")
     if "all" in names:
@@ -929,7 +940,7 @@ def team_snapshot(seat, records):
     balancer = load_balancer()
     board = [t for t in balancer.all_tasks() if t["state"] in balancer.TASK_ACTIVE][-5:] if balancer else []
     if board:
-        text += " Tasks: " + "; ".join(f"{t['id']} {t.get('holder') or 'open'}" for t in board) + "."
+        text += " Tasks: " + "; ".join(f"{t['id']} {display_seat(t.get('holder')) if t.get('holder') else 'open'}" for t in board) + "."
     shared = [r for r in records if (r.get("to") == "all" or "+" in str(r.get("to"))) and not r.get("task")]
     if shared:
         text += (" This note went to more than one agent. Before starting work on it, check "
@@ -944,9 +955,9 @@ def render(records, seat):
     lines = []
     for r in records:
         tags = [t for t, on in (("quiet", r.get("quiet")), ("private", r.get("private"))) if on]
-        to = "" if r.get("to") == seat else f" (to {', '.join(OWNER_NAME if t == 'owner' else t for t in str(r.get('to')).split('+'))})"
+        to = "" if r.get("to") == seat else f" (to {', '.join(display_seat(t) for t in str(r.get('to')).split('+'))})"
         tag = f" [{', '.join(tags)}]" if tags else ""
-        lines.append(f"From {OWNER_NAME if r['from'] == 'owner' else r['from']}{to} at {r['time'][11:16]} ({note_age(r)}){tag}:\n{r['text']}")
+        lines.append(f"From {display_seat(r['from'])}{to} at {r['time'][11:16]} ({note_age(r)}){tag}:\n{r['text']}")
         balancer = load_balancer() if r.get("task") else None
         task = balancer.load_task(r.get("task")) if balancer else None
         if task and task["state"] in balancer.TASK_ACTIVE:
@@ -955,8 +966,8 @@ def render(records, seat):
                 lines.append(f"Task {task['id']} is YOURS (picked by the deck). Do it, then "
                              f"`done_task {task['id']}`; `release_task {task['id']}` if you can't.")
             elif holder:
-                lines.append(f"Task {task['id']} is {holder}'s. Don't start it yourself; "
-                             f"help only if {holder} asks.")
+                lines.append(f"Task {task['id']} is {display_seat(holder)}'s. Don't start it yourself; "
+                             f"help only if {display_seat(holder)} asks.")
             else:
                 lines.append(f"Task {task['id']} is open: nobody was free. `claim_task {task['id']}` "
                              f"to take it.")
@@ -3324,7 +3335,7 @@ AVAILABILITY = {"ready": 0, "busy": 1, "stuck": 3, "draft in box": 3,
 def seat_title(seat, online=False):
     """A seat's display name. Easter egg (the owner, 2026-11-26): Gravity is
     Gravity while offline and Antigravity while it's online."""
-    return "Antigravity" if seat == "gravity" and online else seat.title()
+    return "Antigravity" if seat == "gravity" and online else shown_name(seat)
 
 
 def availability(seat, state, now=None, snap=None):
@@ -4424,8 +4435,8 @@ def activity_panel(width):
     if board:
         lines += ["", "\033[1mTASKS\033[0m"]
         for t in board[-6:]:
-            who = t.get("holder") or "open"
-            lines.append(f"  \033[38;5;{colour(who) if t.get('holder') else 245}m{t['id']:4} {who:7}\033[0m "
+            who = display_seat(t.get("holder")) if t.get("holder") else "open"
+            lines.append(f"  \033[38;5;{colour(t.get('holder')) if t.get('holder') else 245}m{t['id']:4} {who:7}\033[0m "
                          f"\033[2m{'(private)' if t.get('private') else t['summary']}\033[0m")
     # The context split lives on this column now (the owner, 05:17): the pie
     # and bars were too tall for the usage column on the left.
@@ -4482,14 +4493,15 @@ def route(text):
     "-grok hello" goes to everyone but Grok. Only real seat names count, and
     only at the start of a word, so "re-run" and "-rf" are left as text.
     """
-    names = [m.lower() for m in MENTION.findall(text)]
-    excludes = list(dict.fromkeys(m.group(1).lower() for m in EXCLUDE.finditer(text)
-                                  if m.group(1).lower() in SEATS))
+    names = [seat_id(m) for m in MENTION.findall(text)]
+    excludes = list(dict.fromkeys(name for name in (seat_id(m.group(1)) for m in EXCLUDE.finditer(text))
+                                  if name in SEATS))
     if not names or "all" in names:
         return ["all"] + ["-" + s for s in excludes], None
     unknown = [n for n in names if n not in SEATS or n == "owner"]
     if unknown:
-        return [], f"no seat called @{unknown[0]}; try " + " ".join(f"@{s}" for s in SEATS if s != "owner" and s not in HIDDEN_SEATS) + " @all"
+        names = " ".join(f"@{display_seat(s).lower()}" for s in SEATS if s != "owner" and s not in HIDDEN_SEATS)
+        return [], f"no seat called @{display_seat(unknown[0]).lower()}; try {names} @all"
     if not [n for n in dict.fromkeys(names) if n not in excludes]:
         return [], f"-{', -'.join(excludes)} leaves nobody to send to"
     return list(dict.fromkeys(names)) + ["-" + s for s in excludes], None
@@ -4775,8 +4787,8 @@ def look_ticker(cols, records, now):
     items = []
     for r in [r for r in records[-60:] if r.get("kind") == "message"][-10:][::-1]:
         text = "(private)" if r.get("private") else redact(" ".join(str(r.get("text", "")).split()))[:70]
-        to = "everyone" if r["to"] == "all" else r["to"].replace("+", ", ")
-        items.append((r["from"], f"{r['from']} → {to}: {text}"))
+        to = "everyone" if r["to"] == "all" else ", ".join(display_seat(t) for t in r["to"].split("+"))
+        items.append((r["from"], f"{display_seat(r['from'])} → {to}: {text}"))
     if not items:
         return " " * cols
     plain = "".join(f"  ▪  {s}" for _, s in items)
@@ -6682,7 +6694,7 @@ def status_text():
         paused = ", PAUSED (loop guard)" if s["auto"] >= AUTO_LIMIT else ""
         rows.append(f"{seat:8} {s['state']:5}  {len(pending(seat))} waiting  {wake}{paused}")
     for seat in APP_SEATS:
-        rows.append(f"{seat:8} {app_seat_state(seat):14} {len(pending(seat))} waiting")
+        rows.append(f"{display_seat(seat):8} {app_seat_state(seat):14} {len(pending(seat))} waiting")
     hook_state = "Discord mirror: on" if WEBHOOK_FILE.exists() else "Discord mirror: off"
     return "\n".join(rows + [hook_state])
 
@@ -6812,6 +6824,7 @@ MCP_TOOLS = [
          "to": {"type": "string",
                 "description": "A seat, several seats separated by commas (e.g. 'claude, grok'), "
                                "'owner' (" + OWNER_NAME + ", also accepted as '" + OWNER_NAME.lower() + "'), or 'all'. "
+                               "Proton can also be addressed as 'proton'; Jupiter as 'jupiter'; Saturn as 'saturn'; Venus as 'venus'. "
                                "Seats: " + ", ".join(SEATS) + ". A '-seat' token "
                                "drops that seat from the recipients (e.g. 'all -grok')."},
          "text": {"type": "string"},
@@ -7550,12 +7563,14 @@ def self_test():
             " bool(x.route('@bob hi')[1]), x.route('no mention')[0] == ['all'], x.MENTION.findall('mail a@grok.com') == [],"
             " x.route('-grok hello')[0], x.route('hi @Claude and @grok -claude')[0],"
             " x.route('@all -grok go')[0], bool(x.route('re-run it -rf')[0] == ['all']),"
-            " x.route('@grok -grok hi')[1])")
+            " x.route('@grok -grok hi')[1], x.route('@Saturn hi')[0],"
+            " x.route('@all -Saturn go')[0], x.route('@VENUS hi')[0],"
+            " x.route('@all -Venus go')[0])")
     r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=30)
     check("chat box routing (@seat, several, @all, unknown, no @ = all, not emails, -seat drops)",
           r.stdout.strip() == "['grok'] ['claude', 'grok'] ['all'] True True True "
           "['all', '-grok'] ['claude', 'grok', '-claude'] ['all', '-grok'] True "
-          "-grok leaves nobody to send to", r.stdout + r.stderr)
+          "-grok leaves nobody to send to ['codex'] ['all', '-codex'] ['devin'] ['all', '-devin']", r.stdout + r.stderr)
     run(["send", "claude", "for claude"], "grok")
     r = run(["hook", "--source", "claude", "--event", "UserPromptSubmit"], "claude", '{"prompt": "hi"}')
     check("Claude gets notes with the owner's prompt", "for claude" in r.stdout, r.stdout + r.stderr)
@@ -8021,7 +8036,7 @@ def self_test():
         "assert len(deck) == 1, deck",
         "text = deck[0]['text']",
         "assert 'Alice' in text and 'not set up' in text, text",
-        "assert 'Vibe' in text and 'Devin' in text, text",
+        "assert 'Vibe' in text and 'Venus' in text, text",
         "assert 'Codex' not in text and 'Mystra' not in text, text",
         "assert not glob.glob(str(x.DATA / 'inbox' / 'claude' / '*.json')),"
         " 'a seat online since the seed pass is not greeted'",
@@ -9143,7 +9158,7 @@ def main():
         seat = args.sender or find_agent()[0]
         if not seat:
             sys.exit("comms-deck: can't tell which seat you are; use --from <seat>")
-        return seat
+        return seat_id(seat)
 
     try:
         if args.cmd == "send":
