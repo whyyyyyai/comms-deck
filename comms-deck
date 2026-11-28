@@ -340,7 +340,12 @@ def append_log(record):
 # subagents.json, which the warp core draws as bodies orbiting that seat.
 SUBAGENT_EXPIRE = 30 * 60   # an entry with no Stop for this long is dropped
 SUBAGENT_MAX = 16           # per seat
-_KIND_RE = re.compile(r"[^A-Za-z0-9_-]")
+# Kinds shown on an orbital. Anything else is just "subagent": a free-form
+# type name could carry text an agent wrote (Codex's review), so only these
+# known labels pass.
+SUBAGENT_KINDS = {k.lower(): k for k in (
+    "Explore", "Plan", "general-purpose", "statusline-setup", "claude-code-guide", "web-fetch",
+    "review", "test", "build", "research", "fork", "claude", "codex", "devin", "vibe", "grok", "subagent")}
 
 
 def subagent_entry(seat, data, now):
@@ -352,10 +357,23 @@ def subagent_entry(seat, data, now):
     if not raw_id or seat not in AGENTS:
         return None
     kind = str(data.get("agent_type") or data.get("subagent_type") or data.get("subagentType") or "subagent")
-    kind = _KIND_RE.sub("", kind)[:24] or "subagent"
-    # The id is hashed: it orders and matches orbitals, and says nothing else.
-    sid = hashlib.sha256(f"{seat}:{raw_id}".encode()).hexdigest()[:12]
-    return {"id": sid, "parent": seat, "kind": kind, "active": True, "since": now}
+    kind = SUBAGENT_KINDS.get(kind.strip().lower(), "subagent")
+    session = session_key(data)
+    # Hashed: it orders and matches orbitals and says nothing else. Seat and
+    # session are in it, so another session can't stop this one's orbital.
+    sid = hashlib.sha256(f"{seat}:{session}:{raw_id}".encode()).hexdigest()[:12]
+    entry = {"id": sid, "parent": seat, "session": session, "kind": kind, "active": True, "since": now}
+    task = str(data.get("task") or "")
+    if re.fullmatch(r"t\d{1,6}", task) and (DATA / "tasks" / f"{task}.json").exists():
+        entry["task"] = task  # only a task on the board
+    return entry
+
+
+def session_key(data):
+    """A short hash of the hook's session (or the calling process), so a
+    stale Stop or a second terminal can't touch another session's orbitals."""
+    raw = str(data.get("session_id") or data.get("sessionId") or data.get("orbital_session") or "")
+    return hashlib.sha256(raw.encode()).hexdigest()[:8] if raw else "-"
 
 
 def record_subagent(seat, event, data, now=None):
@@ -371,7 +389,9 @@ def record_subagent(seat, event, data, now=None):
         items = (read_json(path, {}) or {}).get("subagents") or []
         items = [i for i in items if isinstance(i, dict) and now - float(i.get("since") or 0) < SUBAGENT_EXPIRE]
         if event == "SessionEnd":
-            items = [i for i in items if i.get("parent") != seat]
+            session = session_key(data)
+            # This session's orbitals only; with no session named, the seat's.
+            items = [i for i in items if not (i.get("parent") == seat and (session == "-" or i.get("session") == session))]
         elif event == "SubagentStart":
             items = [i for i in items if i.get("id") != entry["id"]] + [entry]
             mine = [i for i in items if i.get("parent") == seat]
@@ -380,6 +400,27 @@ def record_subagent(seat, event, data, now=None):
         elif event == "SubagentStop":
             items = [i for i in items if i.get("id") != entry["id"]]
         write_json(path, {"time": now, "subagents": items})
+
+
+def orbital_cli(action, oid, kind, task, seat=None):
+    """`comms-deck orbital start|stop`: an agent that launches helpers itself
+    (a terminal, a CLI call; Y, t103) puts them on the warp core. The parent
+    is the seat whose agent is calling, never one named on the command line.
+    Start prints the id to stop it with."""
+    seat = seat or find_agent()[0]
+    if seat not in AGENTS:
+        return json.dumps({"ok": False, "reason": "not run from a seat's agent"})
+    session = f"cli:{seat}"
+    if action == "start":
+        raw = secrets.token_hex(6)
+        data = {"agent_id": raw, "agent_type": kind, "task": task, "orbital_session": session}
+        record_subagent(seat, "SubagentStart", data)
+        entry = subagent_entry(seat, data, 0) or {}
+        return json.dumps({"ok": True, "id": raw, "orbital": entry.get("id"), "parent": seat, "task": entry.get("task")})
+    if not oid:
+        return json.dumps({"ok": False, "reason": "orbital stop needs the id start printed"})
+    record_subagent(seat, "SubagentStop", {"agent_id": oid, "orbital_session": session})
+    return json.dumps({"ok": True, "stopped": oid})
 
 
 def notify(title, body):
@@ -1203,7 +1244,7 @@ def hook(source, event):
         update_seat(seat, state="idle")
     elif event == "SessionEnd":
         update_seat(seat, state="away")
-        record_subagent(seat, "SessionEnd", {})  # its subagents end with it
+        record_subagent(seat, "SessionEnd", data)  # this session's subagents end with it
 
 
 def owner_waiting(seat):
@@ -8323,7 +8364,7 @@ def self_test():
         "sub = x.read_json(x.DATA / 'subagents.json', {})['subagents']",
         "assert len(sub) == 1 and sub[0]['parent'] == 'claude' and sub[0]['kind'] == 'Explore' and sub[0]['active']",
         "assert 'SECRET' not in (x.DATA / 'subagents.json').read_text() and sub[0]['id'] != 'a1' and len(sub[0]['id']) == 12 and int(sub[0]['id'], 16) >= 0",
-        "assert set(sub[0]) == {'id', 'parent', 'kind', 'active', 'since'}",
+        "assert set(sub[0]) == {'id', 'parent', 'session', 'kind', 'active', 'since'}",
         "x.record_subagent('claude', 'SubagentStart', {'agent_id': 'a2', 'agent_type': '<script>alert(1)</script>long-long-long-kind'}, now=1001.0)",
         "kinds = [i['kind'] for i in x.read_json(x.DATA / 'subagents.json', {})['subagents']]",
         "assert all(k.replace('-', '').replace('_', '').isalnum() and len(k) <= 24 for k in kinds), kinds",
@@ -8339,6 +8380,24 @@ def self_test():
         "x.record_subagent('grok', 'SessionEnd', {}, now=5100.0)",
         "assert not any(i['parent'] == 'grok' for i in x.read_json(x.DATA / 'subagents.json', {})['subagents'])",
         "assert 'SubagentStart' in x.claude_hooks('comms-deck') and 'SubagentStop' in x.DEVIN_HOOK_EVENTS",
+        # Codex's review: kinds are an allowlist; sessions are kept apart.
+        "x.record_subagent('vibe', 'SubagentStart', {'agent_id': 'k', 'agent_type': 'MyPassword1234', 'session_id': 's1'}, now=6000.0)",
+        "assert [i['kind'] for i in x.read_json(x.DATA / 'subagents.json', {})['subagents'] if i['parent'] == 'vibe'] == ['subagent']",
+        "x.record_subagent('vibe', 'SubagentStart', {'agent_id': 'k', 'agent_type': 'explore', 'session_id': 's2'}, now=6001.0)",
+        "x.record_subagent('vibe', 'SubagentStop', {'agent_id': 'k', 'session_id': 's2'}, now=6002.0)",
+        "assert [i['kind'] for i in x.read_json(x.DATA / 'subagents.json', {})['subagents'] if i['parent'] == 'vibe'] == ['subagent'], 'a Stop in s2 leaves s1 alone'",
+        "x.record_subagent('vibe', 'SessionEnd', {'session_id': 's2'}, now=6003.0)",
+        "assert any(i['parent'] == 'vibe' for i in x.read_json(x.DATA / 'subagents.json', {})['subagents']), 'SessionEnd of s2 leaves s1'",
+        "assert (x.DATA / 'subagents.json').stat().st_mode & 0o077 == 0, 'subagents.json is private (0600)'",
+        # t103: orbitals from a terminal or script, the parent being the calling seat.
+        "x.write_json(x.DATA / 'tasks' / 't7.json', {'id': 't7', 'state': 'held'})",
+        "out = x.json.loads(x.orbital_cli('start', '', 'research', 't7', seat='codex'))",
+        "row = [i for i in x.read_json(x.DATA / 'subagents.json', {})['subagents'] if i['id'] == out['orbital']]",
+        "assert out['ok'] and out['parent'] == 'codex' and row and row[0]['task'] == 't7' and row[0]['kind'] == 'research'",
+        "assert 'task' not in x.subagent_entry('codex', {'agent_id': 'q', 'task': 't99999'}, 0), 'only a task on the board'",
+        "x.orbital_cli('stop', out['id'], '', '', seat='codex')",
+        "assert not any(i['id'] == out['orbital'] for i in x.read_json(x.DATA / 'subagents.json', {})['subagents'])",
+        "assert not x.json.loads(x.orbital_cli('start', '', 'x', '', seat='nobody'))['ok']",
         "assert x.task_summary('<system-reminder> fixing the chat layout now', []) == 'fixing the chat layout now'",
         "assert x.task_summary('<system-reminder>', [('p', {'text': 'merge the PR', 'private': False})]) == 'merge the PR'",
         "assert x.describe('<system-reminder>\\nhook text\\n</system-reminder>\\nreview PR 36') == 'review PR 36'",
@@ -9161,6 +9220,11 @@ def main():
     p = sub.add_parser("wake", help="one wake attempt for a seat (for watchdogs)")
     p.add_argument("seat")
     p.add_argument("--stale", action="store_true", help="treat a long-unchanged busy seat as idle")
+    p = sub.add_parser("orbital", help="start or stop a subagent orbital from a terminal or script (t103)")
+    p.add_argument("action", choices=["start", "stop"])
+    p.add_argument("id", nargs="?", default="")
+    p.add_argument("--kind", default="subagent")
+    p.add_argument("--task", default="")
     p = sub.add_parser("settle", help="match seats' busy/idle to what their windows show (for watchdogs)")
     p.add_argument("seats", nargs="*")
     p = sub.add_parser("spent", help="mark a seat spent until its limit resets (for agents with no meter)")
@@ -9237,6 +9301,8 @@ def main():
                 statusline(args.source)
             except Exception as error:  # a status line must never break the agent
                 print(f"comms-deck: {error}")
+        elif args.cmd == "orbital":
+            print(orbital_cli(args.action, args.id, args.kind, args.task))
         elif args.cmd == "settle":
             print(json.dumps({"screen_turns": list(SCREEN_TURNS), "changed": settle_seats([x.lower() for x in args.seats] or None)}))
         elif args.cmd == "install":
