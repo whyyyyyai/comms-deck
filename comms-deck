@@ -426,6 +426,31 @@ def orbital_cli(action, oid, kind, task, seat=None):
     return json.dumps({"ok": True, "stopped": oid})
 
 
+def orbital_run(cmd, kind="subagent", task="", seat=None):
+    """`comms-deck orbital run -- CMD`: an orbital that lives exactly as long
+    as a piece of work (Y, t103/t108: "created dynamically for a task and
+    then terminated once their task is complete"). Starts the orbital, runs
+    CMD with the terminal's input and output, and stops the orbital when CMD
+    ends, however it ends. Returns CMD's exit code."""
+    if not cmd:
+        print(json.dumps({"ok": False, "reason": "orbital run needs a command after --"}), file=sys.stderr)
+        return 2
+    started = json.loads(orbital_cli("start", "", kind, task, seat=seat))
+    if not started.get("ok"):
+        print(json.dumps(started), file=sys.stderr)
+        return 2
+    code = 1
+    try:
+        code = subprocess.run(cmd).returncode
+    except FileNotFoundError:
+        code = 127
+    except KeyboardInterrupt:
+        code = 130
+    finally:
+        orbital_cli("stop", started["id"], "", "", seat=seat)
+    return code
+
+
 def notify(title, body):
     """Show a desktop notification. Never fails. Off under the self-test."""
     if setting("NO_NOTIFY"):
@@ -8403,6 +8428,18 @@ def self_test():
         "assert not any(i['id'] == out['orbital'] for i in x.read_json(x.DATA / 'subagents.json', {})['subagents'])",
         "assert not x.json.loads(x.orbital_cli('start', '', 'x', '', seat='nobody'))['ok']",
         # Vibe's review: $COMMS_DECK_SEAT can't claim a seat for an orbital.
+        # t108: orbital run lives exactly as long as its command, whatever its exit.
+        "n_before = len(x.read_json(x.DATA / 'subagents.json', {})['subagents'])",
+        "seen = []",
+        "real_run = x.subprocess.run",
+        "x.subprocess.run = lambda cmd, **k: (seen.append(len(x.read_json(x.DATA / 'subagents.json', {})['subagents'])), real_run(cmd, **k))[1]",
+        "assert x.orbital_run(['true'], 'research', '', seat='devin') == 0",
+        "assert x.orbital_run(['false'], 'research', '', seat='devin') == 1",
+        "assert x.orbital_run(['no-such-program-xyz'], 'research', '', seat='devin') == 127",
+        "x.subprocess.run = real_run",
+        "assert seen == [n_before + 1] * 3, seen",
+        "assert len(x.read_json(x.DATA / 'subagents.json', {})['subagents']) == n_before, 'stopped after success, failure and a missing program'",
+        "assert x.orbital_run([], 'x', '', seat='devin') == 2",
         "real_name = x.proc_name; x.proc_name = lambda pid: 'bash'",  # a caller under no agent
         "x.os.environ['COMMS_DECK_SEAT'] = 'claude'",
         "assert x.find_agent()[0] == 'claude' and x.find_agent(trust_env=False)[0] is None",
@@ -9231,10 +9268,11 @@ def main():
     p.add_argument("seat")
     p.add_argument("--stale", action="store_true", help="treat a long-unchanged busy seat as idle")
     p = sub.add_parser("orbital", help="start or stop a subagent orbital from a terminal or script (t103)")
-    p.add_argument("action", choices=["start", "stop"])
+    p.add_argument("action", choices=["start", "stop", "run"])
     p.add_argument("id", nargs="?", default="")
     p.add_argument("--kind", default="subagent")
     p.add_argument("--task", default="")
+    p.add_argument("command", nargs="*", help="run: the command after --")
     p = sub.add_parser("settle", help="match seats' busy/idle to what their windows show (for watchdogs)")
     p.add_argument("seats", nargs="*")
     p = sub.add_parser("spent", help="mark a seat spent until its limit resets (for agents with no meter)")
@@ -9312,6 +9350,9 @@ def main():
             except Exception as error:  # a status line must never break the agent
                 print(f"comms-deck: {error}")
         elif args.cmd == "orbital":
+            if args.action == "run":
+                cmd = [c for c in ([args.id] if args.id else []) + args.command if c != "--"]
+                sys.exit(orbital_run(cmd, args.kind, args.task))
             print(orbital_cli(args.action, args.id, args.kind, args.task))
         elif args.cmd == "settle":
             print(json.dumps({"screen_turns": list(SCREEN_TURNS), "changed": settle_seats([x.lower() for x in args.seats] or None)}))
