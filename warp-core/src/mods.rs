@@ -590,10 +590,34 @@ pub struct SubagentsCfg {
     pub size: f32,
     pub bright: f32,
     pub max: usize,
+    /// Standing orbitals circle the core on their own ellipses (t106):
+    /// the innermost semi-major axis and the step each further one takes,
+    /// as shares of the scene's short side.
+    pub ellipse_in: f32,
+    pub ellipse_step: f32,
+    /// Semi-minor / semi-major.
+    pub ellipse_flat: f32,
+    pub ellipse_speed: f32,
+    /// A stopped orbital's brightness, as a share of `bright` (the dim
+    /// idle cue on a standing ellipse).
+    pub idle: f32,
 }
 impl Default for SubagentsCfg {
     fn default() -> Self {
-        SubagentsCfg { show: true, speed: 1.6, radius: 34.0, spacing: 7.0, size: 2.0, bright: 1.2, max: 8 }
+        SubagentsCfg {
+            show: true,
+            speed: 1.6,
+            radius: 34.0,
+            spacing: 7.0,
+            size: 2.0,
+            bright: 1.2,
+            max: 8,
+            ellipse_in: 0.14,
+            ellipse_step: 0.035,
+            ellipse_flat: 0.7,
+            ellipse_speed: 0.22,
+            idle: 0.35,
+        }
     }
 }
 

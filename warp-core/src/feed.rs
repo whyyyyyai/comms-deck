@@ -109,6 +109,27 @@ pub struct TaskInfo {
     pub open: bool,
 }
 
+/// How long a subagent orbital lives (t106): a `task` one ends with its
+/// task, a `resumable` one can be picked up again, a `standing` one keeps
+/// a permanent elliptical orbit around the core.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SubagentLife {
+    #[default]
+    Task,
+    Resumable,
+    Standing,
+}
+
+impl SubagentLife {
+    fn parse(s: &str) -> Self {
+        match s {
+            "resumable" | "persistent" => Self::Resumable,
+            "standing" | "perpetual" => Self::Standing,
+            _ => Self::Task,
+        }
+    }
+}
+
 /// A subagent an agent says it spawned (t30), from comms-deck's hooks.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SubagentInfo {
@@ -117,6 +138,8 @@ pub struct SubagentInfo {
     pub kind: String,
     pub active: bool,
     pub since: f64,
+    /// `task`, `resumable` or `standing` (t106); task when the file predates it.
+    pub lifetime: SubagentLife,
 }
 
 pub enum Msg {
@@ -412,6 +435,7 @@ fn parse_subagent(v: &Value) -> Option<SubagentInfo> {
         kind: v.get("kind").or_else(|| v.get("type")).and_then(Value::as_str).unwrap_or("").to_string(),
         active,
         since: v.get("since").or_else(|| v.get("time")).or_else(|| v.get("last")).and_then(Value::as_f64).unwrap_or(0.0),
+        lifetime: SubagentLife::parse(v.get("lifetime").and_then(Value::as_str).unwrap_or("task")),
     })
 }
 
@@ -786,6 +810,23 @@ mod tests {
         let claude = got.iter().find(|s| s.parent == "claude").expect("claude's subagent");
         assert!(!claude.active);
         assert!(parse_subagents(&json!({"subagents": {"a": {"id": "a", "parent": "vibe"}}})).len() == 1);
+    }
+
+    #[test]
+    fn subagent_lifetimes_parse_with_task_as_default() {
+        let v = json!({"subagents": [
+            {"id": "a", "parent": "claude", "state": "busy"},
+            {"id": "b", "parent": "claude", "state": "busy", "lifetime": "resumable"},
+            {"id": "c", "parent": "codex", "state": "stopped", "lifetime": "standing"},
+            {"id": "d", "parent": "codex", "state": "busy", "lifetime": "perpetual"}
+        ]});
+        let got = parse_subagents(&v);
+        let life = |id: &str| got.iter().find(|s| s.id == id).map(|s| s.lifetime);
+        assert_eq!(life("a"), Some(SubagentLife::Task), "no lifetime: task");
+        assert_eq!(life("b"), Some(SubagentLife::Resumable));
+        assert_eq!(life("c"), Some(SubagentLife::Standing));
+        assert!(!got.iter().find(|s| s.id == "c").unwrap().active, "stopped is inactive");
+        assert_eq!(life("d"), Some(SubagentLife::Standing), "Y's word for it parses too");
     }
 
     #[test]

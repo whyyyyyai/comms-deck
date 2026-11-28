@@ -143,6 +143,14 @@ spacing = 7
 size = 2.0
 bright = 1.2
 max = 8
+# t106: standing orbitals (and parked resumable ones) circle the core on
+# their own ellipses. ellipse_in/ellipse_step are shares of the scene's
+# short side; ellipse_flat is semi-minor / semi-major.
+ellipse_in = 0.14
+ellipse_step = 0.035
+ellipse_flat = 0.7
+ellipse_speed = 0.22
+idle = 0.35                   # a stopped orbital's brightness, share of bright
 
 [hud]
 show = true

@@ -57,7 +57,7 @@ use bevy::{
     sprite_render::{AlphaMode2d, Material2d, Material2dPlugin},
     winit::{UpdateMode, WinitSettings},
 };
-use feed::{Activity, ChatNote, Msg, Notice, NoteInfo, SeatInfo, SubagentInfo, TaskInfo};
+use feed::{Activity, ChatNote, Msg, Notice, NoteInfo, SeatInfo, SubagentInfo, SubagentLife, TaskInfo};
 use mods::{Config, Rule, Val};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{mpsc, Mutex};
@@ -2654,6 +2654,7 @@ fn draw_moons_and_marks(
     mods: Res<Mods>,
     view: Res<View>,
     looks: Res<Looks>,
+    layout: Res<Layout>,
     time: Res<Time>,
     nodes: Query<(&SeatNode, &Transform)>,
     mut gizmos: Gizmos,
@@ -2661,6 +2662,9 @@ fn draw_moons_and_marks(
     let t = time.elapsed_secs();
     let mc = &mods.cfg.moons;
     let sc = &mods.cfg.subagents;
+    // Standing orbitals, and resumable ones parked stopped, keep their own
+    // ellipses around the core (t106); drawn after the seat loop.
+    let mut ellipse: Vec<(&str, &SubagentInfo)> = Vec::new();
     let positions: HashMap<&str, (Vec2, f32)> =
         nodes.iter().map(|(n, tf)| (n.name.as_str(), (tf.translation.truncate(), tf.scale.x))).collect();
     for (node, tf) in &nodes {
@@ -2684,9 +2688,20 @@ fn draw_moons_and_marks(
         }
         if sc.show && view.moons {
             let mut subs: Vec<&SubagentInfo> =
-                deck.subagents.iter().filter(|s| s.parent == node.name && s.active).collect();
+                deck.subagents.iter().filter(|s| s.parent == node.name).collect();
             subs.sort_by(|a, b| a.id.cmp(&b.id));
-            for (i, sub) in subs.iter().take(sc.max).enumerate() {
+            let mut moons: Vec<&SubagentInfo> = Vec::new();
+            for sub in subs {
+                // Standing orbitals always circle the core; a resumable one
+                // joins them only while stopped. Task orbitals end with
+                // their task, so a stopped one is gone.
+                if sub.lifetime == SubagentLife::Standing || (!sub.active && sub.lifetime == SubagentLife::Resumable) {
+                    ellipse.push((node.name.as_str(), sub));
+                } else if sub.active {
+                    moons.push(sub);
+                }
+            }
+            for (i, sub) in moons.iter().take(sc.max).enumerate() {
                 let band = i / 8;
                 let r = (sc.radius + band as f32 * sc.spacing + (i % 8) as f32 * 2.0) * s;
                 let phase = (task_key(&sub.id) % 4096) as f32 / 4096.0 * std::f32::consts::TAU;
@@ -2703,6 +2718,22 @@ fn draw_moons_and_marks(
                 Vec2::splat(9.0 * s),
                 lin(c, (1.0 + 3.0 * k) * dim),
             );
+        }
+    }
+    // The core's own orbitals: each standing (or parked resumable) one gets
+    // a distinct ellipse around the singularity, dimmed while stopped.
+    if sc.show && view.moons && !ellipse.is_empty() {
+        ellipse.sort_by(|a, b| a.1.id.cmp(&b.1.id));
+        let short = layout.scene.x.min(layout.scene.y).max(1.0);
+        for (i, &(parent, sub)) in ellipse.iter().take(sc.max).enumerate() {
+            let a = short * (sc.ellipse_in + i as f32 * sc.ellipse_step);
+            let b = a * sc.ellipse_flat;
+            let phase = (task_key(&sub.id) % 4096) as f32 / 4096.0 * std::f32::consts::TAU;
+            let ang = t * sc.ellipse_speed * if i % 2 == 0 { 1.0 } else { -0.7 } + phase;
+            let q = Vec2::new(ang.cos() * a, ang.sin() * b);
+            let dim = if deck.focus.as_ref().is_some_and(|f| *f != parent) { 0.25 } else { 1.0 };
+            let bright = sc.bright * dim * if sub.active { 1.0 } else { sc.idle };
+            gizmos.circle_2d(Isometry2d::from_translation(q), sc.size, seat_colour(parent, bright));
         }
     }
     deck.shocks.retain(|sh| t - sh.at < 1.2);
