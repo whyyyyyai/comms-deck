@@ -1,0 +1,16 @@
+# The warp core's price feed (Y, t121/t122): SOL and XRP spot prices every
+# 30 s into ~/.local/state/warp-core/prices.json, for the core ticker's
+# price-action flicker. No AI. Installed by install.sh.
+# Written by: claude
+[Unit]
+Description=warp-core price feed (SOL/XRP for the core ticker)
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/lib/warp-core/pricefeed
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target

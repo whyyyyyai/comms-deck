@@ -553,6 +553,47 @@ def update_seat(seat, **changes):
         return state
 
 
+def subagents_file():
+    return DATA / "subagents.json"
+
+
+def record_subagent(seat, event, data):
+    """t30: an agent's own subagents, for warp-core's orbit moons."""
+    agent_id = str(data.get("agent_id") or data.get("agentId") or data.get("subagent_id")
+                   or data.get("id") or data.get("agent_type") or data.get("agentType") or "subagent").strip()
+    kind = str(data.get("agent_type") or data.get("agentType") or data.get("subagentType") or "").strip()
+    state = "busy" if event == "SubagentStart" else "done"
+    now = time.time()
+    path = subagents_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(DATA / "subagents.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        doc = read_json(path, {}) or {}
+        subs = doc.get("subagents") if isinstance(doc.get("subagents"), dict) else {}
+        key = f"{seat}/{agent_id}"
+        rec = subs.get(key) if isinstance(subs.get(key), dict) else {}
+        rec.update({"id": agent_id, "parent": seat, "kind": kind or rec.get("kind") or "", "state": state,
+                    "since": rec.get("since") or now, "last": now,
+                    "until": now + (7200 if state == "busy" else 300)})
+        subs[key] = rec
+        subs = {k: v for k, v in subs.items()
+                if isinstance(v, dict) and float(v.get("until") or 0) > now}
+        write_json(path, {"subagents": subs})
+
+
+def clear_subagents(seat):
+    path = subagents_file()
+    if not path.exists():
+        return
+    with open(DATA / "subagents.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        doc = read_json(path, {}) or {}
+        subs = doc.get("subagents") if isinstance(doc.get("subagents"), dict) else {}
+        subs = {k: v for k, v in subs.items()
+                if not (isinstance(v, dict) and v.get("parent") == seat)}
+        write_json(path, {"subagents": subs})
+
+
 def describe(text, limit=70):
     """A few words for the activity log: what started this turn.
 
@@ -1062,6 +1103,11 @@ def hook(source, event):
     except ValueError:
         data = {}
     event = event or data.get("hook_event_name") or ""
+    if event in ("SubagentStart", "SubagentStop"):
+        seat, _pid = find_agent()
+        if seat in AGENTS:
+            record_subagent(seat, event, data)
+        return
     if data.get("subagentType"):
         return
     seat, pid = find_agent()
@@ -1149,6 +1195,7 @@ def hook(source, event):
         update_seat(seat, state="idle")
     elif event == "SessionEnd":
         update_seat(seat, state="away")
+        clear_subagents(seat)
 
 
 def owner_waiting(seat):
