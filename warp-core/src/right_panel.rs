@@ -335,3 +335,114 @@ mod tests {
         assert_eq!(right_width(2240.0, &mods::ChatCfg { show: false, ..cfg }), 0.0);
     }
 }
+
+// ---------------------------------------------------------------- oracle
+// The price panel (Y, 2026-11-28: "a crypto panel in the bottom right
+// corner ... call an oracle to give a live price as close to frame accurate
+// as possible ... close to the metal"). ~/oracle (Rust, no AI) streams Pyth
+// (Solana push oracle) and Binance trades into /dev/shm/oracle.json, a RAM
+// file; this reads it every frame, so what's shown is never older than one
+// frame plus the feed itself.
+
+#[derive(Component)]
+pub struct OraclePanel;
+
+/// Seconds or milliseconds, short.
+fn age(ms: i64) -> String {
+    let ms = ms.max(0);
+    if ms < 1000 { format!("{ms}ms") } else if ms < 60_000 { format!("{:.1}s", ms as f64 / 1000.0) } else { format!("{}m", ms / 60_000) }
+}
+
+/// The panel's lines from oracle.json at `now_ms`. Pure: tested.
+pub fn oracle_lines(v: &serde_json::Value, now_ms: i64) -> Vec<(String, [f32; 3])> {
+    let dim = [0.5, 0.58, 0.72];
+    let mut out = vec![("ORACLE  binance | pyth".to_string(), dim)];
+    let written = v["time_ms"].as_i64().unwrap_or(0);
+    for sym in ["SOL", "XRP"] {
+        let b = &v[sym]["binance"];
+        let p = &v[sym]["pyth"];
+        let digits = if sym == "XRP" { 4 } else { 2 };
+        let main = b["price"].as_f64().map(|x| format!("{x:.digits$}")).unwrap_or_else(|| "-".into());
+        let pyth = match (p["price"].as_f64(), p["conf"].as_f64()) {
+            (Some(x), Some(c)) => format!("{x:.digits$} +-{c:.digits$} {}", age(now_ms - p["publish_ms"].as_i64().unwrap_or(now_ms))),
+            _ => "no live feed".into(),
+        };
+        // The spread between the exchange and the oracle, a quiet tell.
+        let colour = match (b["price"].as_f64(), p["price"].as_f64()) {
+            (Some(x), Some(y)) if x > y => [0.55, 1.0, 0.6],
+            (Some(x), Some(y)) if x < y => [1.0, 0.5, 0.45],
+            _ => [0.82, 0.86, 0.94],
+        };
+        out.push((format!("{sym}  {main:<10} {pyth}"), colour));
+    }
+    let stale = now_ms - written;
+    if written == 0 || stale > 5_000 {
+        out.push((format!("feed silent {}", if written == 0 { "(no data)".into() } else { age(stale) }), [1.0, 0.6, 0.3]));
+    }
+    out
+}
+
+#[allow(clippy::type_complexity)]
+pub fn oracle_panel(
+    mut commands: Commands,
+    layout: Res<Layout>,
+    mods: Res<Mods>,
+    mut panel: Query<(Entity, &mut Transform, &mut Visibility), With<OraclePanel>>,
+    mut state: Local<(bool, String)>,
+) {
+    let font = mods.cfg.chat.font;
+    if !state.0 {
+        commands.spawn((
+            OraclePanel,
+            Text2d::new(""),
+            TextFont { font_size: FontSize::Px(font), ..default() },
+            TextColor(Color::srgb(0.82, 0.86, 0.94)),
+            Anchor::BOTTOM_LEFT,
+            Transform::from_xyz(0.0, 0.0, 11.0),
+            Visibility::Hidden,
+        ));
+        state.0 = true;
+        return;
+    }
+    let show = layout.right > 0.0;
+    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+    // Every frame: a ~600 byte read from RAM (/dev/shm).
+    let raw = std::fs::read_to_string("/dev/shm/oracle.json").unwrap_or_default();
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+    let lines = oracle_lines(&v, now_ms);
+    let key: String = lines.iter().map(|l| l.0.as_str()).collect::<Vec<_>>().join("\n");
+    let h = layout.half();
+    let bottom = h.y - (layout.scene.y + layout.panel);
+    for (e, mut tf, mut vis) in &mut panel {
+        *vis = if show { Visibility::Inherited } else { Visibility::Hidden };
+        tf.translation = Vec3::new(h.x + 14.0, bottom + 14.0, 11.0);
+        if key != state.1 {
+            commands.entity(e).despawn_related::<Children>();
+            commands.entity(e).with_children(|p| {
+                for (text, c) in &lines {
+                    p.spawn((TextSpan::new(format!("{text}\n")), TextColor(Color::srgb(c[0], c[1], c[2])), TextFont { font_size: FontSize::Px(font), ..default() }));
+                }
+            });
+        }
+    }
+    state.1 = key;
+}
+
+#[cfg(test)]
+mod oracle_tests {
+    use super::*;
+
+    #[test]
+    fn oracle_lines_show_both_sources_and_flag_silence() {
+        let v = serde_json::json!({"time_ms": 1000,
+            "SOL": {"pyth": {"price": 71.17, "conf": 0.025, "publish_ms": 400}, "binance": {"price": 71.24}},
+            "XRP": {"pyth": null, "binance": {"price": 0.9449}}});
+        let l = oracle_lines(&v, 1200);
+        assert!(l[1].0.starts_with("SOL  71.24") && l[1].0.contains("71.17 +-0.03 800ms"), "{:?}", l[1]);
+        assert_eq!(l[1].1, [0.55, 1.0, 0.6]); // exchange above oracle: green
+        assert!(l[2].0.starts_with("XRP  0.9449") && l[2].0.contains("no live feed"));
+        assert_eq!(l.len(), 3, "fresh: no warning");
+        assert!(oracle_lines(&v, 9000).last().unwrap().0.starts_with("feed silent 8.0s"));
+        assert!(oracle_lines(&serde_json::Value::Null, 0).last().unwrap().0.contains("no data"));
+    }
+}
