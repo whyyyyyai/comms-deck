@@ -110,6 +110,7 @@ decay = 0.22                  # warp lost per second
 on_broadcast = 1.0            # warp a note to `all` kicks in (0 turns it off)
 per_note = 0.15               # every note adds this too: more notes, further warp (t88)
 max = 3.0                     # warp stacks up to this
+moire_s = 1.5                 # seconds of moire interference on the core after warp ends (t138)
 
 [seats]
 size = 1.0
