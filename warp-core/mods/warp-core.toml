@@ -96,9 +96,10 @@ seconds = 1.8
 trail = 28
 brightness = 5
 size = 1.0
-# style = "laser" fires each note as a bolt: a lance of light behind the
-# head instead of the comet's fading tail (Y, t138).
-style = "trail"
+# trail = existing missile trail, laser = every packet is a bolt, mixed =
+# a deterministic per-packet sample of laser_probability (Y, t144).
+style = "mixed"
+laser_probability = 0.15       # fraction of packets fired as bolts in mixed mode
 laser_len = 90                 # how far back the lance reaches
 laser_width = 5                # the lance's thickness
 

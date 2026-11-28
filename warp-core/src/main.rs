@@ -1540,6 +1540,40 @@ fn note_look(rules: &[Rule], cfg: &Config, n: &NoteInfo) -> NoteLook {
     look
 }
 
+/// Select a laser consistently for a packet, so redraws and feed replay do
+/// not change its path. A recipient disambiguates the packets in broadcasts.
+fn packet_is_laser(cfg: &mods::CometsCfg, note: &NoteInfo, to: &str, now: f32) -> bool {
+    if cfg.style == "laser" {
+        return true;
+    }
+    if cfg.style != "mixed" || !cfg.laser_probability.is_finite() {
+        return false;
+    }
+    let probability = cfg.laser_probability.clamp(0.0, 1.0);
+    if probability <= 0.0 {
+        return false;
+    }
+    if probability >= 1.0 {
+        return true;
+    }
+
+    // FNV-1a is enough here: this is a repeatable visual choice, not a
+    // security boundary. Delimit fields to avoid ambiguous concatenations.
+    let mut hash = 0xcbf29ce484222325_u64;
+    for field in [note.id.as_str(), note.from.as_str(), to] {
+        for byte in field.bytes().chain(std::iter::once(0)) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    if note.id.is_empty() {
+        hash ^= u64::from(now.to_bits());
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    let roll = (hash >> 40) as f32 / 16_777_216.0;
+    roll < probability
+}
+
 // ---------------------------------------------------------------- setup
 
 fn setup(
@@ -2978,7 +3012,7 @@ fn fly_comets(
                     0.0 => 1.0,
                     s => s,
                 };
-                let laser = mods.cfg.comets.style == "laser";
+                let laser = packet_is_laser(&mods.cfg.comets, &note, &to, now_k);
                 // Laser packets relay through the iris: the quadratic's
                 // midpoint lands on the core, so every message flashes
                 // into Sol before it reaches its agent (Y, t138). The
