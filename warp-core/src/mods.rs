@@ -25,6 +25,7 @@ pub const DEFAULT_CONFIG: &str = include_str!("../mods/warp-core.toml");
 pub const DEFAULT_CORE_SHADER: &str = include_str!("../mods/shaders/core.wgsl");
 pub const DEFAULT_RING_SHADER: &str = include_str!("../mods/shaders/ring.wgsl");
 pub const DEFAULT_PLANET_SHADER: &str = include_str!("../mods/shaders/planet.wgsl");
+pub const DEFAULT_WEBCAM_SHADER: &str = include_str!("../mods/shaders/webcam.wgsl");
 
 pub fn mods_dir() -> PathBuf {
     match std::env::var("WARP_CORE_MODS") {
@@ -511,6 +512,24 @@ impl Default for ChartCfg {
     }
 }
 
+/// The webcam feed pinned to the top-left of the scene (Y, t156), fed by
+/// `webcam-feed` (~/.local/state/warp-core/webcam/frame.rgba + frame.json).
+/// Nothing shows until the first frame lands.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WebcamCfg {
+    pub show: bool,
+    /// On-screen width in world units; the height follows the frame's aspect.
+    pub width: f32,
+    /// How often the frame file is re-stat'd, seconds.
+    pub poll_s: f32,
+}
+impl Default for WebcamCfg {
+    fn default() -> Self {
+        WebcamCfg { show: true, width: 360.0, poll_s: 0.4 }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CometsCfg {
@@ -737,6 +756,7 @@ pub struct Config {
     pub tasks: TasksCfg,
     pub chat: ChatCfg,
     pub chart: ChartCfg,
+    pub webcam: WebcamCfg,
     pub typing: TypingCfg,
     pub splash: SplashCfg,
     pub conduits: ConduitsCfg,
@@ -1159,6 +1179,7 @@ mod tests {
         check_wgsl(DEFAULT_CORE_SHADER).expect("core.wgsl validates");
         check_wgsl(DEFAULT_RING_SHADER).expect("ring.wgsl validates");
         check_wgsl(DEFAULT_PLANET_SHADER).expect("planet.wgsl validates");
+        check_wgsl(DEFAULT_WEBCAM_SHADER).expect("webcam.wgsl validates");
     }
 
     #[test]
