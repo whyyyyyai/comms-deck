@@ -1,53 +1,74 @@
 #!/usr/bin/env python3
-"""scratchpad-layout: arrange the agents on the scratchpad (Super+S).
+"""scratchpad-layout: each agent on its own desktop, the warp core on the scratchpad.
 
-    +-----------+-----------+-----------------------+
-    |   Grok    | Grok Bot  |         Vibe          |
-    +-----------+-----------+-----------+-----------+
-    |        Claude         | Lumo, Gravity, Devin  |
-    +-----------------------+-----------------------+
+    Super+`  comms   the terminal chat, fullscreen
+    Super+1  claude      Super+5  gravity
+    Super+2  grok        Super+6  lumo
+    Super+3  vibe        Super+7  alice (Grok Bot)
+    Super+4  devin       Super+8  nav deck    Super+9  mail
+    Super+S  the warp core, fullscreen on the scratchpad (special:magic)
 
-The bottom right is shared by whichever of Lumo, Gravity and Devin are
-open, side by side in that order: one open window gets the whole cell.
+(Y, 2026-11-27: "agents on their own displays, Super-1 -2 -3 ..., and put
+the warp core on the scratchpad". Until then the agents shared one grid on
+the scratchpad.)
 
-Finds each window by what runs in it (the kitty holding `grok`, `claude`,
-`agy` or `vibe-rs`, Mistral Vibe's program) or by its app (Grok Bot, Lumo), moves it to
-special:magic without switching you there, floats it, and sets its size and
-place. Windows that aren't open are skipped; a window already in place is
-left alone, so running it again changes nothing.
+Finds each agent's window by what runs in it (the kitty holding `claude`,
+`grok`, `vibe-rs`, `devin` or `agy`) or by its app (Lumo, Grok Bot), and
+moves it, tiled, to its desktop without switching you there. Every window
+of an agent goes there (two Claude sessions share Claude's desktop). Windows
+that aren't open are skipped; a window already in place is left alone, so
+running it again changes nothing.
 
-    scratchpad-layout           arrange once
+The warp core (class warp-core) is kept fullscreen on the scratchpad, and
+the full chat view (class comms-deck-chat) fullscreen on comms: Hyprland
+takes a window out of fullscreen when another opens on its workspace, and
+this puts it back.
+
+    scratchpad-layout           arrange once (everything, hand moves included)
     scratchpad-layout --watch   keep it arranged: at login, and whenever a
                                 window opens, closes, changes workspace or
-                                floating. Also opens the chat views (full on
-                                workspace 1) if it isn't open. The half and
-                                small views are no longer opened here: the
-                                full view covers workspace 1 (the owner,
-                                2026-11-25), and the scratchpad has no room. Run by scratchpad-keeper.service.
+                                floating. Also opens the full chat view if it
+                                isn't open. Run by scratchpad-keeper.service.
     scratchpad-layout --self-test
-                                check the cell maths; does not move windows.
+                                check the plan; does not move windows.
 
-After its first pass, --watch leaves a window that is already floating on
-the scratchpad wherever it is, so a window you drag or resize by hand
-stays put. It places only windows that open, come back to the scratchpad,
-or stop floating. Run scratchpad-layout (no flag) to snap everything back.
-
-The cells meet: the inner gap is 0 and the outer margin stays 22. Hyprland
-still draws a 2px border, rounded corners and a shadow (general:border_size
-2, decoration.rounding 10). noborder is gone in Hyprland 0.57, so this
-script sets border_size 0, rounding 0 and no_shadow on the scratchpad
-windows only, in the same pass that moves them. It does not change the
-global Hyprland config.
+After its first pass, --watch places only windows it hasn't placed before,
+so an agent window you move to another desktop by hand stays there. Run
+scratchpad-layout (no flag) to put everything back.
 
 Written by: Claude (2026-11-24)
 Written by: Alice (2026-11-25)
+Written by: Claude (2026-11-27, desktops per agent)
 """
 import json
 import subprocess
 from pathlib import Path
 
-GAP_OUT, GAP_IN = 22, 0        # outer margin kept; cells meet
-WORKSPACE = "special:magic"
+WORKSPACE = "special:magic"    # the scratchpad (Super+S): the warp core's
+# Desktops are numbered workspaces carrying names (default_name in
+# hyprland.lua), so the bar sorts them by number and shows the name.
+# Super+1..9,0 reach workspaces 2..11; comms (1) is on Super+`.
+DESKS = {"comms": 1, "claude": 2, "grok": 3, "vibe": 4, "devin": 5, "gravity": 6,
+         "lumo": 7, "alice": 8, "nav": 9, "mail": 10, "0": 11}
+CHAT_WORKSPACE = "comms"       # comms-deck's own desktop, Super+`
+
+# (label, desktop, how to find its windows): ("run", program) is a kitty
+# running that program; ("app", class) is an app window.
+AGENT_DESKS = [
+    ("Claude", "claude", ("run", "claude")),
+    ("Grok", "grok", ("run", "grok")),
+    ("Vibe", "vibe", ("run", "vibe-rs")),
+    ("Devin", "devin", ("run", "devin")),
+    ("Gravity", "gravity", ("run", "agy")),
+    ("Lumo", "lumo", ("app", "lumo-desktop")),
+    ("Alice", "alice", ("app", "grok-bot")),
+]
+
+
+def ws_target(name):
+    """The Lua value for a move to desktop `name`: its number for a deck,
+    the quoted name otherwise (special workspaces)."""
+    return str(DESKS[name]) if name in DESKS else f'"{name}"'
 
 
 def hypr(*args):
@@ -58,29 +79,6 @@ def dispatch(expr):
     out = hypr("dispatch", expr).strip()
     if out != "ok":
         raise SystemExit(f"hyprctl refused {expr}: {out}")
-
-
-def set_window_prop(address, prop, value):
-    """Set one Hyprland window property on this window only."""
-    if isinstance(value, bool):
-        # set_prop wants a string, not a Lua boolean (review by Devin on #58).
-        lua_value = '"true"' if value else '"false"'
-    elif isinstance(value, str):
-        lua_value = '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
-    else:
-        lua_value = str(value)
-    dispatch(
-        f'hl.dsp.window.set_prop({{ window = "address:{address}", '
-        f'prop = "{prop}", value = {lua_value} }})'
-    )
-
-
-def strip_cell_chrome(win):
-    """Remove the border, rounding and shadow so neighbouring cells sit flush."""
-    address = win["address"]
-    set_window_prop(address, "border_size", 0)
-    set_window_prop(address, "rounding", 0)
-    set_window_prop(address, "no_shadow", True)
 
 
 def proc_tree():
@@ -97,116 +95,171 @@ def proc_tree():
     return tree
 
 
-def window_holding(clients, tree, program):
-    """The kitty window whose process tree contains `program`."""
+def windows_holding(clients, tree, program):
+    """Every kitty window whose process tree contains `program`."""
     kitties = {c["pid"]: c for c in clients if c["class"] == "kitty"}
+    found = []
     for pid, (_, name) in tree.items():
         if name != program:
             continue
         p = pid
         while p > 1:
             if p in kitties:
-                return kitties[p]
+                if kitties[p] not in found:
+                    found.append(kitties[p])
+                break
             p = tree.get(p, (0, ""))[0]
-    return None
+    return found
 
 
-def plan_layout(mon, clients, tree):
-    """[(label, window or None, x, y, w, h)] for the current monitor."""
-    left, top, right, bottom = mon["reserved"]
-    width = round(mon["width"] / mon["scale"]) - left - right - 2 * GAP_OUT
-    height = round(mon["height"] / mon["scale"]) - top - bottom - 2 * GAP_OUT
-    x0, y0 = mon["x"] + left + GAP_OUT, mon["y"] + top + GAP_OUT
-    half_w = (width - GAP_IN) // 2
-    half_h = (height - GAP_IN) // 2
-    quarter_w = (half_w - GAP_IN) // 2
-    lower_y, lower_h = y0 + half_h + GAP_IN, height - half_h - GAP_IN
-    right_x, right_w = x0 + half_w + GAP_IN, width - half_w - GAP_IN
-    by_class = lambda cls: next((c for c in clients if c["class"] == cls), None)
-    shared = [("Lumo", by_class("lumo-desktop")), ("Gravity", window_holding(clients, tree, "agy")),
-              ("Devin", window_holding(clients, tree, "devin"))]
-    return [
-        ("Grok", window_holding(clients, tree, "grok"), x0, y0, quarter_w, half_h),
-        ("Grok Bot", by_class("grok-bot"), x0 + quarter_w + GAP_IN, y0, half_w - quarter_w - GAP_IN, half_h),
-        ("Vibe", window_holding(clients, tree, "vibe-rs"), right_x, y0, right_w, half_h),
-        ("Claude", window_holding(clients, tree, "claude"), x0, lower_y, half_w, lower_h),
-    ] + share_row(shared, right_x, lower_y, right_w, lower_h)
+def window_holding(clients, tree, program):
+    """The first kitty window whose process tree contains `program`, or None."""
+    found = windows_holding(clients, tree, program)
+    return found[0] if found else None
 
 
-def share_row(windows, x, y, w, h):
-    """Split one cell side by side among the windows that are open.
-
-    `windows` is [(label, window or None)]. Closed ones are listed with no
-    place (so they're reported as skipped) and take no room.
-    """
-    open_ones = [(label, win) for label, win in windows if win]
-    n = max(len(open_ones), 1)
-    each = (w - GAP_IN * (n - 1)) // n
+def plan_desks(clients, tree):
+    """[(label, window, desk)] for every agent window that is open."""
     plan = []
-    for i, (label, win) in enumerate(open_ones):
-        width = w - (each + GAP_IN) * (n - 1) if i == n - 1 else each  # the last takes the remainder
-        plan.append((label, win, x + i * (each + GAP_IN), y, width, h))
-    return plan + [(label, None, x, y, w, h) for label, win in windows if not win]
+    for label, desk, (kind, what) in AGENT_DESKS:
+        wins = (windows_holding(clients, tree, what) if kind == "run"
+                else [c for c in clients if c["class"] == what])
+        plan += [(label, w, desk) for w in wins]
+    return plan
 
 
-def arrange(quiet=False, keep_hand_moves=False):
-    """Put every window in the plan where it belongs. Returns how many were changed.
+def keep_fullscreen_on(clients, cls, workspace):
+    """Keep every window of class `cls` fullscreen on `workspace`.
 
-    With keep_hand_moves, a window already floating on the scratchpad is left
-    where it is, whatever its size and place: only a window that has just
-    opened, or left the scratchpad, or stopped floating, is placed.
+    Hyprland drops a fullscreen window out of fullscreen when another window
+    opens on its workspace; this puts it back. action "set" does nothing to a
+    window that's already fullscreen, so it can't toggle it off.
     """
-    mon = next(m for m in json.loads(hypr("monitors", "-j")) if m["focused"])
-    clients = json.loads(hypr("clients", "-j"))
     changed = 0
-    for label, win, x, y, w, h in plan_layout(mon, clients, proc_tree()):
-        if not win:
-            if not quiet:
-                print(f"skipped {label}: not open")
+    for c in clients:
+        if c["class"] != cls:
             continue
-        strip_cell_chrome(win)  # even if the place is already right, or left by hand
-        in_place = (win["workspace"]["name"] == WORKSPACE and win["floating"]
-                    and abs(win["at"][0] - x) <= 2 and abs(win["at"][1] - y) <= 2
-                    and abs(win["size"][0] - w) <= 8 and abs(win["size"][1] - h) <= 8)
-        if in_place:  # (a few pixels of slack: some apps have a minimum size)
-            continue
-        if keep_hand_moves and win["workspace"]["name"] == WORKSPACE and win["floating"]:
-            continue  # moved or resized by hand: leave it
-        addr = f'window = "address:{win["address"]}"'
-        if win["workspace"]["name"] != WORKSPACE:
-            dispatch(f'hl.dsp.window.move({{ {addr}, workspace = "{WORKSPACE}", follow = false }})')
-        if not win["floating"]:
-            dispatch(f'hl.dsp.window.float({{ action = "enable", {addr} }})')
-        dispatch(f"hl.dsp.window.resize({{ {addr}, x = {w}, y = {h} }})")
-        dispatch(f"hl.dsp.window.move({{ {addr}, x = {x}, y = {y} }})")
-        changed += 1
-        if not quiet:
-            print(f"{label:9} {w}x{h} at {x},{y}")
+        addr = f'window = "address:{c["address"]}"'
+        if c["workspace"]["name"] != workspace:
+            dispatch(f'hl.dsp.window.move({{ {addr}, workspace = {ws_target(workspace)}, follow = false }})')
+            changed += 1
+        if c["fullscreen"] != 2:
+            dispatch(f'hl.dsp.window.fullscreen({{ {addr}, action = "set" }})')
+            changed += 1
     return changed
 
 
-WATCH_EVENTS = {"openwindow", "closewindow", "movewindow", "movewindowv2", "changefloatingmode"}
+def keep_chat_fullscreen(clients):
+    """The full chat view stays fullscreen on its own desktop, comms (Super+`)."""
+    return keep_fullscreen_on(clients, "comms-deck-chat", CHAT_WORKSPACE)
 
 
-def event_socket():
-    """Hyprland's event socket (socket2) for the running session."""
+def keep_warp_core(clients):
+    """The warp core stays fullscreen on the scratchpad (Super+S)."""
+    return keep_fullscreen_on(clients, "warp-core", WORKSPACE)
+
+
+PLACED = set()  # addresses of agent windows placed once already
+
+
+def arrange(quiet=False, keep_hand_moves=False):
+    """Put every agent window on its desktop. Returns how many were changed.
+
+    With keep_hand_moves, a window placed once already is left wherever it
+    is now: only windows that have just opened are placed.
+    """
+    clients = json.loads(hypr("clients", "-j"))
+    tree = proc_tree()
+    changed = keep_chat_fullscreen(clients) + keep_warp_core(clients)
+    for label, win, desk in plan_desks(clients, tree):
+        if keep_hand_moves and win["address"] in PLACED:
+            continue
+        PLACED.add(win["address"])
+        on_desk = win["workspace"]["name"] == desk or win["workspace"].get("id") == DESKS[desk]
+        if on_desk and not win["floating"]:
+            continue
+        addr = f'window = "address:{win["address"]}"'
+        if not on_desk:
+            dispatch(f'hl.dsp.window.move({{ {addr}, workspace = {ws_target(desk)}, follow = false }})')
+        if win["floating"]:
+            dispatch(f'hl.dsp.window.float({{ action = "disable", {addr} }})')  # tiled on its desktop
+        changed += 1
+        if not quiet:
+            print(f"{label:8} to {desk} (Super+{(DESKS[desk] - 1) % 10})")
+    return changed
+
+
+WATCH_EVENTS = {"openwindow", "closewindow", "movewindow", "movewindowv2", "changefloatingmode", "fullscreen"}
+
+
+def connect_event_socket():
+    """Connect to the first event socket that answers, and use that instance.
+
+    After a Hyprland crash the old instance's socket file is left behind but
+    refuses connections, and HYPRLAND_INSTANCE_SIGNATURE (from the user
+    services' environment) still names it. So try each candidate, and point
+    HYPRLAND_INSTANCE_SIGNATURE (used by hyprctl) at the one that answers.
+    """
     import os
+    import socket
     runtime = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "hypr"
     sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
     candidates = [runtime / sig / ".socket2.sock"] if sig else []
     candidates += sorted(runtime.glob("*/.socket2.sock"), key=lambda p: p.stat().st_mtime, reverse=True)
+    last = FileNotFoundError("no Hyprland event socket")
     for path in candidates:
-        if path.exists():
-            return path
-    raise FileNotFoundError("no Hyprland event socket")
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.connect(str(path))
+        except OSError as error:
+            sock.close()
+            last = error
+            continue
+        if path.parent.name != sig:
+            os.environ["HYPRLAND_INSTANCE_SIGNATURE"] = path.parent.name
+            print(f"now on Hyprland instance {path.parent.name}", flush=True)
+        return sock, path
+    raise last
 
 
 def open_chat_views():
     """Start the full chat view if it isn't open. The launcher itself skips it if it is."""
     launcher = Path(__file__).resolve().parent / "comms-deck-chat"
-    for view in ("full",):  # fullscreen on workspace 1 (the owner, 22:49); "half" sat on 1 too, under it
+    for view in ("full",):  # fullscreen on the comms desktop (Super+`); "half" stays on workspace 1
         subprocess.Popen([str(launcher), view], start_new_session=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+REOPEN_EVERY = 30  # seconds: at most one reopen this often, so a chat that dies at start can't loop
+
+
+def chat_missing(clients):
+    """True when no full chat view (class comms-deck-chat) is open."""
+    return not any(c.get("class") == "comms-deck-chat" for c in clients)
+
+
+def reopen_chat_if_closed(last, now=None):
+    """Open the full chat again if it has closed. Returns the time of the last reopen.
+
+    The chat is STOX's only window onto the deck. On 2026-11-26 it closed
+    twice and stayed closed until someone noticed. The launcher itself does
+    nothing if the window is open, so a reopen that races another one is
+    harmless.
+    """
+    import json
+    import time
+    now = time.time() if now is None else now
+    if now - last < REOPEN_EVERY:
+        return last
+    try:
+        clients = json.loads(hypr("clients", "-j"))
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return last
+    if not chat_missing(clients):
+        return last
+    print("the chat is closed; reopening it", flush=True)
+    open_chat_views()
+    return now
 
 
 def _stamp(path):
@@ -254,15 +307,15 @@ def watch():
     import time
     started, since = _stamp(Path(__file__).resolve()), {}
     open_chat_views()
+    reopened = time.time()  # just opened above
     while True:
         try:
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            sock.connect(str(event_socket()))
+            sock, path = connect_event_socket()
         except OSError as error:
             print(f"waiting for Hyprland: {error}", flush=True)
             time.sleep(5)
             continue
-        print(f"watching {event_socket()}", flush=True)
+        print(f"watching {path}", flush=True)
         buffer, due = b"", time.time() + 2  # first pass shortly after start, once windows exist
         # The first pass arranges everything; later ones keep hand moves. After
         # restarting on new code, even the first pass keeps them.
@@ -286,132 +339,42 @@ def watch():
                         first = False
                         if n:
                             print(f"rearranged {n} window(s)", flush=True)
+                        reopened = reopen_chat_if_closed(reopened)
                     except (OSError, subprocess.SubprocessError, SystemExit, StopIteration, ValueError) as error:
                         print(f"arrange failed: {error}", flush=True)
 
 
-def _tiles(cells, x, y, w, h):
-    """Raise if `cells` do not fill (x, y, w, h) exactly, with no overlap."""
-    area = 0
-    boxes = []
-    for _label, _win, cx, cy, cw, ch in cells:
-        if cw <= 0 or ch <= 0:
-            raise AssertionError(f"empty cell {_label}: {cw}x{ch}")
-        if not (cx >= x and cy >= y and cx + cw <= x + w and cy + ch <= y + h):
-            raise AssertionError(f"{_label} {cx},{cy} {cw}x{ch} leaves {x},{y} {w}x{h}")
-        for ox, oy, ow, oh in boxes:
-            if not (cx + cw <= ox or ox + ow <= cx or cy + ch <= oy or oy + oh <= cy):
-                raise AssertionError(f"{_label} overlaps {(ox, oy, ow, oh)}")
-        boxes.append((cx, cy, cw, ch))
-        area += cw * ch
-    if area != w * h:
-        raise AssertionError(f"area {area} != {w * h}")
-
-
-def _fake_win(address, cls, pid):
-    return {"address": address, "class": cls, "pid": pid,
-            "workspace": {"name": "x"}, "floating": False, "at": [0, 0], "size": [1, 1]}
-
-
-def _open_clients(shared_open):
-    """Fake kitty/app windows so plan_layout can run without Hyprland."""
-    clients = [
-        _fake_win("0x1", "kitty", 101),
-        _fake_win("0x2", "grok-bot", 201),
-        _fake_win("0x3", "kitty", 301),
-        _fake_win("0x4", "kitty", 401),
-        _fake_win("0x5", "lumo-desktop", 501),
-        _fake_win("0x6", "kitty", 601),
-        _fake_win("0x7", "kitty", 701),
-    ]
-    programs = [("grok", 102), ("vibe-rs", 302), ("claude", 402)]
-    if "Gravity" in shared_open:
-        programs.append(("agy", 602))
-    else:
-        clients = [c for c in clients if c["pid"] != 601]
-    if "Devin" in shared_open:
-        programs.append(("devin", 702))
-    else:
-        clients = [c for c in clients if c["pid"] != 701]
-    if "Lumo" not in shared_open:
-        clients = [c for c in clients if c["class"] != "lumo-desktop"]
-    tree = {}
-    for name, pid in programs:
-        tree[pid] = (pid - 1, name)
-        tree[pid - 1] = (1, "kitty")
-    return clients, tree
+def _fake_win(address, cls, pid, ws="x", floating=False):
+    return {"address": address, "class": cls, "pid": pid, "workspace": {"name": ws},
+            "floating": floating, "fullscreen": 0, "at": [0, 0], "size": [1, 1]}
 
 
 def self_check():
-    """Check that the cells tile exactly. Does not talk to Hyprland or move windows."""
-    if GAP_OUT != 22 or GAP_IN != 0:
-        raise SystemExit(f"expected GAP_OUT 22 and GAP_IN 0, got {GAP_OUT}, {GAP_IN}")
-    monitors = [
-        {"reserved": [0, 0, 0, 0], "width": 1920, "height": 1080, "scale": 1, "x": 0, "y": 0},
-        {"reserved": [0, 48, 0, 0], "width": 2560, "height": 1440, "scale": 1, "x": 0, "y": 0},
-        {"reserved": [0, 0, 0, 0], "width": 1921, "height": 1081, "scale": 1, "x": 100, "y": 50},
-        {"reserved": [10, 20, 30, 40], "width": 3840, "height": 2160, "scale": 2, "x": 0, "y": 0},
-    ]
-    shared_cases = [
-        ("Lumo", "Gravity", "Devin"),
-        ("Lumo", "Gravity"),
-        ("Lumo", "Devin"),
-        ("Gravity", "Devin"),
-        ("Lumo",),
-        ("Gravity",),
-        ("Devin",),
-        (),
-    ]
-    for mon in monitors:
-        left, top, right, bottom = mon["reserved"]
-        width = round(mon["width"] / mon["scale"]) - left - right - 2 * GAP_OUT
-        height = round(mon["height"] / mon["scale"]) - top - bottom - 2 * GAP_OUT
-        x0, y0 = mon["x"] + left + GAP_OUT, mon["y"] + top + GAP_OUT
-        half_w = (width - GAP_IN) // 2
-        half_h = (height - GAP_IN) // 2
-        lower_y, lower_h = y0 + half_h + GAP_IN, height - half_h - GAP_IN
-        right_x, right_w = x0 + half_w + GAP_IN, width - half_w - GAP_IN
-        for shared in shared_cases:
-            clients, tree = _open_clients(shared)
-            plan = plan_layout(mon, clients, tree)
-            by = {label: (x, y, w, h, win) for label, win, x, y, w, h in plan}
-            top = [item for item in plan if item[0] in ("Grok", "Grok Bot", "Vibe") and item[1]]
-            _tiles(top, x0, y0, width, half_h)
-            claude = [item for item in plan if item[0] == "Claude" and item[1]]
-            _tiles(claude, x0, lower_y, half_w, lower_h)
-            vx, vy, vw, vh, vwin = by["Vibe"]
-            if vwin is None or (vx, vy, vw, vh) != (right_x, y0, right_w, half_h):
-                raise AssertionError(f"Vibe cell {by['Vibe']}")
-            if by["Grok"][0] + by["Grok"][2] != by["Grok Bot"][0]:
-                raise AssertionError("Grok and Grok Bot do not meet")
-            if by["Grok Bot"][0] + by["Grok Bot"][2] != by["Vibe"][0]:
-                raise AssertionError("Grok Bot and Vibe do not meet")
-            if by["Grok"][1] + by["Grok"][3] + GAP_IN != by["Claude"][1]:
-                raise AssertionError("top row and Claude do not meet")
-            open_shared = [item for item in plan if item[0] in ("Lumo", "Gravity", "Devin") and item[1]]
-            if open_shared:
-                _tiles(open_shared, right_x, lower_y, right_w, lower_h)
-                if open_shared[0][2] != right_x:
-                    raise AssertionError("shared row does not start at the right column")
-                last = open_shared[-1]
-                if last[2] + last[4] != right_x + right_w:
-                    raise AssertionError("shared row does not fill the right column")
-                if any(item[3] != lower_y or item[5] != lower_h for item in open_shared):
-                    raise AssertionError("shared row height is wrong")
-            elif any(item[1] for item in plan if item[0] in ("Lumo", "Gravity", "Devin")):
-                raise AssertionError("a closed shared seat was treated as open")
-            # With no shared window open, the bottom-right cell is empty on purpose.
-            present = [item for item in plan if item[1]]
-            if open_shared:
-                _tiles(present, x0, y0, width, height)
-        for n in (1, 2, 3):
-            wins = [(f"s{i}", {"i": i}) for i in range(n)] + [(f"closed{n}", None)]
-            row = share_row(wins, right_x, lower_y, right_w, lower_h)
-            open_row = [item for item in row if item[1]]
-            if len(open_row) != n or len(row) != n + 1:
-                raise AssertionError(f"share_row n={n} listed {row}")
-            _tiles(open_row, right_x, lower_y, right_w, lower_h)
-    print("layout tiles ok")
+    """Check the desktops and the plan. Does not talk to Hyprland or move windows."""
+    assert ws_target("comms") == "1" and ws_target("claude") == "2"
+    assert ws_target("alice") == "8" and ws_target("nav") == "9" and ws_target("mail") == "10"
+    assert ws_target("0") == "11"
+    assert ws_target("special:magic") == '"special:magic"'
+    assert sorted(DESKS.values()) == list(range(1, 12))
+    assert all(desk in DESKS for _, desk, _ in AGENT_DESKS)
+    # Agents on Super+1..7, in Y's order.
+    keys = [(DESKS[desk] - 1) % 10 for _, desk, _ in AGENT_DESKS]
+    assert keys == [1, 2, 3, 4, 5, 6, 7], keys
+    # The keeper reopens a closed chat, at most once per REOPEN_EVERY.
+    assert chat_missing([{"class": "kitty"}, {"class": "comms-deck-chat-half"}])
+    assert not chat_missing([{"class": "comms-deck-chat"}])
+    assert reopen_chat_if_closed(100.0, now=110.0) == 100.0  # too soon: no query, no reopen
+    # Each agent's windows go to its desktop; two Claude sessions both do.
+    clients = [_fake_win("0x1", "kitty", 101), _fake_win("0x2", "kitty", 201),
+               _fake_win("0x3", "kitty", 301), _fake_win("0x4", "grok-bot", 401),
+               _fake_win("0x5", "firefox", 501), _fake_win("0x6", "warp-core", 601)]
+    tree = {102: (101, "zsh"), 103: (102, "claude"), 202: (201, "claude"),
+            302: (301, "vibe-rs"), 101: (1, "kitty"), 201: (1, "kitty"), 301: (1, "kitty")}
+    plan = [(label, w["address"], desk) for label, w, desk in plan_desks(clients, tree)]
+    assert sorted(plan) == sorted([("Claude", "0x1", "claude"), ("Claude", "0x2", "claude"),
+                                   ("Vibe", "0x3", "vibe"), ("Alice", "0x4", "alice")]), plan
+    assert window_holding(clients, tree, "grok") is None, "closed agents are skipped"
+    print("desktops ok")
 
 
 def main():

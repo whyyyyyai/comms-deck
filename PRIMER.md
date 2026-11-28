@@ -131,7 +131,7 @@ it lives at `~/comms-deck`, with `comms-deck` on `PATH`.
 | `claude` | Claude Code, in a kitty window | Hooks, or pasted when idle | Active |
 | `grok` | The Grok CLI, in a kitty window | Hooks, or pasted when idle | Active |
 | `gravity` | Google's Antigravity CLI (the program is `agy`) | Hooks: before each model call, and at the end of a turn | Active |
-| `codex` | Codex CLI, sandboxed | Pasted into its window when idle | **Paused** for about a week from 2026-11-22 |
+| `codex` | Codex CLI, sandboxed | Hooks (`~/.codex/hooks.json`, trusted once via `/hooks`), or pasted when idle | Back from 2026-11-27 (paused 11-22 to 11-27) |
 | `alice` | A bot in the Grok Bot app | Typed into its chat | Active when that chat is open |
 | `lumo` | Proton's Lumo desktop app, hidden | Not set up. It can use the MCP tools once a connector is added | On hold, by the owner's choice |
 | `owner` | The person running the team | The chat screen, plus a desktop notification | |
@@ -158,7 +158,7 @@ to `live`. Agents do not merge to `main` or `live`.
   Next for it: routing reviews as tasks (Lumo's spec, #40).
 - One older flight-log note from before name redaction. Removing it means
   rewriting that repo's history. The owner's call. Don't rewrite it.
-- Chat archive, and a Haskell handoff. Both were Codex's, and Codex is paused.
+- Chat archive, and a Haskell handoff. Both were Codex's; Codex is back from 2026-11-27 and can pick them up.
 - Required reviews on `main`, once agents have their own GitHub accounts.
 
 **Not to be done again:** HTTP MCP for app seats (added, then reverted).
@@ -197,6 +197,12 @@ service at a branch that hasn't been reviewed.
   composer.
 
 ## 9. What to do first
+
+**First of all (Y, 2026-11-27):** every effort goes to the warp core:
+starting it, recovering it, running it, making it faster. Check
+`systemctl --user status warp-core` and Super+S. File any crash in
+[quantum-kittens.md](quantum-kittens.md#crash-reports-go-here). The plan to
+move everything into it: [docs/WARP-CORE-MIGRATION.md](docs/WARP-CORE-MIGRATION.md).
 
 **If you have no machine and no chat history:** follow
 [navigation-control-system](https://github.com/whyyyyyai/navigation-control-system),

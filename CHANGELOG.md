@@ -2,6 +2,93 @@
 
 ## Unreleased
 
+- **A seat that comes online is told who's down, so bots help bots get
+  back.** The service now watches the roster every 15 seconds (the owner's
+  t64, 2026-11-27). When a seat starts answering notes - a live agent
+  process, or an app seat whose connector is up - the deck sends it one
+  note naming the seats that are down and their states, and asks it to
+  help bring them back and report what it tried. Seats already online when
+  the service starts aren't greeted, spent seats can't be greeted or named
+  (a limit reset isn't something a bot can hurry), remote seats are never
+  named (nothing on this desktop reaches them), and a seat is greeted at
+  most once per `WELCOME_EVERY` seconds (default 6 h) so a flapping window
+  can't nag. Self-test covers the seed pass, the greeting, the cooldown
+  and the spent/remote exclusions. By Devin.
+
+- **The owner's name is Y.** STOX renamed themselves (2026-11-26): screens,
+  notes, the chat prompt (`y ›`) and Discord now show **Y**, and `y` names
+  the owner wherever a seat is named. The seat id stays `owner` in files
+  and logs, and the owner's earlier name `stox` is still accepted as the
+  seat, old notes addressed `@STOX` included. Self-test asserts both
+  spellings and that `( Y )` sits in the crew panel. By vibe.
+
+- **navigation-deck is now nav-deck.** STOX renamed the deck (2026-11-26):
+  the program, launcher and kitty class become `nav-deck` / `nav-deck-chat`
+  (+ `nav-deck-half`), the desk label becomes **nav** (workspace 2 stays 2 —
+  numbered decks per #123, so waybar's key order never changes), and
+  `install()` writes the `^nav-deck$` window rule and the new default_name,
+  removing a previous install's navigation-deck links and app entry. The
+  data dir `~/.local/share/comms-deck/navigation/` keeps its name: history
+  continuity beats cosmetic consistency. Claude flips the running hyprland
+  `default_name` after this merges so the label and the config never
+  disagree. By vibe.
+
+- **navigation-deck: the desktop's flight instrument, on the navigation
+  deck (Command+1).** A
+  viewer born of the 02:11 OOM: the deck's ready order with note loads and
+  spent countdowns, per-seat plan meters, the workspace map (kitty windows
+  get their seat's name by walking the window's process tree), memory
+  vitals with a live sparkline and a swap warning, and the day's note
+  pulse. At the owner's request the middle column is the **warp core**: a
+  first-person cockpit whose starfield speed is the deck's own traffic, with
+  seats with waiting notes plotted as contacts around the reticle, and
+  WARP/SHLD readouts (notes/hour, busy seats and load vs memory free).
+  Reads `comms-deck status --json` and the deck's own logs; sends
+  nothing; its `w <seat>` key goes through `comms-deck wake`, so the deck's
+  own rules decide. `navigation-deck-chat` opens it fullscreen on the
+  navigation deck (workspace "navigation", Command+1). By vibe.
+
+- **Firefox gets the whole left half while Grok is offline.** Claude moves
+  from the bottom-left cell into the bottom-right row, after Devin (STOX,
+  2026-11-26). With Grok back, the old layout returns. By Claude.
+- **The owner is STOX.** The owner chose a name (2026-11-26): screens,
+  delivered notes and Discord show STOX instead of "You" or "owner", the
+  crew panel's centre reads ( STOX ), the chat box prompt is `stox ›`, and
+  agents are told to call them STOX. The seat id stays `owner` in files and
+  logs; `stox` is accepted wherever a seat is named. By Claude.
+- **02 and 03 swap places in the look.** 02 ACTIVITY now sits under 01 CREW
+  on the left, and 03 USAGE heads the right column above 05 and 06 (the
+  owner, 2026-11-26). 03 takes the rows it needs; 06 gets the rest. By
+  Claude.
+- **comms-deck mail: the owner's mailbox, on workspace 2.** A small mail
+  client in the chat screen's style — inbox list, read pane, compose with
+  reply — over Proton Mail Bridge on localhost (IMAP 1143 / SMTP 1025 by
+  default). The Bridge password stays in ~/.config/comms-deck/mail.secret
+  (chmod 600), mail.json holds the address and ports, and the client only
+  reads (BODY.PEEK), so opening a message never marks it read on the
+  server; it re-checks the inbox every minute while open, so no agent has
+  to stay up. The desktop half (launcher, app entry, the workspace-2 window
+  rule) is Vibe's #107. By Devin.
+- **The chat stays fullscreen on workspace 1; Firefox in for an offline
+  Grok.** scratchpad-layout --watch puts the full chat view back in
+  fullscreen (and on workspace 1) whenever Hyprland takes it out, e.g. when
+  another window opens there. While Grok is offline, Firefox fills the
+  scratchpad's top-left cell and Grok Bot is minimised (special:minimised);
+  when Grok is back, Grok Bot returns and Firefox goes to workspace 3. By
+  Claude.
+- **The look's right column at half height.** With the chat on the top
+  half of the screen and a terminal below, 02 ACTIVITY was taller than the
+  column, so it was skipped and 06 with it, leaving the column blank. Short
+  of room, 02 now drops its `↳` lines (one row per seat); 06 shows when it
+  fits. By Claude.
+- **Gravity / Antigravity.** An easter egg from the owner: Gravity is named
+  Antigravity while it's online, in 01's crew labels and 02's rows. By Claude.
+- **The mail screen's window rule (workspace 2).** For the mail client
+  (Devin builds the view): `comms-deck install` now also links a
+  `comms-deck-mail` launcher (kitty, class `comms-deck-mail`), adds its app
+  menu entry, and, for a Lua Hyprland config, a rule putting it fullscreen
+  on workspace 2 — Super+2 already goes there, so no new keybind (Claude).
+  `comms-deck mail` itself is still to come. By Vibe.
 - **Telemetry records can name provider, account and models.** A usage
   feed may now declare `data.provider`, `data.account`/`account_id` and
   `data.models`; the seat/source labels stay the fallback, so a remote

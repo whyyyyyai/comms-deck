@@ -11,7 +11,7 @@
   comms-deck chat [--hide-private]                       full-screen live view of the notes
   comms-deck serve                                       the background service
   comms-deck mcp                                         MCP server (send, read, status as tools)
-  comms-deck hook --source <claude|grok|agy>             called by the agents' hooks
+  comms-deck hook --source <claude|grok|agy|codex>       called by the agents' hooks
   comms-deck statusline --source <claude|grok|agy>       status line (feeds the usage panel; agy has none)
   comms-deck install [--yes]                             set this machine up
   comms-deck self-test                                   run the tests in a temp folder
@@ -256,6 +256,18 @@ for _line in (_app_file.read_text().splitlines() if _app_file.exists() else []):
             HIDDEN_SEATS.add(_name.strip())
 APP_SEATS = tuple(APP_PROCESS)
 SEATS = tuple(AGENTS) + APP_SEATS + ("owner",)
+# The owner's chosen name (2026-11-26: "You may all call me, STOX"; renamed
+# to Y at the owner's request the same day). The seat
+# id stays "owner" in files and logs; screens, notes and Discord show this,
+# and "y" (or the owner's older name, "stox") is accepted wherever a seat is
+# named.
+OWNER_NAME = "Y"
+OWNER_ALIASES = ("y", "stox")   # lowercase tokens that name the owner
+
+
+def shown_name(seat):
+    """How a seat is named on screens and in notes: the owner is Y."""
+    return OWNER_NAME if seat == "owner" else seat.title()
 
 # The repos the notes are copied to. A missing clone just means no copy.
 PUBLIC_REPO = Path(setting("PUBLIC_REPO") or HOME / "flight-log")
@@ -421,6 +433,16 @@ def interactive_agents(seat):
     return found
 
 
+def agent_alive(seat, pid):
+    """True if `pid` is still `seat`'s agent. A bare pid check isn't enough:
+    after a reboot or a closed terminal the number can belong to some other
+    process, and the seat then sat idle with its window gone (Y, t21)."""
+    if not (pid and pid_alive(pid)):
+        return False
+    want = AGENTS.get(seat)
+    return not want or proc_name(pid) == want
+
+
 def load_seat(seat):
     """The seat's state dict. 'away' if its agent process has gone.
 
@@ -429,7 +451,7 @@ def load_seat(seat):
     record was stale), so the seat doesn't show away by mistake.
     """
     state = read_json(seat_file(seat), {}) or {}
-    if seat in AGENTS and not (state.get("pid") and pid_alive(state["pid"])):
+    if seat in AGENTS and not agent_alive(seat, state.get("pid")):
         live = interactive_agents(seat)
         if len(live) == 1:
             remember_window(seat, live[0])
@@ -441,6 +463,27 @@ def load_seat(seat):
     state.setdefault("state", "away")
     state.setdefault("auto", 0)
     return state
+
+
+_windows_cache = {"at": 0.0, "classes": None}
+
+
+def window_classes(now=None):
+    """The classes of the windows open on the Hyprland desktop, or None when
+    Hyprland can't be asked (no session, no hyprctl). Cached for 3 s: the
+    status snapshot asks for every seat every 2 s."""
+    now = time.time() if now is None else now
+    if now - _windows_cache["at"] < 3.0:
+        return _windows_cache["classes"]
+    classes = None
+    try:
+        out = subprocess.run(["hyprctl", "clients", "-j"], capture_output=True, text=True, timeout=3)
+        if out.returncode == 0:
+            classes = {c.get("class", "") for c in json.loads(out.stdout or "[]")}
+    except (OSError, ValueError, subprocess.SubprocessError):
+        classes = None
+    _windows_cache.update(at=now, classes=classes)
+    return classes
 
 
 def app_seat_state(seat):
@@ -459,6 +502,13 @@ def app_seat_state(seat):
             "busy", "idle", "away", "not connected", "chat not open", "no chat yet", "draft in box"):
         return state["state"]
     if APP_PROCESS.get(seat, "grok-bot") != "grok-bot":
+        # Its window closed means away, even if the app (and its MCP server)
+        # lives on in the tray: Y, t79, "when lumo's window is closed I don't
+        # think lumo should appear in the warp drive". Window classes come
+        # from Hyprland; without it this check is skipped.
+        classes = window_classes()
+        if classes is not None and APP_PROCESS[seat] not in classes:
+            return "away"
         # Not a Grok Bot seat: it can only connect through its own app's MCP.
         # Nothing tells us when its turn ends, so busy is time-based: it set
         # a status in the last MCP_BUSY_FOR seconds. Otherwise idle.
@@ -642,6 +692,8 @@ def send(sender, to, text, quiet=False, private=False):
         token = token.strip().lstrip("@")
         if not token:
             continue
+        token = re.sub(rf"^(-?)({'|'.join(map(re.escape, OWNER_ALIASES))})$",
+                       r"\1owner", token)  # Y (or the older stox) is the owner
         (excludes if token.startswith("-") else names).append(token.lstrip("-"))
     names = list(dict.fromkeys(names))
     excludes = list(dict.fromkeys(excludes))
@@ -892,9 +944,9 @@ def render(records, seat):
     lines = []
     for r in records:
         tags = [t for t, on in (("quiet", r.get("quiet")), ("private", r.get("private"))) if on]
-        to = "" if r.get("to") == seat else f" (to {str(r.get('to')).replace('+', ', ')})"
+        to = "" if r.get("to") == seat else f" (to {', '.join(OWNER_NAME if t == 'owner' else t for t in str(r.get('to')).split('+'))})"
         tag = f" [{', '.join(tags)}]" if tags else ""
-        lines.append(f"From {r['from']}{to} at {r['time'][11:16]} ({note_age(r)}){tag}:\n{r['text']}")
+        lines.append(f"From {OWNER_NAME if r['from'] == 'owner' else r['from']}{to} at {r['time'][11:16]} ({note_age(r)}){tag}:\n{r['text']}")
         balancer = load_balancer() if r.get("task") else None
         task = balancer.load_task(r.get("task")) if balancer else None
         if task and task["state"] in balancer.TASK_ACTIVE:
@@ -917,16 +969,16 @@ def render(records, seat):
         # its chat reply is picked up and filed, so tell it how that works.
         who = "owner" if "owner" in senders or not senders else senders[0]  # not just the first alphabetically
         return (f"{MARK} {len(records)} note(s) for {seat}:\n\n" + "\n\n".join(lines)
-                + f"\n\nReply here in this chat. Your reply goes to {'the owner' if who == 'owner' else who}"
+                + f"\n\nReply here in this chat. Your reply goes to {OWNER_NAME if who == 'owner' else who}"
                   " on the comms-deck screen; start it with @claude, @grok or another seat to send it"
                   " to that agent instead. To have something done on this iMac (the scratchpad,"
                   " a workspace, a link, a YouTube search), write a line starting @deck, e.g."
-                  " \"@deck scratchpad\"; \"@deck help\" lists them. Say \"the owner\", never a name.")
+                  f" \"@deck scratchpad\"; \"@deck help\" lists them. Call the owner {OWNER_NAME}, never another name.")
     if "owner" in senders:
-        reply = ("\n\nThe owner sent this from the comms-deck chat screen and reads the answer "
-                 "there, not in this window. Answer with the send_message tool, to: owner "
+        reply = (f"\n\n{OWNER_NAME} (the owner) sent this from the comms-deck chat screen and reads "
+                 "the answer there, not in this window. Answer with the send_message tool, to: owner "
                  "(or `comms-deck send owner \"...\"`). Anything you say only in this window, "
-                 "the owner won't see.")
+                 f"{OWNER_NAME} won't see. Call them {OWNER_NAME}, not \"the owner\" or \"you\".")
     return f"{MARK} {len(records)} note(s) for {seat}:\n\n" + "\n\n".join(lines) + reply
 
 
@@ -957,8 +1009,10 @@ def render(records, seat):
 
 
 def event_prompt_id(data):
-    """The turn id on a hook payload, or None. Grok's field is promptId."""
+    """The turn id on a hook payload, or None. Grok's field is promptId, Codex's turn_id."""
     value = data.get("promptId")
+    if value is None or value == "":
+        value = data.get("turn_id")
     if value is None or value == "":
         return None
     return str(value)
@@ -988,7 +1042,13 @@ def paused_for_background(data):
 # Devin's hooks use Claude Code's event names and replies (additionalContext
 # on SessionStart and UserPromptSubmit, {"decision": "block"} on Stop), so it
 # takes Claude's path through hook(). It has no idle_prompt notification.
-CLAUDE_LIKE = ("claude", "devin")
+# Codex (0.172+, ~/.codex/hooks.json) uses the same names and replies too,
+# with turn_id for the turn; its Stop is the idle signal, as on Devin.
+CLAUDE_LIKE = ("claude", "devin", "codex")
+# Seats whose UserPromptSubmit reply can carry notes as additionalContext.
+# Codex documents that reply only for SessionStart, so its notes wait for
+# its Stop hook (block + reason) rather than being taken and maybe dropped.
+PROMPT_CONTEXT = ("claude", "devin")
 
 
 def hook(source, event):
@@ -999,10 +1059,12 @@ def hook(source, event):
         return vibe_hook(event)
     # Grok and Devin both also read ~/.claude/settings.json, so Claude's hooks
     # fire inside them too. Each agent marks its own hook runs: Grok sets
-    # GROK_HOOK_EVENT, Devin sets DEVIN_PROJECT_DIR. Only the hook installed
+    # GROK_HOOK_EVENT, Devin sets DEVIN_PROJECT_DIR. Codex sets nothing, so
+    # it is known by the agent process above the hook. Only the hook installed
     # for the agent we're running in acts.
     running_in = ("grok" if os.environ.get("GROK_HOOK_EVENT")
-                  else "devin" if os.environ.get("DEVIN_PROJECT_DIR") else "claude")
+                  else "devin" if os.environ.get("DEVIN_PROJECT_DIR")
+                  else "codex" if find_agent()[0] == "codex" else "claude")
     if source != running_in:
         return  # e.g. Grok reading Claude's settings file: not our hook here
     try:
@@ -1052,7 +1114,7 @@ def hook(source, event):
         if prompt_id:
             changes["prompt_id"] = prompt_id
         update_seat(seat, **changes)
-        if source in CLAUDE_LIKE and owner_typed:
+        if source in PROMPT_CONTEXT and owner_typed:
             notes = take(seat, limit_chars=HANDOVER_MAX)
             if notes:
                 reply({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
@@ -1367,16 +1429,16 @@ def _is_hbar(line):
 
 
 def _after_marker(line):
-    """Text typed after a ❯ or '>' prompt marker, with the box drawing removed."""
+    """Text typed after a ❯, › (Codex), ❭ (Devin) or '>' prompt marker, box drawing removed."""
     text = line.replace("│", " ").replace("\u00a0", " ").strip()
-    for marker in ("❯", ">"):
+    for marker in ("❯", "›", "❭", ">"):
         if text.startswith(marker):
             return text[len(marker):].strip()
     return text
 
 
 SGR = re.compile(r"\033\[([0-9;:]*)m")
-STRUCTURE = set("❯>│─━═╭╮╰╯-|")
+STRUCTURE = set("❯›❭>│─━═╭╮╰╯-|")
 
 
 def drop_placeholders(ansi_screen):
@@ -1409,15 +1471,25 @@ def drop_placeholders(ansi_screen):
             muted = (dim or grey) and ch not in STRUCTURE and not ch.isspace()
             out.append(" " if muted else ch)
         params = m.group(1)
-        codes = [c for c in re.split(r"[;:]", params) if c] or ["0"]
-        if "0" in codes and params.split(";")[0] in ("", "0"):
-            dim = grey = False
-        if "2" in codes and params.split(";")[0] == "2":
-            dim = True
-        if "22" in codes:
-            dim = False
-        if "39" in codes:
-            grey = False
+        # Read the codes in order (Codex sends "22;2": end bold, then dim),
+        # skipping the arguments of 38/48/58 colours so their numbers aren't
+        # taken for codes of their own.
+        parts = params.split(";") if params else ["0"]
+        k = 0
+        while k < len(parts):
+            head = parts[k].split(":")[0] or "0"
+            if head in ("38", "48", "58") and ":" not in parts[k]:
+                k += 3 if k + 1 < len(parts) and parts[k + 1] == "5" else 5
+                continue
+            if head == "0":
+                dim = grey = False
+            elif head == "2":
+                dim = True
+            elif head == "22":
+                dim = False
+            elif head == "39":
+                grey = False
+            k += 1
         g = is_grey(params)
         if g is not None:
             grey = g
@@ -1435,7 +1507,8 @@ def composer_text(screen):
     wrapped lines before the box closes. Claude Code's is the `❯` line between
     the two rules at the bottom of the screen. Antigravity's is a `>` between
     two rules, with a hint such as "? for shortcuts" under the bottom rule;
-    that hint is not part of the draft. A bare `>` marker uses the next line
+    that hint is not part of the draft. Codex's is the last `›` line, with
+    its dim "Ask Codex to do anything" placeholder already blanked. A bare `>` marker uses the next line
     (Claude Code's composer when the marker sits on its own line).
     An empty string means the composer is on screen and has no draft.
     """
@@ -1476,7 +1549,9 @@ def composer_text(screen):
     marker = None
     for i, line in enumerate(lines):
         stripped = line.strip().replace("\u00a0", " ")
-        if stripped.startswith("❯") or stripped == ">" or stripped.startswith("> "):
+        if (stripped.startswith("❯") or stripped == ">" or stripped.startswith("> ")
+                or stripped == "›" or stripped.startswith("› ")
+                or stripped == "❭" or stripped.startswith("❭ ")):
             marker = i
     if marker is None:
         return None
@@ -1491,9 +1566,92 @@ def composer_text(screen):
     return nxt.replace("│", "").replace("\u00a0", " ").strip()
 
 
+# Seats whose turns the deck also reads off the screen. A seat's Stop hook is
+# what normally says a turn has ended; Codex runs new hooks only after Y
+# trusts them, and only in a session started after they were installed, so
+# without this it froze at busy (27 Nov, 22:32-22:58 and again at 23:01)
+# with notes queued and no green ring (Y, t69: "Codex should have a green
+# ring when it is available, and new messages sent to it should wake it").
+SCREEN_TURNS = tuple(x.strip() for x in setting("SCREEN_TURNS", "codex").split(",") if x.strip())
+SCREEN_IDLE_AFTER = 20       # s busy before the screen is believed over the state
+SCREEN_CHECK_EVERY = 5       # s between screen reads per seat
+WORKING_MARKS = ("esc to interrupt",)  # drawn by Codex (and Claude) while a turn runs
+_screen_checked = {}
+
+
+def screen_says_working(screen):
+    """True if a terminal agent's screen shows a turn running."""
+    tail = "\n".join(screen.splitlines()[-12:]).lower()
+    return any(mark in tail for mark in WORKING_MARKS)
+
+
+def screen_says_idle(screen):
+    """True if a terminal agent's screen shows it waiting: an empty prompt
+    and no turn running. A half-typed prompt, an approval question (no
+    prompt line) or a working line all say no."""
+    if composer_text(screen) != "":
+        return False
+    tail = "\n".join(screen.splitlines()[-12:]).lower()
+    return not any(mark in tail for mark in WORKING_MARKS)
+
+
+def settle_from_screen(seat, state, now=None, force=False):
+    """Make a SCREEN_TURNS seat's state match its window, both ways:
+    busy, but an idle prompt shown unchanged on two reads a second apart:
+    idle (its Stop hook never ran). Idle, but a turn running on screen (Y
+    typed into it, or a hook missed the prompt): busy, so no note is pasted
+    into the middle of a turn. Rate-limited per seat unless `force`.
+    Returns the (maybe new) state."""
+    now = time.time() if now is None else now
+    if seat not in SCREEN_TURNS or state["state"] not in ("busy", "idle"):
+        return state
+    since = max(float(state.get("since") or 0), float(state.get("woke_at") or 0))
+    if not force and (now - since < SCREEN_IDLE_AFTER or now - _screen_checked.get(seat, 0) < SCREEN_CHECK_EVERY):
+        return state
+    _screen_checked[seat] = now
+    socket, window = state.get("kitty_socket"), state.get("kitty_window")
+    if not socket or not window:
+        return state
+    read = lambda: drop_placeholders(kitty(socket, "get-text", "--match", f"id:{window}", "--ansi"))
+    try:
+        first = read()
+        if state["state"] == "idle":
+            if not screen_says_working(first):
+                return state
+            log(f"{seat}: its screen shows a turn running; marking it busy")
+            update_seat(seat, state="busy", doing="working (seen on screen)")
+            return load_seat(seat)
+        if not screen_says_idle(first):
+            return state
+        time.sleep(1.0)
+        second = read()
+    except (RuntimeError, OSError, subprocess.SubprocessError):
+        return state
+    if second != first or not screen_says_idle(second):
+        return state
+    log(f"{seat}: its screen shows an idle prompt; marking it idle")
+    update_seat(seat, state="idle", doing="")
+    return load_seat(seat)
+
+
+def settle_seats(seats=None):
+    """`comms-deck settle`: one forced screen check per seat, for watchdogs
+    (chronophage runs it every pass, so this works even if the service's own
+    loop is stuck). Returns [{seat, from, to}] for the seats it changed."""
+    changed = []
+    for seat in seats or SCREEN_TURNS:
+        if seat not in AGENTS:
+            continue
+        before = load_seat(seat)
+        after = settle_from_screen(seat, before, force=True)
+        if after["state"] != before["state"]:
+            changed.append({"seat": seat, "from": before["state"], "to": after["state"]})
+    return changed
+
+
 def try_wake(seat):
     """If `seat` is idle with a normal note waiting, paste it in. True if done."""
-    state = load_seat(seat)
+    state = settle_from_screen(seat, load_seat(seat))
     socket, window = state.get("kitty_socket"), state.get("kitty_window")
     if state["state"] != "idle" or not socket or not window:
         return False
@@ -2391,8 +2549,8 @@ def post_discord():
         if not r or r.get("private") or looks_secret(r.get("text", "")):
             path.unlink(missing_ok=True)
             continue
-        who = r["from"].title()
-        to_names = "Everyone" if r["to"] == "all" else ", ".join(t.title() for t in r["to"].split("+"))
+        who = shown_name(r["from"])
+        to_names = "Everyone" if r["to"] == "all" else ", ".join(shown_name(t) for t in r["to"].split("+"))
         name = f"{who} → {to_names}" if r["kind"] == "message" else f"{who} (commentary)"
         text = r["text"] if len(r["text"]) <= 1900 else r["text"][:1900] + " …"
         body = json.dumps({"username": name[:80], "content": text,
@@ -2673,13 +2831,170 @@ def do_actions():
     do_actions.recent = recent
 
 
+LIVE_BRANCH = "test"   # the live tree (~/comms-deck) runs this branch; nothing else
+LIVE_GUARD_EVERY = 10  # seconds between checks
+
+
+def live_tree_verdict(branch, dirty, pushed):
+    """What to do about the live tree: "ok", "restore" or "alert".
+
+    On 2026-11-26 an agent checked out its own branch in ~/comms-deck twice,
+    and every service ran unreviewed code until someone noticed. The tree
+    goes back on LIVE_BRANCH by itself only when nothing can be lost: no
+    uncommitted change to a tracked file, and the commit is on a remote
+    branch. Otherwise STOX and the crew are told, and nothing is touched.
+    """
+    if branch == LIVE_BRANCH:
+        return "ok"
+    return "restore" if (not dirty and pushed) else "alert"
+
+
+def guard_live_tree(state):
+    """Keep the live tree on LIVE_BRANCH (see live_tree_verdict). `state`
+    remembers what was last reported, so one slip makes one note."""
+    tree = PROGRAM.parent
+    if tree != HOME / "comms-deck" or not (tree / ".git").exists():
+        return  # a worktree or a copy: not the live tree
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(tree), *args], capture_output=True,
+                              text=True, timeout=20)
+
+    branch = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    if not branch or branch == LIVE_BRANCH:
+        state.pop("reported", None)
+        return
+    head = git("rev-parse", "--short", "HEAD").stdout.strip()
+    dirty = bool(git("status", "--porcelain", "--untracked-files=no").stdout.strip())
+    pushed = bool(git("branch", "-r", "--contains", "HEAD").stdout.strip())
+    verdict = live_tree_verdict(branch, dirty, pushed)
+    if verdict == "restore":
+        r = git("checkout", "-q", LIVE_BRANCH)
+        if r.returncode == 0:
+            log(f"the live tree was on {branch} ({head}); put it back on {LIVE_BRANCH}")
+            text = (f"The live comms-deck (~/comms-deck) was switched to {branch} ({head}), so "
+                    f"every service was running unreviewed code. Its work is safe on GitHub, so "
+                    f"I've put the live tree back on {LIVE_BRANCH}. Agents: work in a git "
+                    f"worktree, never in ~/comms-deck.")
+            send("comms-deck", "owner", text)
+            send("comms-deck", "all", text, quiet=True)
+            state.pop("reported", None)
+            return
+        verdict = "alert"
+    key = (branch, head, dirty, pushed)
+    if state.get("reported") == key:
+        return
+    state["reported"] = key
+    why = ("it has uncommitted changes" if dirty else "its commit isn't pushed anywhere")
+    log(f"the live tree is on {branch} ({head}), not {LIVE_BRANCH}; {why}, so left as it is")
+    text = (f"The live comms-deck (~/comms-deck) is on {branch} ({head}), not {LIVE_BRANCH}, so "
+            f"every service is running unreviewed code. I haven't switched it back because {why}. "
+            f"Whoever did this: commit and push your work, move it to a worktree, then put "
+            f"~/comms-deck back on {LIVE_BRANCH}.")
+    send("comms-deck", "owner", text)
+    send("comms-deck", "all", text, quiet=True)
+
+
+STATUS_SNAPSHOT_EVERY = 2  # seconds
+
+
+def write_status_snapshot():
+    """status.json: what `status --json` prints, written by the service so the
+    warp core can read a file instead of starting Python every 2 s (about
+    0.35 s of CPU each time; Y, t28). Written whole, then renamed into place."""
+    path = DATA / "status.json"
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(status_json(), allow_nan=False))
+    os.replace(tmp, path)
+
+
+# The "bots help bots come online" pass (the owner, 2026-11-27): once a seat
+# can read and answer notes, it gets one note naming the seats that are
+# down, so it can spend a turn helping them back. The service watches the
+# roster every WELCOME_CHECK seconds; a seat already online when the service
+# started isn't greeted, and a seat is greeted at most once per
+# WELCOME_EVERY.
+
+# States that mean a seat can take a note and answer it: a live agent
+# process, or an app seat whose connector is up (a draft in its box still
+# counts - its own tools answer notes even while the deck's are held).
+ONLINE_STATES = {"idle", "busy", "connected", "draft in box"}
+WELCOME_EVERY = int(setting("WELCOME_EVERY", "21600"))  # seconds between greetings
+WELCOME_CHECK = 15                                     # seconds between passes
+
+
+def seat_live_state(seat):
+    """The seat's current state, or None for the owner."""
+    if seat in AGENTS:
+        return load_seat(seat).get("state")
+    if seat in APP_SEATS:
+        return app_seat_state(seat)
+    return None
+
+
+def welcome_pass(seen, greeted, now_ts=None):
+    """One pass of the online-watch: greet the seats that just came online.
+
+    `seen` maps seat -> was-online as of the last pass; `greeted` maps seat
+    -> when it was last told who's down. The first pass only fills `seen`,
+    so a service restart doesn't re-greet the whole roster.
+    """
+    now_ts = time.time() if now_ts is None else now_ts
+    states = {seat: seat_live_state(seat) for seat in tuple(AGENTS) + APP_SEATS}
+    was_online = dict(seen)
+    first = not seen
+    online = {seat: state in ONLINE_STATES and not seat_spent(seat)
+              for seat, state in states.items()}
+    seen.clear()
+    seen.update(online)
+    if first:
+        return
+    # Down and worth mentioning: not online, not spent (nobody can hurry a
+    # limit reset), and not remote (nothing on this desktop reaches it).
+    down = [seat for seat, state in states.items()
+            if not online[seat] and not seat_spent(seat)
+            and APP_PROCESS.get(seat) != "remote"]
+    if not down:
+        return
+    who = ", ".join(f"{shown_name(seat)} ({states[seat]})" for seat in down)
+    for seat, is_online in online.items():
+        # Only a seat that was down last pass and can answer now: one that
+        # was already online at the seed pass never "came online" at all.
+        if not is_online or was_online.get(seat):
+            continue
+        last = greeted.get(seat)
+        if last is not None and now_ts - last < WELCOME_EVERY:
+            continue
+        greeted[seat] = now_ts
+        send("deck", seat,
+             f"You're online and can answer notes. These seats are down: {who}. "
+             "If you can help bring them back - reopen their window or app - do it, "
+             "then send the deck a note saying what you tried.")
+        log(f"welcomed {seat} online; down: {', '.join(down)}")
+
+
 def serve():
     """Run forever: wake agents, drive Grok Bot seats, refresh usage, copy records, mirror to Discord."""
     log(f"comms-deck serving on {MACHINE}; data in {DATA}")
     threading.Thread(target=otel_serve, daemon=True).start()
     last_sync, discord_wait_until, last_usage = 0.0, 0.0, 0.0
     notify_pos = 0
+    live_guard, last_live_check = {}, 0.0
+    last_snapshot = 0.0
+    welcome_seen, welcome_greeted, last_welcome = {}, {}, 0.0
     while True:
+        if time.time() - last_snapshot >= STATUS_SNAPSHOT_EVERY:
+            last_snapshot = time.time()
+            try:
+                write_status_snapshot()
+            except Exception as error:  # the warp core falls back to `status --json`
+                log(f"couldn't write the status snapshot: {error}")
+        if time.time() - last_live_check >= LIVE_GUARD_EVERY:
+            last_live_check = time.time()
+            try:
+                guard_live_tree(live_guard)
+            except Exception as error:  # the guard must never stop the service
+                log(f"live tree check failed: {error}")
         if fresh_code():
             log("the program changed on disk; restarting the service on the new code")
             run_fresh()
@@ -2700,6 +3015,12 @@ def serve():
             do_actions()
         except Exception as error:  # an action must never stop the service
             log(f"desktop actions failed: {error}")
+        if time.time() - last_welcome >= WELCOME_CHECK:
+            last_welcome = time.time()
+            try:
+                welcome_pass(welcome_seen, welcome_greeted)
+            except Exception as error:  # the welcome pass must never stop the service
+                log(f"welcome pass failed: {error}")
         if time.time() - last_usage >= 30:
             last_usage = time.time()
             try:
@@ -2779,7 +3100,7 @@ def chat_lines(r, width):
     """The terminal lines for one record, wrapped to `width`."""
     import textwrap
     esc = "\033["
-    name = lambda seat: "You" if seat == "owner" else seat.title()
+    name = shown_name
     who = f"{esc}1;38;5;{colour(r['from'])}m{name(r['from'])}{esc}0m"
     if r["kind"] == "message":
         to = "everyone" if r["to"] == "all" else ", ".join(name(t) for t in r["to"].split("+"))
@@ -2935,6 +3256,11 @@ def seat_spent(seat, now=None):
     return spent_reset(usage, spent_mark(seat, now), now) is not None
 
 
+def finite_or_none(x):
+    """x, or None when it is missing, infinite or NaN (none of which is JSON)."""
+    return x if x is not None and math.isfinite(x) else None
+
+
 def spent_reset(data, marked=None, now=None):
     """The later of the meter's reset and the mark's, or None if neither says spent."""
     times = [t for t in (limit_reset(data, now), marked) if t is not None]
@@ -2995,6 +3321,12 @@ AVAILABILITY = {"ready": 0, "busy": 1, "stuck": 3, "draft in box": 3,
                 "spent": 7}  # idle until its limit resets: always the bottom (the owner, 07:23)
 
 
+def seat_title(seat, online=False):
+    """A seat's display name. Easter egg (the owner, 2026-11-26): Gravity is
+    Gravity while offline and Antigravity while it's online."""
+    return "Antigravity" if seat == "gravity" and online else seat.title()
+
+
 def availability(seat, state, now=None, snap=None):
     """How available `seat` is, as the ACTIVITY panel shows it and the router uses it.
 
@@ -3018,7 +3350,7 @@ def availability(seat, state, now=None, snap=None):
             "shade": shade, "waiting": waiting, "usage": usage}
 
 
-ROUTABLE = ("claude", "grok", "gravity")  # agents a task can be handed to (not codex or app seats)
+ROUTABLE = ("claude", "grok", "gravity", "codex")  # agents an @deck task can be handed to (not app seats); codex back 2026-11-27
 
 
 def most_available(seats=ROUTABLE, now=None):
@@ -4082,7 +4414,7 @@ def activity_panel(width):
         summary = "" if spent else task_summary(doing if word == "busy" else "", snap["waiting"].get(seat, ()))
         name_shade, square_shade = (shade, shade) if spent else (colour(seat), 33)
         rows.append((*a["rank"], order,
-                     [f"  \033[38;5;{name_shade}m{seat.title():8}\033[0m "
+                     [f"  \033[38;5;{name_shade}m{seat_title(seat, word in ('busy', 'ready', 'stuck')):8}\033[0m "
                       f"\033[38;5;{shade}m{state_text}\033[0m"
                       + (f" \033[38;5;{square_shade}m{squares}\033[0m" if squares else "")]
                      + ([f"    \033[2m↳ {summary}\033[0m"] if summary else [])))
@@ -4374,9 +4706,9 @@ def look_crew(cols, rows, records, snap, busy, split, now):
                  breathe_style(colour(s), k + phase) if on else f"38;5;{colour(s)}")
         state = (snap["seats"].get(s) or {}).get("state", "")
         dim = state in ("away", "not set up", "no chat yet")
-        label(cx, min(h - 1, cy + spread + 5), f"[{s}{' ●' if on else ''}]",
+        label(cx, min(h - 1, cy + spread + 5), f"[{seat_title(s, not dim).lower()}{' ●' if on else ''}]",
               "2;38;5;244" if dim else f"1;38;5;{colour(s)}")
-    label(*pos["owner"], "( YOU )", "1;38;5;255")
+    label(*pos["owner"], f"( {OWNER_NAME} )", "1;38;5;255")
     out = []
     for r in range(rows):
         row, cur = "", None
@@ -4488,16 +4820,23 @@ def look_screen(cols, body_h, shown, records, now):
     busy = busy_seats(snap)
     split = context_split()
     lw, cw, rw = look_widths(cols)
-    usage = usage_panel(lw - 4)[2:]  # its own USAGE heading is in the frame now
+    usage = usage_panel(rw - 4)[2:]  # its own USAGE heading is in the frame now
+    parts = look_activity_parts(activity_panel(lw - 4))
+    # 02 sits under 01 on the left and 03 on the right (swapped by the
+    # owner, 2026-11-26). Short of room, 02 drops the "↳ last note" lines
+    # (one row per seat) and is cut to fit, rather than look_stack skipping it.
+    crew_h = max(10, int(body_h * 0.45))
+    room = body_h - crew_h - 4
+    if len(parts["activity"]) > room:
+        parts["activity"] = [l for l in parts["activity"]
+                             if not ANSI.sub("", l).lstrip().startswith("↳")][:max(room, 0)]
     left = look_stack([
-        (max(10, int(body_h * 0.45)), lambda w, h: look_frame(
+        (crew_h, lambda w, h: look_frame(
             "01", "CREW", "who talks to whom", look_tag(bool(busy), f"{len(busy)} WORKING"),
             LOOK_ACCENT["crew"], w, h, look_crew(w - 4, h - 4, records, snap, busy, split, now))),
-        # The look drops 03's own head line, so the /sort choice takes the
-        # frame's subtitle (a narrow column would cut it off the end).
-        (None, lambda w, h: look_frame("03", "USAGE", "allocation · spend"
-                                       if usage_sort() == "provider" else f"sorted by {usage_sort()}", "",
-                                       LOOK_ACCENT["usage"], w, h, fit_column(usage, h - 4))),
+        (None, lambda w, h: look_frame(
+            "02", "ACTIVITY", "ready order", look_tag(bool(busy)), LOOK_ACCENT["activity"], w, h,
+            parts["activity"][:h - 4])),
     ], lw, body_h)
     alerts = [l for l in notify_lines(cw - 4) if ANSI.sub("", l).strip()][:6]
     centre_panels = [(None, lambda w, h: look_frame(
@@ -4507,11 +4846,17 @@ def look_screen(cols, body_h, shown, records, now):
         centre_panels.append((len(alerts) + 4, lambda w, h: look_frame(
             "07", "ALERTS", "desktop notifications", "", LOOK_ACCENT["alerts"], w, h, alerts)))
     centre = look_stack(centre_panels, cw, body_h)
-    parts = look_activity_parts(activity_panel(rw - 4))
-    right_panels = [(len(parts["activity"]) + 4, lambda w, h: look_frame(
-        "02", "ACTIVITY", "ready order", look_tag(bool(busy)), LOOK_ACCENT["activity"], w, h, parts["activity"]))]
+    tasks_h = len(parts["tasks"]) + 4 if parts["tasks"] else 0
+    # 03 takes what it needs (cut to the column if short of room); 06 the rest.
+    usage_h = min(len(usage) + 4, max(body_h - tasks_h, 0))
+    right_panels = [
+        # The look drops 03's own head line, so the /sort choice takes the
+        # frame's subtitle (a narrow column would cut it off the end).
+        (usage_h, lambda w, h: look_frame("03", "USAGE", "allocation · spend"
+                                          if usage_sort() == "provider" else f"sorted by {usage_sort()}", "",
+                                          LOOK_ACCENT["usage"], w, h, fit_column(usage, h - 4)))]
     if parts["tasks"]:
-        right_panels.append((len(parts["tasks"]) + 4, lambda w, h: look_frame(
+        right_panels.append((tasks_h, lambda w, h: look_frame(
             "05", "TASKS", "one task, one holder", "", LOOK_ACCENT["tasks"], w, h, parts["tasks"])))
     right_panels.append((None, lambda w, h: look_frame(
         "06", "CONTEXT SPLIT", "the shared pool", look_tag(bool(busy), "GLOWING", "STILL"),
@@ -4613,9 +4958,9 @@ def chat(history=200, hide_private=False):
         if typed:
             shown_text = typed[-(cols - 12):]
             highlighted = MENTION.sub(lambda m: f"\033[1;38;5;{colour(m.group(1).lower())}m@{m.group(1)}\033[0m", shown_text)
-            line = f"  \033[1;38;5;{colour('owner')}myou ›\033[0m {highlighted}\033[7m \033[0m"
+            line = f"  \033[1;38;5;{colour('owner')}m{OWNER_NAME.lower()} ›\033[0m {highlighted}\033[7m \033[0m"
         else:
-            line = (f"  \033[1;38;5;{colour('owner')}myou ›\033[0m \033[7m \033[0m\033[2m type a note · "
+            line = (f"  \033[1;38;5;{colour('owner')}m{OWNER_NAME.lower()} ›\033[0m \033[7m \033[0m\033[2m type a note · "
                     + " ".join(f"@{s}" for s in SEATS if s != "owner" and s not in HIDDEN_SEATS) + " · no @ = everyone\033[0m")
         if notice and time.time() < notice_until:
             line += f"   \033[38;5;{196 if notice.startswith('no seat') else 78}m{notice}\033[0m"
@@ -4673,7 +5018,9 @@ def chat(history=200, hide_private=False):
                     raise FreshCode  # nothing half typed: reopen on the new code (after the finally)
                 # The animation clock (04:02, tuned to devin's review): only
                 # the busy bars' shimmer runs the fast clock -- the loop
-                # wakes every ~4 ms and frames go out on a 120 fps cap
+                # wakes every ~16 ms and frames go out on a 30 fps cap (STOX,
+                # 2026-11-26: at 120 fps the full chat held ~45% of a core and
+                # froze kitty on the 4480 px screen; was 120)
                 # (measured: ~1.4 ms to build a frame cached, so plenty of
                 # headroom; kitty syncs and drops what can't keep up). A
                 # ticking countdown (a spent reset, an app seat's next
@@ -4685,10 +5032,11 @@ def chat(history=200, hide_private=False):
                 # 0.25 s polls, 1-2 s redraws. (#66, devin: a live ms
                 # countdown redraws at 10 fps, between the two.)
                 animating = getattr(usage_panel, "running", False) or (look and getattr(look_crew, "moving", False))
-                gap = 1 / 120 if animating else (0.1 if getattr(activity_panel, "fast", False)
+                gap = 1 / 30 if animating else (0.1 if getattr(activity_panel, "fast", False)
                                                  else 1 if getattr(activity_panel, "ticking", False) else 2)
                 if look:
-                    gap = max(gap, 1 / 15)  # a look frame costs tens of ms: 15 fps, not 120
+                    gap = max(gap, 1 / 5)  # a look frame costs tens of ms: at 15 fps the full chat held
+                                           # ~40% of a core on this 8 GB box; 5 fps (STOX, 2026-11-26)
                 if look and (changed or time.time() - last_draw >= gap):
                     body = rows - 4 - (1 if tty else 0)  # the strip (3), the ticker, the chat box
                     screen = ["\033[H", "\n".join(look_screen(cols, body, shown, records, time.time()))]
@@ -4725,9 +5073,9 @@ def chat(history=200, hide_private=False):
                     last_draw = time.time()
                 if tty:
                     import select
-                    select.select([sys.stdin], [], [], 1 / 240 if animating else 0.25)
+                    select.select([sys.stdin], [], [], 1 / 60 if animating else 0.25)
                 else:
-                    time.sleep(1 / 240 if animating else 0.25)
+                    time.sleep(1 / 60 if animating else 0.25)
         finally:
             if saved_tty is not None:
                 import termios
@@ -4735,6 +5083,755 @@ def chat(history=200, hide_private=False):
                 out.write("\033[?2004l")
             out.write("\033[0m\033[2J\033[H\033[?25h")
             out.flush()
+
+
+# -----------------------------------------------------------------------------
+# SECTION 9b: mail - a small email client for the owner's Proton account
+# -----------------------------------------------------------------------------
+#
+# The owner reads and sends mail from the window on the mail desktop
+# (workspace 10, Super+9). It talks to Proton Mail Bridge on localhost
+# (IMAP 127.0.0.1:1143, SMTP 127.0.0.1:1025 unless mail.json says otherwise):
+# Bridge is the only door Proton opens to outside programs, and the owner
+# signs in to it themselves. The Bridge password is the first line of
+# ~/.config/comms-deck/mail.secret (chmod 600); the address and ports are in
+# mail.json next to it ("password" there works too). Neither is ever logged
+# or sent anywhere, and the client only reads the mailbox (BODY.PEEK), so
+# opening a message never marks it read on the server.
+#
+# The sync is its own: the screen re-checks the inbox every minute while
+# it's open, so no agent has to stay up for mail to arrive.
+
+MAIL_POLL = 60  # seconds between inbox checks while the screen is open
+ESC_GRACE = 0.05  # a lone Esc sits this long waiting for a split sequence
+MAIL_KEYS = {"\033[A": "up", "\033[B": "down", "\033[C": "right", "\033[D": "left",
+             "\033[H": "home", "\033[F": "end", "\033[1~": "home", "\033[4~": "end",
+             "\033[3~": "delete", "\033[5~": "pgup", "\033[6~": "pgdn",
+             "\033OA": "up", "\033OB": "down", "\033OC": "right", "\033OD": "left",
+             "\033OH": "home", "\033OF": "end"}
+
+
+def mail_settings():
+    """The mail client's setup, or None when it isn't configured yet.
+
+    mail.json: {"address": "...", "imap_host": ..., "imap_port": ...,
+    "smtp_host": ..., "smtp_port": ...}. mail.secret: the Bridge password,
+    one line. Nothing here is ever logged or sent anywhere.
+    """
+    cfg = read_json(CONFIG / "mail.json", None)
+    if not isinstance(cfg, dict) or not cfg.get("address"):
+        return None
+    secret = CONFIG / "mail.secret"
+    password = ""
+    if secret.exists():
+        lines = secret.read_text().splitlines()
+        password = lines[0].strip() if lines else ""
+    password = password or str(cfg.get("password") or "")
+    if not password:
+        return None
+    return {"address": str(cfg["address"]), "password": password,
+            "imap": (str(cfg.get("imap_host") or "127.0.0.1"), int(cfg.get("imap_port") or 1143)),
+            "smtp": (str(cfg.get("smtp_host") or "127.0.0.1"), int(cfg.get("smtp_port") or 1025))}
+
+
+def mail_loopback(host):
+    """True for 127.x, ::1 and localhost — the only hosts allowed plain Bridge."""
+    import ipaddress
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host.lower().rstrip(".") == "localhost"
+
+
+def mail_tls_context(host):
+    """SSL context for the Bridge. Loopback gets an unverified context (the
+    cert is self-signed and the connection never leaves the machine); any
+    other host gets full certificate verification."""
+    import ssl
+    ctx = ssl.create_default_context()
+    if mail_loopback(host):
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def mail_imap_open(settings):
+    """Connect to the Bridge's IMAP port, STARTTLS when offered (required
+    off-loopback), and log in. Returns the open IMAP4."""
+    import imaplib
+    host, port = settings["imap"]
+    imap = imaplib.IMAP4(host, port, timeout=20)
+    try:
+        if imap.has_capability("STARTTLS"):
+            imap.starttls(mail_tls_context(host))
+        elif not mail_loopback(host):
+            raise ValueError(f"{host}:{port} offers no STARTTLS; refusing plain login")
+        imap.login(settings["address"], settings["password"])
+    except Exception:
+        try:
+            imap.logout()
+        except Exception:
+            pass
+        raise
+    return imap
+
+
+def mail_decode(value):
+    """A header value as plain text (encoded words decoded)."""
+    import email.header
+    try:
+        return str(email.header.make_header(email.header.decode_header(value or "")))
+    except Exception:
+        return value or ""
+
+
+def mail_stamp(date_text):
+    """A Date header as a unix timestamp, or 0 when it can't be read."""
+    import email.utils
+    try:
+        return email.utils.parsedate_to_datetime(date_text).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+
+
+def mail_envelope(raw):
+    """One inbox row from a message's headers (or a whole raw message)."""
+    import email.utils
+    msg = email.message_from_bytes(raw)
+    name, addr = email.utils.parseaddr(mail_decode(msg.get("From", "")))
+    date = mail_decode(msg.get("Date", ""))
+    stamp = mail_stamp(date)
+    return {"from": name or addr, "addr": addr,
+            "subject": mail_decode(msg.get("Subject", "")) or "(no subject)",
+            "date": date, "stamp": stamp,
+            "when": time.strftime("%d %b %H:%M", time.localtime(stamp)) if stamp else ""}
+
+
+def mail_body_text(raw):
+    """The readable text of a raw RFC822 message: text/plain preferred, HTML stripped."""
+    import email
+    import html as html_mod
+    msg = email.message_from_bytes(raw)
+    plain, rich = [], []
+    for part in msg.walk():
+        if part.get_content_maintype() == "multipart" or part.get_content_disposition() == "attachment":
+            continue
+        if part.get_content_type() == "text/plain":
+            plain.append(part)
+        elif part.get_content_type() == "text/html":
+            rich.append(part)
+
+    def body_of(part):
+        raw_part = part.get_payload(decode=True)
+        if raw_part is None:
+            raw_part = part.get_payload()
+            return raw_part if isinstance(raw_part, str) else ""
+        try:
+            return raw_part.decode(part.get_content_charset() or "utf-8", "replace")
+        except LookupError:
+            return raw_part.decode("utf-8", "replace")
+
+    if plain:
+        return "\n".join(body_of(p) for p in plain).strip()
+    if rich:
+        text = "\n".join(body_of(p) for p in rich)
+        text = re.sub(r"(?is)<(script|style).*?</\1>", " ", text)
+        text = re.sub(r"(?s)<[^>]+>", " ", text)
+        return re.sub(r"[ \t]+", " ", html_mod.unescape(text)).strip()
+    if msg.get_content_maintype() == "text":
+        return body_of(msg)
+    return ""
+
+
+def mail_inbox(settings, limit=60):
+    """The inbox's newest `limit` messages as envelope dicts with `uid`, oldest first.
+
+    Read-only: BODY.PEEK never sets \\Seen, and the mailbox is only SELECTed
+    readonly, so looking never marks anything read on the server.
+    """
+    rows = []
+    imap = mail_imap_open(settings)
+    try:
+        typ, _ = imap.select("INBOX", readonly=True)
+        if typ != "OK":
+            return rows
+        typ, data = imap.uid("search", None, "ALL")
+        uids = (data[0] or b"").split()[-limit:] if typ == "OK" else []
+        for i in range(0, len(uids), 20):
+            chunk = ",".join(u.decode() for u in uids[i:i + 20])
+            typ, fetched = imap.uid("fetch", chunk, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])")
+            if typ != "OK":
+                continue
+            for item in fetched:
+                if not isinstance(item, tuple) or len(item) != 2:
+                    continue
+                meta, literal = item
+                m = re.search(rb"UID (\d+)", meta if isinstance(meta, bytes) else b"")
+                body = literal[0] if isinstance(literal, list) and literal else b""
+                if m and body:
+                    row = mail_envelope(body)
+                    row["uid"] = m.group(1).decode()
+                    rows.append(row)
+    finally:
+        try:
+            imap.logout()
+        except Exception:
+            pass
+    rows.sort(key=lambda r: (r["stamp"], int(r["uid"])))
+    return rows
+
+
+def mail_read_message(settings, uid):
+    """One whole message as (envelope, plain-text body), or (None, "") when it's gone."""
+    imap = mail_imap_open(settings)
+    try:
+        imap.select("INBOX", readonly=True)
+        typ, fetched = imap.uid("fetch", str(uid), "(BODY.PEEK[])")
+        raw = b""
+        for item in fetched:
+            if isinstance(item, tuple) and item[1]:
+                raw = item[1][0] if isinstance(item[1], list) else item[1]
+                break
+        if not raw:
+            return None, ""
+        return mail_envelope(raw), mail_body_text(raw)
+    finally:
+        try:
+            imap.logout()
+        except Exception:
+            pass
+
+
+def mail_send(settings, to, subject, body):
+    """Send one plain-text email through the Bridge's SMTP port. None, or the error."""
+    import datetime
+    import smtplib
+    from email.message import EmailMessage
+    from email.utils import format_datetime, make_msgid
+    msg = EmailMessage()
+    msg["From"] = settings["address"]
+    msg["To"] = to
+    msg["Subject"] = subject
+    msg["Date"] = format_datetime(datetime.datetime.now().astimezone())
+    msg["Message-ID"] = make_msgid("comms-deck")
+    msg.set_content(body or "")
+    try:
+        smtp = smtplib.SMTP(settings["smtp"][0], settings["smtp"][1], timeout=20)
+        try:
+            host = settings["smtp"][0]
+            try:
+                smtp.ehlo()  # has_extn only sees features after EHLO
+            except smtplib.SMTPHeloError:
+                pass
+            if smtp.has_extn("STARTTLS"):
+                smtp.starttls(context=mail_tls_context(host))
+            elif not mail_loopback(host):
+                raise ValueError(f"{host}:{settings['smtp'][1]} offers no STARTTLS; refusing plain login")
+            smtp.login(settings["address"], settings["password"])
+            smtp.send_message(msg)
+        finally:
+            smtp.quit()
+    except Exception as error:
+        return str(error)
+    return None
+
+
+def mail_seen_uids():
+    """Uids the owner has opened, kept locally so the server flags stay untouched."""
+    return set(str(u) for u in (read_json(DATA / "mail-seen.json", []) or []))
+
+
+def mail_mark_seen(uid):
+    seen = mail_seen_uids() | {str(uid)}
+    write_json(DATA / "mail-seen.json", sorted(seen)[-2000:])
+
+
+# -- the compose editor: a tiny text buffer with a (row, col) cursor --------
+
+
+def te_clamp(text, cur):
+    """Keep a [row, col] cursor inside `text`."""
+    row, col = cur
+    lines = text.split("\n")
+    return [max(0, min(row, len(lines) - 1)), max(0, min(col, len(lines[min(max(row, 0), len(lines) - 1)])))]
+
+
+def te_insert(text, cur, ch):
+    """Insert `ch` at the cursor; returns (text, cur)."""
+    row, col = cur
+    lines = text.split("\n")
+    lines[row] = lines[row][:col] + ch + lines[row][col:]
+    return "\n".join(lines), [row, col + len(ch)]
+
+
+def te_newline(text, cur):
+    """Enter at the cursor: split the line, cursor to the start of the new one."""
+    row, col = cur
+    lines = text.split("\n")
+    lines[row:row + 1] = [lines[row][:col], lines[row][col:]]
+    return "\n".join(lines), [row + 1, 0]
+
+
+def te_backspace(text, cur):
+    """Delete the character before the cursor, joining lines at a line start."""
+    row, col = cur
+    lines = text.split("\n")
+    if col:
+        lines[row] = lines[row][:col - 1] + lines[row][col:]
+        return "\n".join(lines), [row, col - 1]
+    if row:
+        prev = len(lines[row - 1])
+        lines[row - 1:row + 1] = [lines[row - 1] + lines[row]]
+        return "\n".join(lines), [row - 1, prev]
+    return text, cur
+
+
+def te_delete(text, cur):
+    """Delete the character at the cursor, joining lines at a line end."""
+    row, col = cur
+    lines = text.split("\n")
+    if col < len(lines[row]):
+        lines[row] = lines[row][:col] + lines[row][col + 1:]
+        return "\n".join(lines), cur
+    if row < len(lines) - 1:
+        lines[row:row + 2] = [lines[row] + lines[row + 1]]
+        return "\n".join(lines), cur
+    return text, cur
+
+
+def te_move(text, cur, key):
+    """Arrow/Home/End movement for the compose editor."""
+    row, col = cur
+    lines = text.split("\n")
+    if key == "left":
+        if col:
+            col -= 1
+        elif row:
+            row, col = row - 1, len(lines[row - 1])
+    elif key == "right":
+        if col < len(lines[row]):
+            col += 1
+        elif row < len(lines) - 1:
+            row, col = row + 1, 0
+    elif key == "up":
+        if row:
+            row -= 1
+            col = min(col, len(lines[row]))
+    elif key == "down":
+        if row < len(lines) - 1:
+            row += 1
+            col = min(col, len(lines[row]))
+    elif key == "home":
+        col = 0
+    elif key == "end":
+        col = len(lines[row])
+    return te_clamp(text, [row, col])
+
+
+def te_cursor_line(line, col, width):
+    """One compose line with the cursor cell in reverse video, fitted to `width`."""
+    line = line[:width]
+    col = min(col, len(line))
+    cell = line[col] if col < len(line) else " "
+    rest = line[col + 1:] if col < len(line) else ""
+    return fit(line[:col] + "\033[7m" + cell + "\033[0m" + rest, width)
+
+
+def mail():
+    """The mail screen: inbox on the left, the open message on the right,
+    a compose editor over both. Quits on q/Esc at the inbox; restarts itself
+    on new code like the chat screen does."""
+    settings = mail_settings()
+    out = sys.stdout
+    tty = sys.stdin.isatty()
+    if not tty:
+        # A script or a pipe: just say whether the client is set up.
+        if settings:
+            print(f"comms-deck mail: configured for {settings['address']} "
+                  f"(imap {settings['imap'][0]}:{settings['imap'][1]}, smtp {settings['smtp'][0]}:{settings['smtp'][1]}); "
+                  "run `comms-deck mail` in a terminal for the screen.")
+        else:
+            print("comms-deck mail: not set up yet. Create ~/.config/comms-deck/mail.json "
+                  "({\"address\": \"...\"}) and ~/.config/comms-deck/mail.secret (the Bridge password), "
+                  "then run `comms-deck mail` in a terminal.")
+        return
+
+    saved_tty = None
+    if tty:
+        import termios
+        import tty as tty_mod
+        saved_tty = termios.tcgetattr(sys.stdin)
+        tty_mod.setcbreak(sys.stdin)
+        attrs = termios.tcgetattr(sys.stdin)
+        attrs[0] &= ~termios.IXON  # Ctrl+S is the compose screen's send key, not XOFF
+        termios.tcsetattr(sys.stdin, termios.TCSANOW, attrs)
+        out.write("\033[?2004h")  # bracketed paste
+
+    S = {"mode": "list", "sel": 0, "msgs": [], "open": None, "scroll": 0,
+         "compose": None, "return_mode": "list", "seen": mail_seen_uids(),
+         "notice": "", "notice_until": 0.0, "last_poll": 0.0, "quitting": False}
+    decoder = __import__("codecs").getincrementaldecoder("utf-8")(errors="ignore")
+    pending_esc = ""
+    pending_since = 0.0
+    in_paste = False
+
+    def flash(text, seconds=6):
+        S["notice"], S["notice_until"] = text, time.time() + seconds
+
+    def refresh_mail(force=False):
+        if not force and time.time() - S["last_poll"] < MAIL_POLL:
+            return
+        S["last_poll"] = time.time()
+        try:
+            S["msgs"] = mail_inbox(settings)
+            S["sel"] = min(S["sel"], max(0, len(S["msgs"]) - 1))
+        except Exception as error:
+            flash("mail unreachable: " + str(error)[:80], 10)
+
+    def open_message(row):
+        try:
+            env, text = mail_read_message(settings, row["uid"])
+        except Exception as error:
+            env, text = row, f"(couldn't read the message: {error})"
+        S["open"] = {"row": row, "env": env or row, "text": text}
+        S["scroll"] = 0
+        mail_mark_seen(row["uid"])
+        S["seen"].add(str(row["uid"]))
+        S["mode"] = "read"
+
+    def compose_end(compose, name):
+        lines = compose[name].split("\n")
+        compose["cur"] = [len(lines) - 1, len(lines[-1])]
+
+    def compose_go(compose, name):
+        compose["field"] = name
+        compose_end(compose, name)
+
+    def start_compose(reply=None):
+        to, subject = "", ""
+        if reply:
+            to = reply.get("addr") or reply.get("from") or ""
+            subject = reply.get("subject") or ""
+            if subject and not subject.lower().startswith("re:"):
+                subject = "Re: " + subject
+        S["compose"] = {"to": to, "subject": subject, "body": "", "field": "to", "cur": [0, 0]}
+        compose_end(S["compose"], "to")
+        S["return_mode"] = S["mode"]
+        S["mode"] = "compose"
+
+    def compose_send():
+        compose = S["compose"]
+        to = compose["to"].strip()
+        if not to:
+            flash("compose: no recipient")
+            return
+        subject = compose["subject"].strip() or "(no subject)"
+        error = mail_send(settings, to, subject, compose["body"])
+        if error:
+            flash("send failed: " + error[:80], 10)
+            return
+        flash("sent to " + to, 4)
+        S["compose"] = None
+        S["mode"] = S["return_mode"]
+        refresh_mail(force=True)
+
+    def compose_key(key):
+        """One key in the compose editor. Returns True when Esc cancels it."""
+        compose = S["compose"]
+        name = compose["field"]
+        text, cur = compose[name], compose["cur"]
+        order = ["to", "subject", "body"]
+        if key in ("left", "right", "home", "end"):
+            compose["cur"] = te_move(text, cur, key)
+        elif key in ("up", "down"):
+            if name == "body":
+                compose["cur"] = te_move(text, cur, key)
+                if key == "up" and cur[0] == 0:  # up from the body's first line: the subject
+                    compose_go(compose, "subject")
+            elif key == "down":
+                compose_go(compose, order[min(order.index(name) + 1, 2)])
+            else:
+                compose_go(compose, order[max(order.index(name) - 1, 0)])
+        elif key == "tab":
+            compose_go(compose, order[(order.index(name) + 1) % 3])
+        elif key == "enter":
+            if name == "body":
+                compose["body"], compose["cur"] = te_newline(compose["body"], cur)
+            else:
+                compose_go(compose, order[min(order.index(name) + 1, 2)])
+        elif key == "backspace":
+            compose[name], compose["cur"] = te_backspace(text, cur)
+        elif key == "delete":
+            compose[name], compose["cur"] = te_delete(text, cur)
+        elif key == "esc":
+            return True
+        return False
+
+    def type_char(c):
+        if S["mode"] == "compose":
+            compose = S["compose"]
+            name = compose["field"]
+            compose[name], compose["cur"] = te_insert(compose[name], compose["cur"], c)
+        elif S["mode"] == "list":
+            if c == "j" and S["msgs"]:
+                S["sel"] = min(len(S["msgs"]) - 1, S["sel"] + 1)
+            elif c == "k":
+                S["sel"] = max(0, S["sel"] - 1)
+            elif c == "c":
+                start_compose()
+            elif c == "g":
+                refresh_mail(force=True)
+            elif c == "q":
+                S["quitting"] = True
+        elif S["mode"] == "read":
+            if c == "j":
+                S["scroll"] += 1
+            elif c == "k":
+                S["scroll"] = max(0, S["scroll"] - 1)
+            elif c == "r" and S["open"]:
+                start_compose(reply=S["open"]["row"])
+            elif c == "c":
+                start_compose()
+            elif c == "g":
+                refresh_mail(force=True)
+            elif c == "q":
+                S["mode"] = "list"
+
+    def press(key):
+        mode = S["mode"]
+        if key == "ctrl_s" and mode == "compose":
+            compose_send()
+        elif mode == "list":
+            if key == "down" and S["msgs"]:
+                S["sel"] = min(len(S["msgs"]) - 1, S["sel"] + 1)
+            elif key == "up":
+                S["sel"] = max(0, S["sel"] - 1)
+            elif key == "enter" and S["msgs"]:
+                open_message(S["msgs"][S["sel"]])
+            elif key == "g":
+                refresh_mail(force=True)
+            elif key in ("q", "esc"):
+                S["quitting"] = True
+        elif mode == "read":
+            if key in ("down", "pgdn"):
+                S["scroll"] += 10 if key == "pgdn" else 1
+            elif key in ("up", "pgup"):
+                S["scroll"] = max(0, S["scroll"] - (10 if key == "pgup" else 1))
+            elif key == "g":
+                refresh_mail(force=True)
+            elif key in ("esc", "q"):
+                S["mode"] = "list"
+        elif mode == "compose":
+            if compose_key(key):  # Esc cancels the compose
+                S["compose"] = None
+                S["mode"] = S["return_mode"]
+
+    def handle_keys():
+        """Read whatever was typed. Returns True so the screen redraws."""
+        nonlocal pending_esc, pending_since, in_paste
+        import select
+        ready = tty and select.select([sys.stdin], [], [], 0)[0]
+        if pending_esc == "\033" and not ready and time.time() - pending_since > ESC_GRACE:
+            pending_esc = ""
+            press("esc")  # a lone Esc, not the start of a split sequence
+            return True
+        if not ready:
+            return False
+        chars = pending_esc + decoder.decode(os.read(sys.stdin.fileno(), 4096))
+        pending_esc = ""
+        i = 0
+        while i < len(chars):
+            c = chars[i]
+            if c == "\033":
+                m = re.match(r"\033\[[0-9;?]*[ -/]*[@-~]", chars[i:])
+                if m:
+                    seq = m.group(0)
+                    in_paste = {"\033[200~": True, "\033[201~": False}.get(seq, in_paste)
+                    key = MAIL_KEYS.get(seq)
+                    if key and not in_paste:
+                        press(key)
+                    i += len(seq)
+                    continue
+                if i + 1 >= len(chars) or chars[i + 1] == "[":
+                    pending_esc = chars[i:]  # sequence split across reads
+                    pending_since = time.time()
+                    break
+                press("esc")
+            elif c in "\r\n":
+                if in_paste:
+                    if S["mode"] == "compose":
+                        compose = S["compose"]
+                        compose["body"], compose["cur"] = te_insert(compose["body"], compose["cur"], "\n")
+                else:
+                    press("enter")
+            elif c == "\t":
+                press("tab")
+            elif c in "\x7f\x08":
+                press("backspace")
+            elif c == "\x13":
+                press("ctrl_s")
+            elif c >= " ":
+                type_char(c)
+            i += 1
+        return True
+
+    def mail_header(cols):
+        unread = sum(1 for m in S["msgs"] if str(m["uid"]) not in S["seen"])
+        left = "comms-deck mail · " + settings["address"]
+        right = f"{unread} unread"
+        ver = deck_version()
+        if ver:
+            right += " · " + ver
+        if visible_len(left) + visible_len(right) + 2 > cols:
+            left = "comms-deck mail"
+        if visible_len(left) + visible_len(right) + 2 > cols:
+            right = f"{unread} unread"
+        gap = max(1, cols - visible_len(left) - visible_len(right) - 2)
+        return ("\033[48;5;234m\033[1;38;5;255m " + left + " " * gap
+                + "\033[2;38;5;244m" + right + " \033[0m")
+
+    def list_row(row, width, selected):
+        unread = str(row["uid"]) not in S["seen"]
+        dot = "\033[38;5;208m●\033[0m" if unread else "\033[2m·\033[0m"
+        frm = (row["from"] or row["addr"])[:18].ljust(18)
+        when = row.get("when", "")
+        w_subj = max(8, width - 1 - 1 - 18 - 4 - len(when) - 2)
+        subj = row["subject"][:w_subj].ljust(w_subj)
+        plain = f"{'●' if unread else '·'} {frm}  {subj}  {when}"
+        if selected:
+            return "\033[7m" + fit(ANSI.sub("", plain), width)
+        return fit(dot + " " + frm + "  " + subj + "  " + when, width)
+
+    def read_lines(width, height):
+        import textwrap
+        op = S["open"]
+        env = op["env"]
+        head = []
+        sender = env.get("from") or ""
+        if env.get("addr") and env["addr"] != sender:
+            sender += f" <{env['addr']}>"
+        head += [f"From:    {sender}", f"Subject: {env.get('subject', '')}",
+                 f"Date:    {env.get('when') or env.get('date', '')}", ""]
+        body = []
+        for para in op["text"].splitlines() or [""]:
+            body += textwrap.wrap(para, max(20, width - 2)) or [""]
+        lines = head + body
+        start = min(max(0, S["scroll"]), max(0, len(lines) - height))
+        return [fit(l, width) for l in lines[start:start + height]]
+
+    def compose_lines(width, height):
+        compose = S["compose"]
+        lines = []
+        for name, label in (("to", "To"), ("subject", "Subject")):
+            active = compose["field"] == name
+            if active:
+                shown = te_cursor_line(compose[name], compose["cur"][1], width - len(label) - 4)
+            else:
+                shown = fit(compose[name], width - len(label) - 4)
+            lines.append(f"  {label + ':':<10} " + shown)
+        lines.append("  " + "\033[2m" + "─" * (width - 4) + "\033[0m")
+        body_h = max(1, height - len(lines))
+        blines = compose["body"].split("\n") or [""]
+        cur = compose["cur"] if compose["field"] == "body" else None
+        start = 0
+        if cur and cur[0] >= body_h:
+            start = min(cur[0] - body_h + 1, max(0, len(blines) - body_h))
+        for i in range(start, min(len(blines), start + body_h)):
+            if cur and i == cur[0]:
+                lines.append("  " + te_cursor_line(blines[i], cur[1], width - 2))
+            else:
+                lines.append("  " + fit(blines[i], width - 2))
+        return lines
+
+    def mail_input(cols):
+        hints = {"list": "j/k move · enter read · c compose · g refresh · q quit",
+                 "read": "j/k scroll · r reply · c compose · g refresh · esc back",
+                 "compose": "tab/↑↓ field · enter newline · ctrl+s send · esc cancel"}[S["mode"]]
+        line = "  " + hints
+        if time.time() < S["notice_until"]:
+            line += "   " + S["notice"]
+        return "\033[48;5;234m" + fit("\033[2m" + line, cols) + "\033[0m"
+
+    def mail_frame(cols, rows):
+        inner = cols - 2  # one-space margin each side
+        body_h = rows - 2  # the header band and the input line
+        split = cols >= 90 and S["mode"] != "compose"
+        if S["mode"] == "compose":
+            content = compose_lines(inner, body_h)
+        elif split:
+            list_w = max(28, min(44, inner // 3))
+            pane_w = inner - list_w - 3
+            # newest at the bottom, like the chat screen
+            shown = S["msgs"][-body_h:] if len(S["msgs"]) > body_h else S["msgs"]
+            offset = len(S["msgs"]) - len(shown)
+            left = [list_row(row, list_w, offset + i == S["sel"]) for i, row in enumerate(shown)]
+            left = ([""] * (body_h - len(left)) + left)[-body_h:]
+            if S["mode"] == "read" and S["open"]:
+                right = read_lines(pane_w, body_h)
+            else:
+                op = S["open"]
+                right = ([fit("From: " + (op["env"].get("from") or ""), pane_w),
+                          fit("Subj: " + op["env"].get("subject", ""), pane_w), ""]
+                         if op else [])
+                right += [fit("enter: read · c: compose", pane_w)]
+            right = (right + [""] * body_h)[:body_h]
+            content = [fit(l, list_w) + " \033[38;5;238m│\033[0m " + fit(r, pane_w)
+                       for l, r in zip(left, right)]
+        else:
+            if S["mode"] == "read" and S["open"]:
+                content = read_lines(inner, body_h)
+            else:
+                shown = S["msgs"][-body_h:] if len(S["msgs"]) > body_h else S["msgs"]
+                offset = len(S["msgs"]) - len(shown)
+                content = [list_row(row, inner, offset + i == S["sel"]) for i, row in enumerate(shown)]
+        content = (content + [""] * body_h)[:body_h]
+        lines = [mail_header(cols), ""] + [" " + l for l in content] + [mail_input(cols)]
+        return [fit(l, cols) for l in lines[:rows]]
+
+    out.write("\033[?25l\033[2J")
+    last_draw = 0.0
+    try:
+        if settings is None:
+            # The setup screen: what to create, then any key closes it.
+            cols, rows = shutil.get_terminal_size((100, 40))
+            notes = ["comms-deck mail isn't set up yet.", "",
+                     "Create ~/.config/comms-deck/mail.json:",
+                     '  {"address": "you@proton.me", "imap_port": 1143, "smtp_port": 1025}',
+                     "and ~/.config/comms-deck/mail.secret (chmod 600) with the",
+                     "Proton Mail Bridge password on the first line.", "",
+                     "Bridge: sudo pacman -S protonmail-bridge, sign in, then",
+                     "run `comms-deck mail` again once Bridge answers.", "", "any key closes this"]
+            frame = ["", "", ""] + ["  " + fit(n, cols - 2) for n in notes] + [""] * (rows - 3 - len(notes))
+            out.write("\033[H" + "\n".join(frame[:rows]) + "\n")
+            out.flush()
+            import select
+            while True:
+                select.select([sys.stdin], [], [], 0.25)
+                if select.select([sys.stdin], [], [], 0)[0]:
+                    os.read(sys.stdin.fileno(), 1024)
+                    break
+        else:
+            while not S["quitting"]:
+                cols, rows = shutil.get_terminal_size((100, 40))
+                refresh_mail()
+                typed = handle_keys()
+                if typed or time.time() - last_draw >= 1 or S["mode"] == "compose":
+                    out.write("\033[H" + "\n".join(mail_frame(cols, rows)) + "\n")
+                    out.flush()
+                    last_draw = time.time()
+                fresh_ok = not (S["mode"] == "compose" and (S["compose"]["to"] or S["compose"]["subject"]
+                                                            or S["compose"]["body"]))
+                if fresh_ok and fresh_code():
+                    raise FreshCode  # nothing half typed: reopen on the new code
+                import select
+                select.select([sys.stdin], [], [], 0.25)
+    finally:
+        if saved_tty is not None:
+            import termios
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, saved_tty)
+            out.write("\033[?2004l")
+        out.write("\033[0m\033[2J\033[H\033[?25h")
+        out.flush()
 
 
 # The status line (`comms-deck statusline --source <agent>`): Claude Code and
@@ -5537,7 +6634,9 @@ def status_json(now=None):
             "paused": int(s.get("auto") or 0) >= AUTO_LIMIT,
             "held_by_draft": bool(s.get("held_by_draft")) or st == "draft in box",
             "retry_at": float(s.get("app_retry_at") or 0) or None,
-            "spent_until": spent_reset(a["usage"], spent_mark(seat, now), now),
+            # Infinity (spent, back time unknown) isn't JSON: the warp core
+            # rejected the whole feed over it. "shown" already says spent.
+            "spent_until": finite_or_none(spent_reset(a["usage"], spent_mark(seat, now), now)),
             "hidden": seat in HIDDEN_SEATS,
         }
     return {"time": now, "machine": MACHINE, "seats": seats}
@@ -5712,7 +6811,8 @@ MCP_TOOLS = [
      "inputSchema": {"type": "object", "required": ["to", "text"], "properties": {
          "to": {"type": "string",
                 "description": "A seat, several seats separated by commas (e.g. 'claude, grok'), "
-                               "'owner', or 'all'. Seats: " + ", ".join(SEATS) + ". A '-seat' token "
+                               "'owner' (" + OWNER_NAME + ", also accepted as '" + OWNER_NAME.lower() + "'), or 'all'. "
+                               "Seats: " + ", ".join(SEATS) + ". A '-seat' token "
                                "drops that seat from the recipients (e.g. 'all -grok')."},
          "text": {"type": "string"},
          "quiet": {"type": "boolean", "description": "Don't wake them; they get it next time."},
@@ -5842,7 +6942,13 @@ def mcp_tool(seat, name, args):
         add_note(seat, str(args.get("text", "")))
         return "Added to the commentary.", False
     if name == "set_status":
-        update_seat(seat, state="busy", doing=describe(args.get("text", "")))
+        text = args.get("text", "")
+        # "idle", "done" or "ready" means the turn is over (Codex found
+        # set_status(text="idle") left her busy, 23:45 on 27 Nov, t69).
+        if text.strip().lower().rstrip(".!") in ("idle", "done", "ready"):
+            update_seat(seat, state="idle", doing="")
+        else:
+            update_seat(seat, state="busy", doing=describe(text))
         return "Status set.", False
     if name == "team_status":
         return status_text(), False
@@ -5982,6 +7088,27 @@ def devin_config(config, cmd):
     return config
 
 
+CODEX_HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd")
+
+
+def codex_hooks(config, cmd):
+    """`config` (~/.codex/hooks.json, as a dict) with the deck's hooks added.
+
+    Other hooks are kept and an earlier comms-deck entry is replaced, so
+    running it twice is once. Codex runs a new or changed hook only after
+    someone trusts it in Codex (/hooks, or the review Codex shows at start):
+    that review is the owner's step, so install never marks them trusted.
+    Codex caps SessionEnd at 3 s.
+    """
+    config = json.loads(json.dumps(config or {}))
+    hooks = config.setdefault("hooks", {})
+    for event in CODEX_HOOK_EVENTS:
+        kept = [e for e in hooks.get(event, []) if "comms-deck hook" not in json.dumps(e)]
+        hooks[event] = kept + [{"hooks": [{"type": "command", "timeout": 3 if event == "SessionEnd" else 10,
+                                           "command": f"{cmd} hook --source codex --event {event}"}]}]
+    return config
+
+
 def devin_mcp_config(config, cmd):
     """`config` (~/.config/devin/mcp_config.json) with the comms-deck server set."""
     config = json.loads(json.dumps(config or {}))
@@ -6092,11 +7219,16 @@ def install(yes):
     step("register the MCP server and status line with Grok (~/.grok/config.toml)",
          lambda: mcp_toml(HOME / ".grok/config.toml", "[mcp_servers.comms-deck]", status_line=True))
     def desktop():
-        """The chat screen's launcher, the scratchpad layout, an app menu
-        entry, and (for a Lua Hyprland config) the rule that puts the chat
-        screen fullscreen on workspace 1."""
-        for name in ("comms-deck-chat", "scratchpad-layout"):
+        """The chat and mail screens' launchers, the scratchpad layout, app
+        menu entries, and (for a Lua Hyprland config) the rules that put the
+        chat screen fullscreen on the comms desktop and the mail screen on mail."""
+        for name in ("comms-deck-chat", "comms-deck-mail", "scratchpad-layout",
+                     "nav-deck", "nav-deck-chat"):
             link(name, here / "desktop" / name)
+        # the 2026-11-26 rename: retire the navigation-deck links a previous
+        # install left behind (a stale link to a renamed file is a broken one)
+        for legacy in ("navigation-deck", "navigation-deck-chat"):
+            (bin_dir / legacy).unlink(missing_ok=True)
         apps = HOME / ".local/share/applications"
         apps.mkdir(parents=True, exist_ok=True)
         (apps / "comms-deck-chat.desktop").write_text(
@@ -6104,16 +7236,52 @@ def install(yes):
             "Comment=Live view of the agents' notes, with usage and a chat box\n"
             f"Exec={bin_dir / 'comms-deck-chat'}\nIcon=utilities-terminal\nTerminal=false\n"
             "Categories=Utility;\n")
+        (apps / "comms-deck-mail.desktop").write_text(
+            "[Desktop Entry]\nType=Application\nName=comms-deck mail\n"
+            "Comment=The owner's mailbox over Proton Mail Bridge\n"
+            f"Exec={bin_dir / 'comms-deck-mail'}\nIcon=utilities-terminal\nTerminal=false\n"
+            "Categories=Network;Office;\n")
+        (apps / "nav-deck.desktop").write_text(
+            "[Desktop Entry]\nType=Application\nName=nav-deck\n"
+            "Comment=Live dashboard of the seats, usage, workspaces and machine vitals\n"
+            f"Exec={bin_dir / 'nav-deck-chat'}\nIcon=utilities-terminal\nTerminal=false\n"
+            "Categories=Utility;\n")
+        (apps / "navigation-deck.desktop").unlink(missing_ok=True)
         lua = HOME / ".config/hypr/hyprland.lua"
-        if lua.exists() and "comms-deck-chat" not in lua.read_text():
-            with open(lua, "a") as f:
-                f.write('\n-- comms-deck chat: the agents\' live notes, fullscreen on workspace 1.\n'
-                        'hl.window_rule({\n    name       = "comms-deck-chat",\n'
-                        '    match      = { class = "^comms-deck-chat$" },\n'
-                        '    workspace  = "1 silent",\n    fullscreen = true,\n})\n')
-            subprocess.run(["hyprctl", "reload"], capture_output=True)
-    step("link the chat screen launcher and scratchpad-layout, add an app menu entry, "
-         "and the Hyprland rule for workspace 1 (Lua config)", desktop)
+        if lua.exists():
+            lua_now = lua.read_text()
+            lua_new = lua_now
+            if "comms-deck-chat" not in lua_now:  # each rule lands once
+                lua_new += ('\n-- comms-deck chat: the agents\' live notes, fullscreen on the comms desktop.\n'
+                            'hl.window_rule({\n    name       = "comms-deck-chat",\n'
+                            '    match      = { class = "^comms-deck-chat$" },\n'
+                            '    workspace  = "1 silent",\n    fullscreen = true,\n})\n')
+            if "comms-deck-mail" not in lua_now:
+                lua_new += ('\n-- comms-deck mail: the owner\'s mailbox, fullscreen on the mail desktop.\n'
+                            'hl.window_rule({\n    name       = "comms-deck-mail",\n'
+                            '    match      = { class = "^comms-deck-mail$" },\n'
+                            '    workspace  = "10 silent",\n    fullscreen = true,\n})\n')
+            if "nav-deck" not in lua_now and "navigation-deck" not in lua_now:
+                lua_new += ('\n-- nav-deck: the seats, usage and workspaces dashboard, fullscreen on the nav deck.\n'
+                            'hl.window_rule({\n    name       = "nav-deck",\n'
+                            '    match      = { class = "^nav-deck$" },\n'
+                            '    workspace  = "9 silent",\n    fullscreen = true,\n})\n')
+            if "warp-core" not in lua_now:
+                lua_new += ('\n-- warp-core: the comms-deck on the GPU, fullscreen on the scratchpad (Super+S).\n'
+                            'hl.window_rule({\n    name       = "warp-core",\n'
+                            '    match      = { class = "^warp-core$" },\n'
+                            '    workspace  = "special:magic silent",\n    fullscreen = true,\n})\n')
+            if "default_name" not in lua_now:  # desktops are decks: numbered, with names
+                lua_new += ('\n-- Desktops are decks: numbered workspaces with names, so the bar sorts\n'
+                            '-- them by number and shows the name (STOX, 2026-11-26).\n'
+                            'for i, name in ipairs({ "comms", "claude", "grok", "vibe", "devin", "gravity",\n'
+                            '                        "lumo", "alice", "nav", "mail", "0" }) do\n'
+                            '    hl.workspace_rule({ workspace = tostring(i), default_name = name })\nend\n')
+            if lua_new != lua_now:
+                lua.write_text(lua_new)
+                subprocess.run(["hyprctl", "reload"], capture_output=True)
+    step("link the chat, mail and nav-deck launchers, add app menu entries, "
+         "and the Hyprland rules for the comms, mail and nav decks (Lua config)", desktop)
 
     def antigravity():
         if not (HOME / ".local/bin/agy").exists() and not shutil.which("agy"):
@@ -6185,6 +7353,22 @@ def install(yes):
     step("register the MCP server with Codex, if installed (~/.codex/config.toml)",
          lambda: mcp_toml(HOME / ".codex/config.toml", "[mcp_servers.comms-deck]"))
 
+    def codex_hook_file():
+        path = HOME / ".codex/hooks.json"
+        if not path.parent.exists():
+            return
+        current = {}
+        if path.exists():
+            try:
+                current = json.loads(path.read_text() or "{}")
+            except ValueError:
+                print(f"     skipped {path}: it isn't plain JSON; add the comms-deck hooks by hand")
+                return
+            shutil.copy(path, path.with_suffix(".json.comms-deck-backup"))
+        path.write_text(json.dumps(codex_hooks(current, cmd), indent=2) + "\n")
+        print("     Codex runs them once they're trusted: in Codex, type /hooks and trust the comms-deck ones")
+    step("add comms-deck hooks to ~/.codex/hooks.json, if Codex is installed (backup kept)", codex_hook_file)
+
     def kitty_conf():
         path = HOME / ".config/kitty/kitty.conf"
         text = path.read_text() if path.exists() else ""
@@ -6252,6 +7436,15 @@ def self_test():
         if not ok:
             failures.append(name)
             print("     " + detail.strip().replace("\n", "\n     "))
+
+    # The live tree goes back on test by itself only when nothing can be lost.
+    check("live tree on test: left alone", live_tree_verdict("test", True, False) == "ok")
+    check("live tree on a pushed, clean branch: restored",
+          live_tree_verdict("devin/x", False, True) == "restore")
+    check("live tree with uncommitted changes: alert only",
+          live_tree_verdict("devin/x", True, True) == "alert")
+    check("live tree on an unpushed commit: alert only",
+          live_tree_verdict("devin/x", False, False) == "alert")
 
     r = run(["send", "grok", "hello grok"], "claude")
     check("send", r.returncode == 0, r.stderr)
@@ -6479,6 +7672,27 @@ def self_test():
     check("Claude's bare > marker uses the next line",
           composer_text("> \nfix the hook\n") == "fix the hook")
     check("a screen with no composer is left alone", composer_text("no prompt here\n") is None)
+    # Codex's composer, as its window drew it on 2026-11-27: a bold › with a
+    # dim placeholder, the model line and the shortcut hints under it.
+    codex_screen = ("\033[m\033[22;1;48:2:30:30:30m›\033[22m \033[22;2mAsk Codex to do anything\n"
+                    "\033[m\033[48:2:30:30:30m \n"
+                    "\033[m  \033[38:2:246:226:183mGPT-6.2-Sol default\033[38:2:132:132:132m · ~\n"
+                    "\033[m  \033[22;1;38:2:221:221:221m←\033[22;38:2:132:132:132m for agents · ? for shortcuts\n")
+    check("an empty Codex composer is safe to paste into",
+          composer_text(drop_placeholders(codex_screen)) == "", repr(drop_placeholders(codex_screen)))
+    check("a Codex draft blocks the paste", composer_text("› old prompt\nwords\n› ship it\n  hints\n") == "ship it")
+    # Devin's composer, as its window drew it on 2026-11-27: a ❭ between two
+    # rules, with a grey (truecolour, colon form) placeholder; an earlier
+    # prompt of the owner's is still on screen above it.
+    devin_screen = ("❭ The chronophage told me you have notes\n\n"
+                    "────────────────────────────────────────\n"
+                    "\033[m❭ \033[38:2:124:124:124mGuide Devin while it works\n"
+                    "\033[m────────────────────────────────────────\n"
+                    "SWE-2 Flash Medium · bypass\n")
+    check("an empty Devin composer is safe to paste into",
+          composer_text(drop_placeholders(devin_screen)) == "", repr(drop_placeholders(devin_screen)))
+    check("a Devin draft blocks the paste",
+          composer_text("────────\n❭ ship it\n────────\nSWE-2\n") == "ship it")
     scrollback = ("│ ❯ old text from another screen │\n> a quoted line in a reply\n"
                   + "words\n" * 20 + claude_empty + "  status line\n")
     check("text in the scrollback above the prompt isn't a draft", composer_text(scrollback) == "",
@@ -6584,6 +7798,42 @@ def self_test():
     check("devin's MCP config names the seat and keeps other servers",
           mcp["mcpServers"]["comms-deck"]["env"] == {"COMMS_DECK_SEAT": "devin"}
           and "other" in mcp["mcpServers"], json.dumps(mcp))
+    # Codex: Claude-style hooks from ~/.codex/hooks.json, turn_id for the turn.
+    codex_file = Path(tmp) / "data/seats/codex.json"
+    run(["send", "codex", "hello codex"], "claude")
+    r = run(["hook", "--source", "codex", "--event", "SessionStart"], "codex",
+            '{"hook_event_name": "SessionStart", "source": "startup", "session_id": "s1"}')
+    ctx = (json.loads(r.stdout or "{}").get("hookSpecificOutput") or {}).get("additionalContext", "")
+    check("codex's SessionStart says how many notes wait and marks it idle",
+          "1 note(s) are waiting" in ctx and (read_json(codex_file, {}) or {}).get("state") == "idle",
+          r.stdout + r.stderr)
+    r = run(["hook", "--source", "codex", "--event", "Stop"], "claude", "{}")
+    check("the codex hook does nothing outside Codex", not r.stdout.strip(), r.stdout)
+    r = run(["hook", "--source", "claude", "--event", "Stop"], "codex", "{}")
+    check("Claude's hooks do nothing inside Codex", not r.stdout.strip(), r.stdout)
+    r = run(["hook", "--source", "codex", "--event", "UserPromptSubmit"], "codex",
+            '{"prompt": "look at the warp core", "turn_id": "t1"}')
+    state = read_json(codex_file, {}) or {}
+    check("codex is busy on a typed prompt; its notes stay for the Stop (no context reply)",
+          state.get("state") == "busy" and state.get("prompt_id") == "t1" and not r.stdout.strip()
+          and len(list((Path(tmp) / "data/inbox/codex").glob("*.json"))) == 1, r.stdout + json.dumps(state))
+    r = run(["hook", "--source", "codex", "--event", "Stop"], "codex", '{"turn_id": "t0", "stop_hook_active": false}')
+    check("an older turn's Stop leaves codex alone", not r.stdout.strip(), r.stdout)
+    r = run(["hook", "--source", "codex", "--event", "Stop"], "codex", '{"turn_id": "t1", "stop_hook_active": false}')
+    out = json.loads(r.stdout or "{}")
+    check("codex's Stop hands the waiting note over as block + reason",
+          out.get("decision") == "block" and "hello codex" in out.get("reason", ""), r.stdout + r.stderr)
+    run(["hook", "--source", "codex", "--event", "Stop"], "codex", '{"turn_id": "t1", "stop_hook_active": true}')
+    check("codex is idle after a Stop with nothing waiting", (read_json(codex_file, {}) or {}).get("state") == "idle")
+    run(["hook", "--source", "codex", "--event", "SessionEnd"], "codex", '{"reason": "other"}')
+    check("codex is away after SessionEnd", (read_json(codex_file, {}) or {}).get("state") == "away")
+    mine = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "my-own-check"}]}]}}
+    once = codex_hooks(mine, "/x/comms-deck")
+    check("codex's hooks.json: four deck hooks, the owner's own kept, twice is once, SessionEnd within 3 s",
+          once == codex_hooks(once, "/x/comms-deck") and len(once["hooks"]["Stop"]) == 2
+          and once["hooks"]["Stop"][0]["hooks"][0]["command"] == "my-own-check"
+          and set(once["hooks"]) == set(CODEX_HOOK_EVENTS)
+          and once["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"] <= 3, json.dumps(once))
     r = run(["mcp-call"], "grok", json.dumps({"seat": "grok", "name": "team_status", "arguments": {}}))
     reply = json.loads(r.stdout or "{}")
     check("an MCP server on old code hands a call to the program on disk (mcp-call)",
@@ -6615,7 +7865,7 @@ def self_test():
         "assert 'Reply here in this chat' in out and 'Your reply goes to grok' in out, out",
         "assert 'send_message' not in out, out",
         "owner_note = x.render([{'from': 'owner', 'to': 'alice', 'time': '2026-11-24 02:50:00', 'text': 'hi'}], 'alice')",
-        "assert 'Your reply goes to the owner' in owner_note, owner_note",
+        "assert 'Your reply goes to Y' in owner_note, owner_note",
         "print('ok')",
     ])
     r = subprocess.run([sys.executable, "-c", code],
@@ -6748,6 +7998,48 @@ def self_test():
           "(0s ago)" in team and "Team at " in team and "more than one agent" in team, team)
     check("Grok's Notification hook matches idle_prompt only",
           grok_hooks("comms-deck")["hooks"]["Notification"][0].get("matcher") == "idle_prompt")
+    # A seat that comes online is told which seats are down, once per greeting
+    # (the owner's t64). Seat states are patched, so no real process matters.
+    Path(f"{tmp}/welcome-config").mkdir(parents=True, exist_ok=True)
+    Path(f"{tmp}/welcome-config/app-seats").write_text("alice\nmystra:remote\n")
+    code = "\n".join([
+        "import importlib.machinery as m, importlib.util as u, json, glob",
+        f"l = m.SourceFileLoader('cd', {me!r}); s = u.spec_from_loader('cd', l)",
+        "x = u.module_from_spec(s); l.exec_module(x)",
+        "states = {'claude': 'idle', 'grok': 'away', 'codex': 'away', 'gravity': 'away',"
+        " 'vibe': 'away', 'devin': 'away', 'alice': 'not set up', 'mystra': 'away'}",
+        "x.load_seat = lambda seat: {'state': states[seat]}",
+        "x.app_seat_state = lambda seat: states[seat]",
+        "x.seat_spent = lambda seat: seat == 'codex'",
+        "seen, greeted = {}, {}",
+        "x.welcome_pass(seen, greeted, 1000.0)",
+        "assert not glob.glob(str(x.DATA / 'inbox' / '*' / '*.json')), 'the first pass only seeds'",
+        "states['grok'] = 'idle'",
+        "x.welcome_pass(seen, greeted, 1010.0)",
+        "deck = [json.load(open(f)) for f in glob.glob(str(x.DATA / 'inbox' / 'grok' / '*.json'))]",
+        "deck = [n for n in deck if n['from'] == 'deck']",
+        "assert len(deck) == 1, deck",
+        "text = deck[0]['text']",
+        "assert 'Alice' in text and 'not set up' in text, text",
+        "assert 'Vibe' in text and 'Devin' in text, text",
+        "assert 'Codex' not in text and 'Mystra' not in text, text",
+        "assert not glob.glob(str(x.DATA / 'inbox' / 'claude' / '*.json')),"
+        " 'a seat online since the seed pass is not greeted'",
+        "x.welcome_pass(seen, greeted, 1020.0)",
+        "assert len(glob.glob(str(x.DATA / 'inbox' / 'grok' / '*.json'))) == 1, 'no re-greet while online'",
+        "states['grok'] = 'away'; x.welcome_pass(seen, greeted, 1030.0)",
+        "states['grok'] = 'idle'",
+        "x.welcome_pass(seen, greeted, 1040.0 + x.WELCOME_EVERY)",
+        "assert len(glob.glob(str(x.DATA / 'inbox' / 'grok' / '*.json'))) == 2,"
+        " 'a later coming-online greets again'",
+        "print('ok')",
+    ])
+    r = subprocess.run([sys.executable, "-c", code],
+                       env=dict(env, COMMS_DECK_HOME=f"{tmp}/welcome-data",
+                                COMMS_DECK_CONFIG=f"{tmp}/welcome-config"),
+                       capture_output=True, text=True, timeout=30)
+    check("a seat that comes online is told which seats are down, once per greeting",
+          r.returncode == 0 and r.stdout.splitlines()[-1].strip() == "ok", r.stdout + r.stderr)
     code = "\n".join([
         "import importlib.machinery as m, importlib.util as u, json",
         f"l = m.SourceFileLoader('cd', {me!r}); s = u.spec_from_loader('cd', l)",
@@ -6791,7 +8083,7 @@ def self_test():
         "two = [{'from':'owner','to':'alice','time':'2026-11-24 07:00:00','text':'hi'},"
         " {'from':'gravity','to':'all','time':'2026-11-24 07:00:00','text':'yo'}]",
         "x.APP_SEATS = tuple(set(x.APP_SEATS) | {'alice'})",
-        "assert 'Your reply goes to the owner' in x.render(two, 'alice')",
+        "assert 'Your reply goes to Y' in x.render(two, 'alice')",
         "assert x.app_delivery_allowed({'open':True,'replying':False,'composer':'draft'}, False, {'auto':0}, 'alice') is False",
         "assert x.app_delivery_allowed(idle, True, {'auto':0}, 'alice') is False",
         "assert x.app_delivery_allowed(idle, False, {'auto':2}, 'alice') is False",
@@ -6839,6 +8131,15 @@ def self_test():
         "assert len(list((x.DATA/'inbox'/'claude').glob('*.json')))==1",
         "x.update_seat('alice', state='idle', app_seen=x.time.time())",
         "assert x.app_seat_state('alice')=='idle'",
+        # t79: an own-app seat whose window is closed is away, even while its
+        # app runs on in the tray; open, it falls through to the MCP check.
+        "x.APP_PROCESS['winseat'] = 'some-app'",
+        "x._windows_cache.update(at=x.time.time() + 60, classes={'kitty'})",
+        "assert x.app_seat_state('winseat')=='away'",
+        "x._windows_cache.update(at=x.time.time() + 60, classes={'kitty', 'some-app'})",
+        "assert x.app_seat_state('winseat')=='not set up'",
+        "x._windows_cache.update(at=x.time.time() + 60, classes=None)",
+        "assert x.app_seat_state('winseat')=='not set up'",
         "print('ok')",
     ])
     r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=30)
@@ -7038,6 +8339,17 @@ def self_test():
         "x.update_seat('codex', state='busy'); x.write_json(x.DATA / 'seats' / 'codex.json', dict(x.load_seat('codex'), updated=1.0))",
         "assert x.wake_seat('codex', stale=True) == (False, 'out of usage until its reset') and x.load_seat('codex')['state'] == 'busy'",
         "x.mark_spent('codex', 'clear', 'claude'); (x.DATA / 'inbox' / 'codex' / 'w1.json').unlink()",
+        # t69: Codex's turns read off its screen when no Stop hook says so.
+        "assert x.screen_says_idle('• Sent Y the report.\\n  Worked for 9s\\n› \\n\\n  GPT-6.2-Sol default · ~')",
+        "assert not x.screen_says_idle('• Working (4s • esc to interrupt)\\n› \\n\\n  GPT-6.2-Sol default · ~')",
+        "assert not x.screen_says_idle('› half a sentence\\n  GPT-6.2-Sol default · ~')",
+        "assert not x.screen_says_idle('Allow this command?\\n  1. Yes  2. No')",
+        "st = dict(x.load_seat('codex'), state='busy', since=x.time.time(), woke_at=0); assert x.settle_from_screen('codex', st) is st",
+        "st = dict(x.load_seat('grok'), state='busy', since=0.0); assert x.settle_from_screen('grok', st) is st",
+        "assert x.screen_says_working('• Working (4s • esc to interrupt)\\n› \\n\\n  GPT') and not x.screen_says_working('› \\n\\n  GPT')",
+        "assert x.settle_seats(['grok']) == [] and x.settle_seats(['nobody']) == []",
+        "x.mcp_call('codex', 'set_status', {'text': 'reviewing #158'}); assert x.load_seat('codex')['state'] == 'busy'",
+        "x.mcp_call('codex', 'set_status', {'text': 'Idle.'}); assert x.load_seat('codex')['state'] == 'idle' and x.load_seat('codex')['doing'] == ''",
         "x.write_json(x.DATA / 'usage' / 'gravity.json', {'time': now, 'data': {'rate_limits': {'five_hour': full(x.time.time() + 600)}}})",
         "x.update_seat('gravity', state='away')",
         "assert x.seat_spent('gravity') and any(s == 'gravity' for s, _, _ in x.current_states())",
@@ -7360,8 +8672,8 @@ def self_test():
     layout = Path(__file__).resolve().parent / "desktop" / "scratchpad-layout"
     r = subprocess.run([sys.executable, str(layout), "--self-test"], env=env,
                        capture_output=True, text=True, timeout=30)
-    check("scratchpad cells tile flush, including Vibe and the shared bottom right",
-          r.returncode == 0 and "layout tiles ok" in r.stdout, r.stdout + r.stderr)
+    check("each agent has its own desktop (Super+1..7) and the warp core the scratchpad",
+          r.returncode == 0 and "desktops ok" in r.stdout, r.stdout + r.stderr)
 
     # --- remote seats (docs/REMOTE.md): join from another device through the git repos ---
     upstream, rlog = Path(tmp) / "remote-upstream", Path(tmp) / "remote-log"
@@ -7470,6 +8782,18 @@ def self_test():
         "plain = '\\n'.join(x.ANSI.sub('', l) for l in x.look_screen(200, 40, shown, recs, time.time()))",
         "assert 'sorted by spend' in plain, 'the look shows the /sort choice in 03\\'s frame'",
         "assert x.set_sort('provider') is None and 'sorted by' not in '\\n'.join(x.look_screen(200, 40, shown, recs, time.time()))",
+        # a short look: 02 (under 01 on the left) still shows, one row a seat
+        "half = '\\n'.join(x.ANSI.sub('', l) for l in x.look_screen(200, 17, shown, recs, time.time()))",
+        "assert '02  ACTIVITY' in half and '\u21b3' not in half, half",
+        # easter egg: Gravity offline, Antigravity online
+        "assert x.seat_title('gravity') == 'Gravity' and x.seat_title('gravity', True) == 'Antigravity' and x.seat_title('grok', True) == 'Grok'",
+        # the owner's name: Y on screens and in notes, "y" and the older
+        # "stox" both accepted as the seat
+        "assert x.shown_name('owner') == 'Y' and x.shown_name('grok') == 'Grok'",
+        "rs, _ = x.send('claude', 'Y', 'hello stox'); assert rs['to'] == 'owner', rs",
+        "rs, _ = x.send('claude', 'stox', 'old name still works'); assert rs['to'] == 'owner', rs",
+        "rs, _ = x.send('claude', 'all -y -stox -grok', 'everyone'); assert 'owner' not in rs['to'], rs",
+        "assert '( Y )' in plain and '( STOX )' not in plain",
         "tick = x.ANSI.sub('', x.look_ticker(400, recs, 0))",
         "assert '(private)' in tick and 'secret plan' not in tick and 'public hello' in tick, tick",
         "print('look ok')",
@@ -7543,6 +8867,41 @@ def self_test():
     ])
     r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=30)
     check("strict cite-check refuses PRs whose text never cites the touched files",
+          r.returncode == 0 and r.stdout.strip() == "ok", r.stdout + r.stderr)
+    # mail: settings, envelope/body parsing and the compose editor. No server
+    # in tests - the IMAP/SMTP paths are thin wrappers over the stdlib, and
+    # the real Bridge check comes once Proton Mail Bridge is installed.
+    Path(f"{tmp}/config").mkdir(parents=True, exist_ok=True)
+    Path(f"{tmp}/config/mail.json").write_text(json.dumps(
+        {"address": "me@example.com", "imap_port": 1143, "smtp_port": 1025}))
+    Path(f"{tmp}/config/mail.secret").write_text("bridge-pass\n")
+    code = "\n".join([
+        "import importlib.machinery as m, importlib.util as u",
+        f"l = m.SourceFileLoader('ml', {me!r}); s = u.spec_from_loader('ml', l)",
+        "x = u.module_from_spec(s); l.exec_module(x)",
+        "st = x.mail_settings()",
+        "assert st and st['address'] == 'me@example.com' and st['imap'] == ('127.0.0.1', 1143) "
+        "and st['smtp'] == ('127.0.0.1', 1025) and st['password'] == 'bridge-pass', st",
+        "raw = (b'From: =?utf-8?q?J=C3=BCrgen?= <j@example.com>\\r\\n'"
+        "       b'Subject: =?utf-8?q?Gr=C3=BC=C3=9Fe?=\\r\\n'"
+        "       b'Date: Wed, 26 Nov 2026 10:00:00 +0000\\r\\n\\r\\nBody text here.')",
+        "env = x.mail_envelope(raw)",
+        "assert env['from'] == 'Jürgen' and env['subject'] == 'Grüße' "
+        "and env['addr'] == 'j@example.com' and env['when'], env",
+        "assert x.mail_body_text(raw) == 'Body text here.'",
+        "html = (b'From: a@b.com\\r\\nSubject: hi\\r\\n'"
+        "        b'Content-Type: text/html; charset=utf-8\\r\\n\\r\\n<p>Hello <b>there</b></p>')",
+        "assert 'Hello there' in x.mail_body_text(html)",
+        "assert x.te_insert('hello', [0, 5], '!') == ('hello!', [0, 6])",
+        "assert x.te_newline('ab', [0, 1]) == ('a\\nb', [1, 0])",
+        "assert x.te_backspace('a\\nb', [1, 0]) == ('ab', [0, 1])",
+        "assert x.te_delete('ab', [0, 1]) == ('a', [0, 1])",
+        "assert x.te_move('ab\\ncd', [0, 1], 'down') == [1, 1]",
+        "assert x.te_move('ab\\ncd', [1, 2], 'up') == [0, 2]",
+        "print('ok')",
+    ])
+    r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=30)
+    check("mail: settings, envelope and body parsing, and the compose editor",
           r.returncode == 0 and r.stdout.strip() == "ok", r.stdout + r.stderr)
     shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{'all passed' if not failures else f'{len(failures)} failed'}")
@@ -7746,11 +9105,12 @@ def main():
     p = sub.add_parser("chat")
     p.add_argument("--hide-private", action="store_true")
     p.add_argument("--history", type=int, default=200)
+    sub.add_parser("mail", help="the mail client (Proton Mail Bridge on localhost; the mail desktop, Super+9)")
     sub.add_parser("serve")
     sub.add_parser("mcp")
     sub.add_parser("mcp-call")  # internal: one tool call for an MCP server running old code
     p = sub.add_parser("hook")
-    p.add_argument("--source", required=True, choices=("claude", "grok", "agy", "vibe", "devin"))
+    p.add_argument("--source", required=True, choices=("claude", "grok", "agy", "vibe", "devin", "codex"))
     p.add_argument("--event", default="")
     p = sub.add_parser("statusline")
     p.add_argument("--source", required=True, choices=("claude", "grok", "agy"))
@@ -7760,6 +9120,8 @@ def main():
     p = sub.add_parser("wake", help="one wake attempt for a seat (for watchdogs)")
     p.add_argument("seat")
     p.add_argument("--stale", action="store_true", help="treat a long-unchanged busy seat as idle")
+    p = sub.add_parser("settle", help="match seats' busy/idle to what their windows show (for watchdogs)")
+    p.add_argument("seats", nargs="*")
     p = sub.add_parser("spent", help="mark a seat spent until its limit resets (for agents with no meter)")
     p.add_argument("seat")
     p.add_argument("until", nargs="+", help="+166h, +90m, +2d, 06:20, 'YYYY-MM-DD HH:MM', or clear")
@@ -7813,6 +9175,11 @@ def main():
                 chat(args.history, args.hide_private)
             except FreshCode:
                 run_fresh()  # the screen has been restored; same window, new code
+        elif args.cmd == "mail":
+            try:
+                mail()
+            except FreshCode:
+                run_fresh()  # the screen has been restored; same window, new code
         elif args.cmd == "serve":
             serve()
         elif args.cmd == "mcp":
@@ -7829,6 +9196,8 @@ def main():
                 statusline(args.source)
             except Exception as error:  # a status line must never break the agent
                 print(f"comms-deck: {error}")
+        elif args.cmd == "settle":
+            print(json.dumps({"screen_turns": list(SCREEN_TURNS), "changed": settle_seats([x.lower() for x in args.seats] or None)}))
         elif args.cmd == "install":
             install(args.yes)
         elif args.cmd == "fetch-remote":

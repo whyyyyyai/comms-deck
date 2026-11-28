@@ -1,0 +1,24 @@
+#!/bin/sh
+# Open the mail view in its own kitty window. One copy, like the chat screen.
+#   comms-deck-mail          fullscreen on the mail desktop, Super+9 (the window rule does it)
+# The mail view talks to Proton Mail Bridge on localhost (IMAP/SMTP); Bridge
+# being down shows an offline banner, it never makes the window fail.
+# Written by: Vibe (2026-11-26)
+class=comms-deck-mail
+hyprctl clients -j | grep -q "\"class\": \"$class\"" && exit 0
+cd "$HOME" || exit 1
+kitty --class "$class" --title "comms-deck mail" \
+    -o font_size=15 -o window_padding_width=24 -o confirm_os_window_close=0 \
+    comms-deck mail &
+# Place it once it has a window. The window rule puts it on the mail desktop,
+# but it can open with gaps, so it is also made fullscreen here.
+for _ in $(seq 1 40); do
+    addr=$(hyprctl clients -j | python3 -c "import json,sys; print(next((c['address'] for c in json.load(sys.stdin) if c['class'] == '$class'), ''))")
+    [ -n "$addr" ] && break
+    sleep 0.25
+done
+[ -n "$addr" ] || exit 0
+sleep 0.5
+hyprctl clients -j | python3 -c "import json,sys; sys.exit(0 if any(c['class'] == '$class' and c['fullscreen'] for c in json.load(sys.stdin)) else 1)" \
+    || hyprctl dispatch "hl.dsp.window.fullscreen({ window = \"address:$addr\" })" >/dev/null
+wait

@@ -134,8 +134,9 @@ It sets up each agent it finds:
   `~/.vibe/config.toml`, if `vibe` is installed. Other hooks are kept.
 - **Codex:** the MCP server in `~/.codex/config.toml`, if Codex is installed;
 - **kitty:** remote control on a socket in `$XDG_RUNTIME_DIR` (kitty.conf);
-- **the desktop:** an app menu entry for the chat screen, and, for a Lua
-  Hyprland config, a rule putting it fullscreen on workspace 1;
+- **the desktop:** app menu entries for the chat and mail screens, and, for
+  a Lua Hyprland config, rules putting them fullscreen on workspaces 1 and
+  2 (`comms-deck-chat`, `comms-deck-mail`);
 - **services:** `comms-deck.service` and `push-courier.service`, started now
   and at every login.
 

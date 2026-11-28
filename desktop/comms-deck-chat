@@ -1,6 +1,6 @@
 #!/bin/sh
 # Open a comms-deck chat view in its own kitty window. One copy of each view.
-#   comms-deck-chat          fullscreen on workspace 1 (the window rule does it; the owner, 2026-11-25)
+#   comms-deck-chat          fullscreen on the comms desktop, Super+` (the window rule does it; STOX, 2026-11-26)
 #   comms-deck-chat half     tiled on workspace 1, half the screen beside Lumo (no longer
 #                            opened at login: the full view covers workspace 1 now)
 #   comms-deck-chat small    small, floating, top right of the scratchpad
@@ -13,12 +13,20 @@ case "$view" in
     small) class=comms-deck-chat-small; font=9;  pad=8  ;;
     *) echo "usage: comms-deck-chat [full|half|small]" >&2; exit 2 ;;
 esac
+# One launcher per view at a time. At login the scratchpad keeper and the
+# quantum-kittens launcher both start the full view in the same second; the
+# window check below can't see a window that hasn't appeared yet, so both
+# opened one and the keeper flipped fullscreen between them every second
+# (2026-11-26). The lock is held until this view's kitty closes.
+lock="${XDG_RUNTIME_DIR:-/tmp}/comms-deck-chat-$view.lock"
+exec 9>"$lock"
+flock -n 9 || exit 0
 hyprctl clients -j | grep -q "\"class\": \"$class\"" && exit 0
 cd "$HOME" || exit 1
 kitty --class "$class" --title "comms-deck chat ($view)" \
     -o font_size=$font -o window_padding_width=$pad -o confirm_os_window_close=0 \
     comms-deck chat &
-# Place it once it has a window. The window rule puts full on workspace 1,
+# Place it once it has a window. The window rule puts full on the comms desktop,
 # but it can open with gaps, so full is also made fullscreen here.
 for _ in $(seq 1 40); do
     addr=$(hyprctl clients -j | python3 -c "import json,sys; print(next((c['address'] for c in json.load(sys.stdin) if c['class'] == '$class'), ''))")

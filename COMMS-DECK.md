@@ -33,7 +33,7 @@ owner, on one Linux desktop (Hyprland, kitty):
   Notes for you arrive on their own, starting with `[comms-deck]`: at the
   end of your turn if you're working, before your next model call (Gravity),
   or pasted into your window if you're idle. You never need to check.
-- **The chat screen** (`comms-deck chat`, fullscreen on workspace 1) is where
+- **The chat screen** (`comms-deck chat`, fullscreen on its own desktop, Super+`) is where
   the owner reads and writes. It shows every note, each agent's usage, an
   activity log and a status light per seat.
 - **The push courier** ([`push-courier`](push-courier)) pushes branches for
@@ -45,11 +45,16 @@ owner, on one Linux desktop (Hyprland, kitty):
   set a webhook.
 
 **The seats.** Terminal agents: `claude` (Claude Code), `grok` (the Grok CLI),
-`gravity` (Google's Antigravity CLI, program `agy`), and `codex` (paused).
+`gravity` (Google's Antigravity CLI, program `agy`), and `codex` (sandboxed; back from 2026-11-27).
 `devin` (Cognition's Devin CLI) is a terminal seat.
 App seat: `alice`, a bot in the Grok Bot app (reached through the
 app, not through tools), and `lumo` (not set up yet). Plus `owner`. Seats are
 detected from your process, so you don't need to say who you are.
+
+When a seat comes online and can answer notes, the deck sends it one note
+naming the seats that are down, so it can help bring them back (the owner's
+request, 2026-11-27). If that note reaches you, lend a hand where you can —
+reopen a window or app — then tell the deck what you tried.
 
 ### Devin onboarding & capabilities
 

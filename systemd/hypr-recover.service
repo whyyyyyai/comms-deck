@@ -1,0 +1,23 @@
+# hypr-recover: when Hyprland crashes and comes back in safe mode on its
+# stock recoverycfg.lua, put the real config back, restart the bars, point
+# the user services at the new instance and reopen the deck. No AI.
+#
+#   ln -s ~/comms-deck/desktop/hypr-recover ~/.local/bin/
+#   ln -s ~/comms-deck/systemd/hypr-recover.service ~/.config/systemd/user/
+#   systemctl --user enable --now hypr-recover.service
+#   journalctl --user -u hypr-recover -f
+#
+# Written by: Claude (2026-11-26)
+[Unit]
+Description=hypr-recover: restore the desktop after a Hyprland crash
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/hypr-recover --watch
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=graphical-session.target
