@@ -393,6 +393,9 @@ impl Material2d for WebcamMaterial {
 #[derive(Component)]
 struct WebcamQuad;
 /// The dark plate shown where the feed would be while the camera is off.
+/// It rides above the whole orbit (z 4.9, under the live quad's 5.0), so by
+/// default planets pass under the window; `layout_seats` lifts the ones
+/// that may cross over it while the frame is black (Y).
 #[derive(Component)]
 struct WebcamPlate;
 /// The CAM badge's backdrop and label: click toggles the camera (Y, t163).
@@ -415,6 +418,12 @@ struct WebcamView {
     material: Option<Handle<WebcamMaterial>>,
     /// Camera toggled off from the CAM badge (~/.local/state/warp-core/webcam-off).
     off: bool,
+    /// The dark plate is what shows (camera off or no signal yet): the
+    /// frame is black, and planets that report no errors may cross over it.
+    black: bool,
+    /// The webcam rectangle (centre, full size) while the section is on
+    /// screen, for the crossing test in `layout_seats`.
+    rect: Option<(Vec2, Vec2)>,
     /// The badge's centre and half-size in world units, for the click test.
     button: Option<(Vec2, Vec2)>,
     /// The pointer is on the badge this frame: it brightens.
@@ -607,6 +616,8 @@ fn webcam(
     }
     // The plate holds the corner whether the camera is off or has no signal,
     // so the HUD drops below it whenever the section is on screen.
+    view.black = on_screen && !feed;
+    view.rect = on_screen.then_some((Vec2::new(cx, cy), Vec2::new(w, h)));
     view.shown_h = if on_screen { h } else { 0.0 };
     if view.shown_h > 0.0 {
         gizmos.rect_2d(
@@ -2445,6 +2456,21 @@ fn seat_z(depth: f32) -> f32 {
     0.5 + 1.5 * depth
 }
 
+/// While the webcam's frame is black, a planet whose seat reports no errors
+/// crosses over the window instead of passing under it (Y). Inside the
+/// frame's rectangle — with the planet's bulk as margin — its z lifts just
+/// over the plate's 4.9, still under the live quad and the HUD. A stuck
+/// seat keeps the default under-pass.
+fn webcam_cross_z(p: Vec2, seat: Option<&SeatInfo>, webcam: &WebcamView) -> Option<f32> {
+    const OVER: f32 = 4.95;
+    if !webcam.black || seat.is_some_and(|s| s.shown == "stuck") {
+        return None;
+    }
+    let (c, size) = webcam.rect?;
+    let half = size * 0.5 + Vec2::splat(120.0);
+    (p - c).abs().cmple(half).all().then_some(OVER)
+}
+
 fn window_size(windows: &Query<&Window>) -> Vec2 {
     windows.iter().next().map(|w| w.size()).unwrap_or(Vec2::new(1280.0, 800.0))
 }
@@ -2552,6 +2578,7 @@ fn layout_seats(
     mut planets: ResMut<Assets<PlanetMaterial>>,
     logos: Res<Logos>,
     layout: Res<Layout>,
+    webcam: Res<WebcamView>,
     time: Res<Time>,
     mut nodes: Query<(Entity, &mut SeatNode, &mut Transform)>,
     group_labels: Query<Entity, With<GroupLabel>>,
@@ -2679,7 +2706,7 @@ fn layout_seats(
         node.depth = (0.5 - 0.5 * (p.y / ry)).clamp(0.0, 1.0);
         tf.translation.x = p.x;
         tf.translation.y = p.y;
-        tf.translation.z = seat_z(node.depth);
+        tf.translation.z = webcam_cross_z(p, deck.seat(&node.name), &webcam).unwrap_or_else(|| seat_z(node.depth));
     }
 }
 
